@@ -18,6 +18,30 @@
 	qcom,board-id = <0 0>;
 	chassis-type = "handset";
 
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		framebuffer: framebuffer@9d200000 {
+			compatible = "simple-framebuffer";
+			memory-region = <&framebuffer_mem>;
+			width = <1440>;
+			height = <3120>;
+			stride = <(1440 * 4)>;
+			format = "a8r8g8b8";
+			clocks = <&gcc GCC_DISP_HF_AXI_CLK>,
+				 <&gcc GCC_DISP_SF_AXI_CLK>;
+		};
+	};
+
+	reserved-memory {
+		framebuffer_mem: memory@9d200000 {
+			reg = <0 0x9d200000 0 0x01200000>;
+			no-map;
+		};
+	};
+
 	vph_pwr: vph-pwr-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "vph_pwr";
@@ -308,7 +332,8 @@
 };
 
 &tlmm {
-	gpio-reserved-ranges = <126 4>;
+	/* ABL 交接后读取 GPIO 93-174 的寄存器不会完成。 */
+	gpio-reserved-ranges = <93 82>;
 };
 
 &ufs_mem_hc {
