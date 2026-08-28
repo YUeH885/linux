@@ -365,16 +365,14 @@
 	vdda18-supply = <&vdda_usb_hs_1p8>;
 };
 
-&usb_1_qmpphy {
-	status = "okay";
-	vdda-phy-supply = <&vreg_l3c_1p2>;
-	vdda-pll-supply = <&vdda_usb_ss_dp_core_1>;
-};
-
 &usb_1 {
+	qcom,select-utmi-as-pipe-clk;
 	status = "okay";
 };
 
 &usb_1_dwc3 {
 	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
 };
