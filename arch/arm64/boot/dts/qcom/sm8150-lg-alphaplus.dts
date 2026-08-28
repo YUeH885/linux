@@ -331,6 +331,11 @@
 	};
 };
 
+&dispcc {
+	/* 主线 DRM 接管前，避免重配 ABL 遗留显示流水线的 PLL。 */
+	status = "disabled";
+};
+
 &tlmm {
 	/* ABL 交接后读取 GPIO 93-174 的寄存器不会完成。 */
 	gpio-reserved-ranges = <93 82>;
