@@ -42,6 +42,15 @@
 		};
 	};
 
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion-polymer";
+		charge-full-design-microamp-hours = <3500000>;
+		voltage-max-design-microvolt = <4430000>;
+		constant-charge-current-max-microamp = <3000000>;
+		constant-charge-voltage-max-microvolt = <4430000>;
+	};
+
 	vph_pwr: vph-pwr-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "vph_pwr";
@@ -412,6 +421,11 @@
 	maximum-speed = "high-speed";
 	phys = <&usb_1_hsphy>;
 	phy-names = "usb2-phy";
+};
+
+&pm8150b_charger {
+	monitored-battery = <&battery>;
+	status = "okay";
 };
 
 &remoteproc_mpss {
