@@ -1414,4 +1414,17 @@ config TOUCHSCREEN_HIMAX_HX83112B
 	  To compile this driver as a module, choose M here: the
 	  module will be called himax_hx83112b.
 
+config TOUCHSCREEN_LG_SW42000
+	tristate "LG SW42000 触摸屏控制器"
+	depends on I2C && DRM_PANEL
+	help
+	  选择 Y 以启用 LG SW42000 触摸屏控制器支持。
+	  驱动通过 I2C 与控制器通信，并使用标准 input
+	  Type-B multitouch 接口上报触点。控制器可跟随
+	  DRM panel 状态进入深度休眠或恢复正常扫描。
+
+	  不确定时选择 N。
+
+	  选择 M 可编译为名为 lg-sw42000 的模块。
+
 endif
