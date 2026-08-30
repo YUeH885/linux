@@ -378,13 +378,68 @@
 };
 
 &dispcc {
-	/* 主线 DRM 接管前，避免重配 ABL 遗留显示流水线的 PLL。 */
-	status = "disabled";
+	status = "okay";
+};
+
+&gmu {
+	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8150/a640_zap.mdt";
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	status = "okay";
+	vdda-supply = <&vreg_l3c_1p2>;
+
+	panel@0 {
+		compatible = "lg,sw43410";
+		reg = <0>;
+
+		vddi-supply = <&vreg_l14a_1p8>;
+		vpnl-supply = <&vreg_l17a_3p0>;
+		reset-gpios = <&tlmm 6 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&mdp_vsync_default>;
+		pinctrl-names = "default";
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	qcom,te-source = "mdp_vsync_p";
+	remote-endpoint = <&panel_in>;
+};
+
+&mdss_dsi0_phy {
+	status = "okay";
+	vdds-supply = <&vreg_l5a_0p875>;
 };
 
 &tlmm {
 	/* ABL 交接后读取 GPIO 93-174 的寄存器不会完成。 */
 	gpio-reserved-ranges = <93 82>;
+
+	mdp_vsync_default: mdp-vsync-default-state {
+		pins = "gpio8";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
 };
 
 &ufs_mem_hc {
