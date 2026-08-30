@@ -496,6 +496,42 @@ static const struct rc_parameters_data rc_parameters_pre_scr[] = {
 	{ /* sentinel */ }
 };
 
+/* DSC 1.1 SCR1 为 8bpp 数据流增加的码率控制参数。 */
+static const struct rc_parameters_data rc_parameters_scr1[] = {
+	{
+		.bpp = DSC_BPP(8), .bpc = 8,
+		{ 512, 15, 6144, 3, 12, 11, 11, {
+			{ 0, 4, 2 }, { 0, 4, 0 }, { 1, 5, 0 }, { 1, 6, -2 },
+			{ 3, 7, -4 }, { 3, 7, -6 }, { 3, 7, -8 }, { 3, 8, -8 },
+			{ 3, 9, -8 }, { 3, 10, -10 }, { 5, 10, -10 }, { 5, 11, -12 },
+			{ 5, 11, -12 }, { 9, 12, -12 }, { 12, 13, -12 }
+			}
+		}
+	},
+	{
+		.bpp = DSC_BPP(8), .bpc = 10,
+		{ 512, 15, 6144, 7, 16, 15, 15, {
+			{ 0, 8, 2 }, { 4, 8, 0 }, { 5, 9, 0 }, { 5, 10, -2 },
+			{ 7, 11, -4 }, { 7, 11, -6 }, { 7, 11, -8 }, { 7, 12, -8 },
+			{ 7, 13, -8 }, { 7, 14, -10 }, { 9, 14, -10 }, { 9, 15, -12 },
+			{ 9, 15, -12 }, { 13, 16, -12 }, { 16, 17, -12 }
+			}
+		}
+	},
+	{
+		.bpp = DSC_BPP(8), .bpc = 12,
+		{ 512, 15, 6144, 11, 20, 19, 19, {
+			{ 0, 12, 2 }, { 4, 12, 0 }, { 9, 13, 0 }, { 9, 14, -2 },
+			{ 11, 15, -4 }, { 11, 15, -6 }, { 11, 15, -8 }, { 11, 16, -8 },
+			{ 11, 17, -8 }, { 11, 18, -10 }, { 13, 18, -10 },
+			{ 13, 19, -12 }, { 13, 19, -12 }, { 17, 20, -12 },
+			{ 20, 23, -12 }
+			}
+		}
+	},
+	{ /* sentinel */ }
+};
+
 /*
  * Selected Rate Control Related Parameter Recommended Values from DSC v1.2, v1.2a, v1.2b and
  * DSC_v1.1_E1 specs.
@@ -1257,6 +1293,9 @@ int drm_dsc_setup_rc_params(struct drm_dsc_config *vdsc_cfg, enum drm_dsc_params
 		break;
 	case DRM_DSC_1_1_PRE_SCR:
 		data = rc_parameters_pre_scr;
+		break;
+	case DRM_DSC_1_1_SCR:
+		data = rc_parameters_scr1;
 		break;
 	case DRM_DSC_1_2_422:
 		data = rc_parameters_1_2_422;
