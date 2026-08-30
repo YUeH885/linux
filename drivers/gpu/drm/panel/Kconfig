@@ -500,6 +500,20 @@ config DRM_PANEL_LG_SW43408
 	  pixel. It provides a MIPI DSI interface to the host and has a
 	  built-in LED backlight.
 
+config DRM_PANEL_LG_SW43410
+	tristate "LG SW43410 面板"
+	depends on GPIOLIB
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	select DRM_DISPLAY_DSC_HELPER
+	select DRM_DISPLAY_HELPER
+	help
+	  启用 LG SW43410 AMOLED 面板支持。
+	  该面板分辨率为 1440x3120@60Hz，
+	  通过四 lane MIPI DSI 使用 DSC 1.1 SCR1，
+	  并提供内建 DCS 背光控制。
+
 config DRM_PANEL_LXD_M9189A
 	tristate "LXD M9189A MIPI-DSI LCD panel"
 	depends on OF
