@@ -141,6 +141,12 @@ dsi_mgr_phy_enable(int id,
 	struct msm_dsi *sdsi = dsi_mgr_get_dsi(DSI_CLOCK_SLAVE);
 	int ret;
 
+	if (msm_dsi->phy_enabled) {
+		msm_dsi_phy_get_shared_timings(msm_dsi->phy,
+					       &shared_timings[id]);
+		return 0;
+	}
+
 	/* In case of bonded DSI, some registers in PHY1 have been programmed
 	 * during PLL0 clock's set_rate. The PHY1 reset called by host1 here
 	 * will silently reset those PHY1 registers. Therefore we need to reset
@@ -185,6 +191,7 @@ static void dsi_mgr_phy_disable(int id)
 	 * first controller only when the second controller is disabled.
 	 */
 	msm_dsi->phy_enabled = false;
+	msm_dsi->ulps_enabled = false;
 	if (IS_BONDED_DSI() && mdsi && sdsi) {
 		if (!mdsi->phy_enabled && !sdsi->phy_enabled) {
 			msm_dsi_phy_disable(sdsi->phy);
@@ -230,13 +237,23 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 		goto host_on_fail;
 	}
 
+	if (msm_dsi->ulps_enabled) {
+		ret = msm_dsi_phy_set_ulps(msm_dsi->phy, false);
+		if (ret) {
+			dev_err(&msm_dsi->pdev->dev,
+				"failed to exit ULPS: %d\n", ret);
+			goto host_power_off;
+		}
+		msm_dsi->ulps_enabled = false;
+	}
+
 	if (is_bonded_dsi && msm_dsi1) {
 		ret = msm_dsi_host_power_on(msm_dsi1->host,
 				&phy_shared_timings[DSI_1], is_bonded_dsi, msm_dsi1->phy);
 		if (ret) {
 			pr_err("%s: power on host1 failed, %d\n",
 							__func__, ret);
-			goto host1_on_fail;
+			goto host_power_off;
 		}
 	}
 
@@ -250,7 +267,7 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 
 	return 0;
 
-host1_on_fail:
+host_power_off:
 	msm_dsi_host_power_off(host);
 host_on_fail:
 	dsi_mgr_phy_disable(id);
@@ -338,6 +355,7 @@ static void dsi_mgr_bridge_post_disable(struct drm_bridge *bridge)
 	struct msm_dsi *msm_dsi1 = dsi_mgr_get_dsi(DSI_1);
 	struct mipi_dsi_host *host = msm_dsi->host;
 	bool is_bonded_dsi = IS_BONDED_DSI();
+	bool keep_phy = false;
 	int ret;
 
 	DBG("id=%d", id);
@@ -364,6 +382,17 @@ static void dsi_mgr_bridge_post_disable(struct drm_bridge *bridge)
 	if (is_bonded_dsi && msm_dsi1)
 		msm_dsi_host_disable_irq(msm_dsi1->host);
 
+	if (msm_dsi->ulps_suspend_enabled) {
+		ret = msm_dsi_phy_set_ulps(msm_dsi->phy, true);
+		if (ret) {
+			dev_err(&msm_dsi->pdev->dev,
+				"failed to enter ULPS: %d\n", ret);
+		} else {
+			msm_dsi->ulps_enabled = true;
+			keep_phy = true;
+		}
+	}
+
 	/* Save PHY status if it is a clock source */
 	msm_dsi_phy_pll_save_state(msm_dsi->phy);
 
@@ -379,7 +408,8 @@ static void dsi_mgr_bridge_post_disable(struct drm_bridge *bridge)
 	}
 
 disable_phy:
-	dsi_mgr_phy_disable(id);
+	if (!keep_phy)
+		dsi_mgr_phy_disable(id);
 }
 
 static void dsi_mgr_bridge_mode_set(struct drm_bridge *bridge,
@@ -568,6 +598,8 @@ int msm_dsi_manager_register(struct msm_dsi *msm_dsi)
 	}
 
 	msm_dsim->dsi[id] = msm_dsi;
+	msm_dsi->ulps_suspend_enabled = of_property_read_bool(
+		msm_dsi->pdev->dev.of_node, "qcom,suspend-ulps-enabled");
 
 	ret = dsi_mgr_parse_of(msm_dsi->pdev->dev.of_node, id);
 	if (ret) {

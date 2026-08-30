@@ -474,9 +474,9 @@ int dpu_encoder_helper_wait_for_irq(struct dpu_encoder_phys *phys_enc,
 
 	/* return EWOULDBLOCK since we know the wait isn't necessary */
 	if (phys_enc->enable_state == DPU_ENC_DISABLED) {
-		DRM_ERROR("encoder is disabled id=%u, callback=%ps, IRQ=[%d, %d]\n",
-			  DRMID(phys_enc->parent), func,
-			  DPU_IRQ_REG(irq_idx), DPU_IRQ_BIT(irq_idx));
+		DRM_DEBUG_KMS("encoder is disabled id=%u, callback=%ps, IRQ=[%d, %d]\n",
+			      DRMID(phys_enc->parent), func,
+			      DPU_IRQ_REG(irq_idx), DPU_IRQ_BIT(irq_idx));
 		return -EWOULDBLOCK;
 	}
 

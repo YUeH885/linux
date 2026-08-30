@@ -21,6 +21,7 @@ struct msm_dsi_phy_ops {
 	void (*save_pll_state)(struct msm_dsi_phy *phy);
 	int (*restore_pll_state)(struct msm_dsi_phy *phy);
 	bool (*set_continuous_clock)(struct msm_dsi_phy *phy, bool enable);
+	int (*set_ulps)(struct msm_dsi_phy *phy, bool enable);
 	int (*parse_dt_properties)(struct msm_dsi_phy *phy);
 };
 

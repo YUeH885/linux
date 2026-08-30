@@ -43,6 +43,8 @@ struct msm_dsi {
 
 	struct device *phy_dev;
 	bool phy_enabled;
+	bool ulps_suspend_enabled;
+	bool ulps_enabled;
 
 	int id;
 };
@@ -144,6 +146,9 @@ int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
 			struct msm_dsi_phy_clk_request *clk_req,
 			struct msm_dsi_phy_shared_timings *shared_timings);
 void msm_dsi_phy_disable(struct msm_dsi_phy *phy);
+void msm_dsi_phy_get_shared_timings(struct msm_dsi_phy *phy,
+			struct msm_dsi_phy_shared_timings *shared_timings);
+int msm_dsi_phy_set_ulps(struct msm_dsi_phy *phy, bool enable);
 void msm_dsi_phy_set_usecase(struct msm_dsi_phy *phy,
 			     enum msm_dsi_phy_usecase uc);
 void msm_dsi_phy_pll_save_state(struct msm_dsi_phy *phy);
@@ -152,4 +157,3 @@ void msm_dsi_phy_snapshot(struct msm_disp_state *disp_state, struct msm_dsi_phy 
 bool msm_dsi_phy_set_continuous_clock(struct msm_dsi_phy *phy, bool enable);
 
 #endif /* __DSI_CONNECTOR_H__ */
-

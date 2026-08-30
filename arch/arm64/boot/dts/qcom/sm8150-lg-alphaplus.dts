@@ -220,8 +220,8 @@
 		};
 
 		vreg_l17a_3p0: ldo17 {
-			regulator-min-microvolt = <2856000>;
-			regulator-max-microvolt = <3008000>;
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3000000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 	};
@@ -400,6 +400,7 @@
 &mdss_dsi0 {
 	status = "okay";
 	vdda-supply = <&vreg_l3c_1p2>;
+	qcom,suspend-ulps-enabled;
 
 	panel@0 {
 		compatible = "lg,sw43410";
@@ -408,8 +409,9 @@
 		vddi-supply = <&vreg_l14a_1p8>;
 		vpnl-supply = <&vreg_l17a_3p0>;
 		reset-gpios = <&tlmm 6 GPIO_ACTIVE_LOW>;
-		pinctrl-0 = <&mdp_vsync_default>;
-		pinctrl-names = "default";
+		pinctrl-0 = <&panel_reset_active &mdp_vsync_default>;
+		pinctrl-1 = <&panel_reset_sleep &mdp_vsync_default>;
+		pinctrl-names = "default", "sleep";
 
 		port {
 			panel_in: endpoint {
@@ -433,6 +435,20 @@
 &tlmm {
 	/* ABL 交接后读取 GPIO 93-174 的寄存器不会完成。 */
 	gpio-reserved-ranges = <93 82>;
+
+	panel_reset_active: panel-reset-active-state {
+		pins = "gpio6";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	panel_reset_sleep: panel-reset-sleep-state {
+		pins = "gpio6";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
 
 	mdp_vsync_default: mdp-vsync-default-state {
 		pins = "gpio8";
@@ -480,6 +496,10 @@
 
 &pm8150b_charger {
 	monitored-battery = <&battery>;
+	status = "okay";
+};
+
+&pon_pwrkey {
 	status = "okay";
 };
 

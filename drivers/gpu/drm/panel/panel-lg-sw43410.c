@@ -10,6 +10,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/regulator/consumer.h>
 #include <linux/string.h>
 
@@ -32,8 +33,82 @@ struct sw43410_panel {
 	struct regulator_bulk_data *supplies;
 	struct gpio_desc *reset_gpio;
 	struct drm_dsc_config dsc;
+	bool vddi_enabled;
+	bool vpnl_enabled;
 };
 
+static int sw43410_power_on(struct sw43410_panel *ctx)
+{
+	int ret;
+
+	ret = pinctrl_pm_select_default_state(&ctx->link->dev);
+	if (ret < 0)
+		return ret;
+	usleep_range(5000, 6000);
+
+	ret = regulator_set_load(ctx->supplies[0].consumer,
+				 ctx->supplies[0].init_load_uA);
+	if (ret < 0)
+		return ret;
+
+	if (!ctx->vddi_enabled) {
+		ret = regulator_enable(ctx->supplies[0].consumer);
+		if (ret < 0)
+			goto reset_vddi_load;
+		ctx->vddi_enabled = true;
+	}
+
+	msleep(20);
+	ret = regulator_set_load(ctx->supplies[1].consumer,
+				 ctx->supplies[1].init_load_uA);
+	if (ret < 0)
+		goto disable_vddi;
+
+	ret = regulator_enable(ctx->supplies[1].consumer);
+	if (ret < 0)
+		goto disable_vddi;
+	ctx->vpnl_enabled = true;
+
+	usleep_range(5000, 6000);
+	return 0;
+
+disable_vddi:
+	regulator_set_load(ctx->supplies[1].consumer, 0);
+	regulator_set_load(ctx->supplies[0].consumer, 80);
+	if (!regulator_disable(ctx->supplies[0].consumer))
+		ctx->vddi_enabled = false;
+	return ret;
+
+reset_vddi_load:
+	regulator_set_load(ctx->supplies[0].consumer, 80);
+	return ret;
+}
+
+static int sw43410_power_off(struct sw43410_panel *ctx)
+{
+	int ret = 0;
+	int vddi_ret = 0;
+
+	regulator_set_load(ctx->supplies[1].consumer, 0);
+	if (ctx->vpnl_enabled) {
+		ret = regulator_disable(ctx->supplies[1].consumer);
+		if (ret)
+			goto out;
+		ctx->vpnl_enabled = false;
+	}
+
+	regulator_set_load(ctx->supplies[0].consumer, 80);
+	if (ctx->vddi_enabled) {
+		vddi_ret = regulator_disable(ctx->supplies[0].consumer);
+		if (!vddi_ret)
+			ctx->vddi_enabled = false;
+	}
+
+out:
+	usleep_range(5000, 6000);
+
+	return ret ? : vddi_ret;
+}
 static inline struct sw43410_panel *to_sw43410(struct drm_panel *panel)
 {
 	return container_of(panel, struct sw43410_panel, base);
@@ -184,11 +259,11 @@ static const u8 sw43410_ed[] = {
 
 static const u8 sw43410_ee[] = { 0xee, 0x1a, 0x57, 0x94 };
 
-static int sw43410_unprepare(struct drm_panel *panel)
+static int sw43410_disable(struct drm_panel *panel)
 {
 	struct sw43410_panel *ctx = to_sw43410(panel);
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->link };
-	int ret;
+	int pinctrl_ret;
 
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x53, 0x0c, 0x30);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xca, 0x08, 0x88, 0x10, 0x0f);
@@ -197,11 +272,32 @@ static int sw43410_unprepare(struct drm_panel *panel)
 	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
 	mipi_dsi_msleep(&dsi_ctx, 150);
 
+	usleep_range(5000, 6000);
+	pinctrl_ret = pinctrl_pm_select_sleep_state(&ctx->link->dev);
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	ret = regulator_bulk_disable(ARRAY_SIZE(sw43410_supplies),
-				     ctx->supplies);
+	usleep_range(5000, 6000);
 
-	return ret ? : dsi_ctx.accum_err;
+	if (dsi_ctx.accum_err)
+		dev_err(&ctx->link->dev, "Failed to disable panel: %d\n",
+			dsi_ctx.accum_err);
+	if (pinctrl_ret)
+		dev_err(&ctx->link->dev,
+			"Failed to select sleep pinctrl state: %d\n",
+			pinctrl_ret);
+
+	return 0;
+}
+
+static int sw43410_unprepare(struct drm_panel *panel)
+{
+	struct sw43410_panel *ctx = to_sw43410(panel);
+	int ret;
+
+	ret = sw43410_power_off(ctx);
+	if (ret)
+		dev_err(&ctx->link->dev, "Failed to power off panel: %d\n", ret);
+
+	return 0;
 }
 
 static int sw43410_program(struct sw43410_panel *ctx)
@@ -256,6 +352,32 @@ static int sw43410_program(struct sw43410_panel *ctx)
 	mipi_dsi_picture_parameter_set_multi(&dsi_ctx, &pps);
 	ctx->link->mode_flags |= MIPI_DSI_MODE_LPM;
 
+	return dsi_ctx.accum_err;
+}
+
+static void sw43410_reset(struct sw43410_panel *ctx)
+{
+	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+	usleep_range(10000, 11000);
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	usleep_range(2000, 3000);
+	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+	usleep_range(10000, 11000);
+	usleep_range(5000, 6000);
+}
+
+static int sw43410_enable(struct drm_panel *panel)
+{
+	struct sw43410_panel *ctx = to_sw43410(panel);
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->link };
+	int ret;
+
+	sw43410_reset(ctx);
+
+	ret = sw43410_program(ctx);
+	if (ret < 0)
+		return ret;
+
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0xac);
 	mipi_dsi_msleep(&dsi_ctx, 30);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb8, 0x3d, 0x01, 0x1f,
@@ -287,44 +409,14 @@ static int sw43410_program(struct sw43410_panel *ctx)
 	return dsi_ctx.accum_err;
 }
 
-static void sw43410_reset(struct sw43410_panel *ctx)
-{
-	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-	usleep_range(10000, 11000);
-	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	usleep_range(2000, 3000);
-	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-	usleep_range(10000, 11000);
-}
-
 static int sw43410_prepare(struct drm_panel *panel)
 {
 	struct sw43410_panel *ctx = to_sw43410(panel);
-	int ret;
 
-	ret = regulator_enable(ctx->supplies[0].consumer);
-	if (ret < 0)
-		return ret;
+	if (ctx->vddi_enabled && ctx->vpnl_enabled)
+		return 0;
 
-	msleep(20);
-	ret = regulator_enable(ctx->supplies[1].consumer);
-	if (ret < 0) {
-		regulator_disable(ctx->supplies[0].consumer);
-		return ret;
-	}
-
-	sw43410_reset(ctx);
-
-	ret = sw43410_program(ctx);
-	if (ret)
-		goto poweroff;
-
-	return 0;
-
-poweroff:
-	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	regulator_bulk_disable(ARRAY_SIZE(sw43410_supplies), ctx->supplies);
-	return ret;
+	return sw43410_power_on(ctx);
 }
 
 static const struct drm_display_mode sw43410_mode = {
@@ -387,6 +479,8 @@ static int sw43410_backlight_init(struct sw43410_panel *ctx)
 
 static const struct drm_panel_funcs sw43410_panel_funcs = {
 	.prepare = sw43410_prepare,
+	.enable = sw43410_enable,
+	.disable = sw43410_disable,
 	.unprepare = sw43410_unprepare,
 	.get_modes = sw43410_get_modes,
 };
@@ -429,7 +523,6 @@ static int sw43410_probe(struct mipi_dsi_device *dsi)
 	if (ret < 0)
 		return ret;
 
-	ctx->base.prepare_prev_first = true;
 	drm_panel_add(&ctx->base);
 
 	dsi->dsc = &ctx->dsc;
@@ -456,6 +549,16 @@ static void sw43410_remove(struct mipi_dsi_device *dsi)
 {
 	struct sw43410_panel *ctx = mipi_dsi_get_drvdata(dsi);
 	int ret;
+
+	if (ctx->vpnl_enabled) {
+		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+		sw43410_power_off(ctx);
+	}
+	if (ctx->vddi_enabled) {
+		regulator_set_load(ctx->supplies[0].consumer, 80);
+		regulator_disable(ctx->supplies[0].consumer);
+		ctx->vddi_enabled = false;
+	}
 
 	ret = mipi_dsi_detach(dsi);
 	if (ret < 0)
