@@ -119,6 +119,10 @@ properties:
       Indicates if the DSI controller needs to sync the other DSI controller
       with MIPI DCS commands when qcom,dual-dsi-mode enabled.
 
+  qcom,suspend-ulps-enabled:
+    type: boolean
+    description: 关闭显示时让 DSI lane 进入 ULPS，并保留 DSI PHY 供电。
+
   assigned-clocks:
     minItems: 2
     maxItems: 4
