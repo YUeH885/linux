@@ -3,6 +3,7 @@
 /dts-v1/;
 
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include "sm8150.dtsi"
 #include "pm8150.dtsi"
@@ -67,6 +68,24 @@
 		regulator-always-on;
 		regulator-boot-on;
 		vin-supply = <&vph_pwr>;
+	};
+
+	touch_vcl: touch-vcl-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "touch_vcl";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&tlmm 59 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	touch_vdd: touch-vdd-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "touch_vdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 152 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
 	};
 };
 
@@ -385,12 +404,33 @@
 	status = "okay";
 };
 
+&gpi_dma2 {
+	status = "okay";
+};
+
 &gpu {
 	status = "okay";
 };
 
 &gpu_zap_shader {
 	firmware-name = "qcom/sm8150/a640_zap.mdt";
+};
+
+&i2c17 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	touchscreen@28 {
+		compatible = "lg,sw42000";
+		reg = <0x28>;
+		interrupts-extended = <&pdc 90 IRQ_TYPE_LEVEL_LOW>;
+		panel = <&display_panel>;
+		reset-gpios = <&tlmm 54 GPIO_ACTIVE_LOW>;
+		vcl-supply = <&touch_vcl>;
+		vdd-supply = <&touch_vdd>;
+		touchscreen-size-x = <1440>;
+		touchscreen-size-y = <3120>;
+	};
 };
 
 &mdss {
@@ -402,7 +442,7 @@
 	vdda-supply = <&vreg_l3c_1p2>;
 	qcom,suspend-ulps-enabled;
 
-	panel@0 {
+	display_panel: panel@0 {
 		compatible = "lg,sw43410";
 		reg = <0>;
 
@@ -433,8 +473,8 @@
 };
 
 &tlmm {
-	/* ABL 交接后读取 GPIO 93-174 的寄存器不会完成。 */
-	gpio-reserved-ranges = <93 82>;
+	/* eGPIO 区间仅开放触控 VDD 使用的 GPIO152。 */
+	gpio-reserved-ranges = <93 59>, <153 22>;
 
 	panel_reset_active: panel-reset-active-state {
 		pins = "gpio6";
@@ -500,6 +540,10 @@
 };
 
 &pon_pwrkey {
+	status = "okay";
+};
+
+&qupv3_id_2 {
 	status = "okay";
 };
 
