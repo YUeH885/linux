@@ -5,6 +5,7 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/usb/pd.h>
 #include "sm8150.dtsi"
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
@@ -46,7 +47,7 @@
 	battery: battery {
 		compatible = "simple-battery";
 		device-chemistry = "lithium-ion-polymer";
-		charge-full-design-microamp-hours = <3500000>;
+		charge-full-design-microamp-hours = <3400000>;
 		voltage-max-design-microvolt = <4430000>;
 		constant-charge-current-max-microamp = <3000000>;
 		constant-charge-voltage-max-microvolt = <4430000>;
@@ -59,7 +60,7 @@
 		regulator-max-microvolt = <3700000>;
 	};
 
-	/* PM8150 S4 始终开启，RPMh 不提供控制接口。 */
+	/* PM8150 S4 is always enabled; RPMh provides no control interface. */
 	vreg_s4a_1p8: pm8150-s4 {
 		compatible = "regulator-fixed";
 		regulator-name = "vreg_s4a_1p8";
@@ -359,7 +360,7 @@
 	};
 };
 
-/* LGE modem.mdt 的加载范围与 SM8150 通用保留内存布局不同。 */
+/* LGE modem.mdt uses a different load range from the generic SM8150 layout. */
 &adsp_mem {
 	reg = <0x0 0x8be00000 0x0 0x2200000>;
 };
@@ -473,7 +474,7 @@
 };
 
 &tlmm {
-	/* eGPIO 区间仅开放触控 VDD 使用的 GPIO152。 */
+	/* Reserve the eGPIO range except GPIO152 used by touchscreen VDD. */
 	gpio-reserved-ranges = <93 59>, <153 22>;
 
 	panel_reset_active: panel-reset-active-state {
@@ -528,14 +529,52 @@
 };
 
 &usb_1_dwc3 {
-	dr_mode = "peripheral";
+	dr_mode = "otg";
 	maximum-speed = "high-speed";
 	phys = <&usb_1_hsphy>;
 	phy-names = "usb2-phy";
+	usb-psy-name = "usb";
+	usb-role-switch;
+};
+
+&usb_1_dwc3_hs {
+	remote-endpoint = <&pm8150b_hs_in>;
+};
+
+&pm8150b_vbus {
+	regulator-min-microamp = <500000>;
+	regulator-max-microamp = <3000000>;
+	status = "okay";
+};
+
+&pm8150b_typec {
+	vdd-pdphy-supply = <&vdd_pdphy>;
+	status = "okay";
+
+	connector {
+		compatible = "usb-c-connector";
+		power-role = "sink";
+		data-role = "device";
+		vbus-supply = <&pm8150b_vbus>;
+
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)
+			     PDO_FIXED(9000, 1660, PDO_FIXED_USB_COMM)>;
+		op-sink-microwatt = <13000000>;
+
+		port {
+			pm8150b_hs_in: endpoint {
+				remote-endpoint = <&usb_1_dwc3_hs>;
+			};
+		};
+	};
 };
 
 &pm8150b_charger {
 	monitored-battery = <&battery>;
+	qcom,parallel-charger = <&smb1355>;
+	qcom,parallel-percent = <70>;
+	qcom,auto-recharge-soc = <98>;
+	qcom,usb-c-port = <&pm8150b_typec>;
 	status = "okay";
 };
 
@@ -543,8 +582,21 @@
 	status = "okay";
 };
 
+&qupv3_id_0 {
+	status = "okay";
+};
+
 &qupv3_id_2 {
 	status = "okay";
+};
+
+&i2c4 {
+	status = "okay";
+
+	smb1355: charger@c {
+		compatible = "qcom,smb1355";
+		reg = <0x0c>;
+	};
 };
 
 &remoteproc_mpss {
