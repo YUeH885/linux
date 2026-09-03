@@ -1249,6 +1249,7 @@ struct dwc3 {
 	enum usb_phy_interface	hsphy_mode;
 	struct usb_role_switch	*role_sw;
 	enum usb_dr_mode	role_switch_default_mode;
+	bool			role_switch_disconnected;
 
 	struct power_supply	*usb_psy;
 	struct work_struct	vbus_draw_work;
