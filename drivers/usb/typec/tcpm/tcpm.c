@@ -567,6 +567,7 @@ struct tcpm_port {
 	/* Requested current / voltage to the port partner */
 	u32 req_current_limit;
 	u32 req_supply_voltage;
+	u32 fixed_voltage_request;
 	/* Actual current / voltage limit of the local port */
 	u32 current_limit;
 	u32 supply_voltage;
@@ -3383,6 +3384,30 @@ static void tcpm_pd_data_request(struct tcpm_port *port,
 			port->source_caps[i] = le32_to_cpu(msg->payload[i]);
 
 		port->nr_source_caps = cnt;
+		if (port->fixed_voltage_request) {
+			bool request_found = false;
+
+			for (i = 0; i < cnt; i++) {
+				if (pdo_type(port->source_caps[i]) == PDO_TYPE_FIXED &&
+				    pdo_fixed_voltage(port->source_caps[i]) ==
+					    port->fixed_voltage_request) {
+					request_found = true;
+					break;
+				}
+			}
+			if (!request_found) {
+				bool fallback_found = false;
+
+				for (i = 0; i < cnt; i++) {
+					if (pdo_type(port->source_caps[i]) == PDO_TYPE_FIXED &&
+					    pdo_fixed_voltage(port->source_caps[i]) == 5000) {
+						fallback_found = true;
+						break;
+					}
+				}
+				port->fixed_voltage_request = fallback_found ? 5000 : 0;
+			}
+		}
 
 		tcpm_log_source_caps(port);
 
@@ -3637,6 +3662,9 @@ static void tcpm_pd_ctrl_request(struct tcpm_port *port,
 	case PD_CTRL_NOT_SUPP:
 		switch (port->state) {
 		case SNK_NEGOTIATE_CAPABILITIES:
+			if (port->aug_supply_req_pending)
+				tcpm_aug_supply_req_complete(port, type == PD_CTRL_WAIT ?
+					-EAGAIN : -EOPNOTSUPP);
 			/* USB PD specification, Figure 8-43 */
 			if (port->explicit_contract)
 				next_state = SNK_READY;
@@ -4237,9 +4265,14 @@ static int tcpm_pd_select_pdo(struct tcpm_port *port, int *sink_pdo,
 		case PDO_TYPE_FIXED:
 			max_src_mv = pdo_fixed_voltage(pdo);
 			min_src_mv = max_src_mv;
+			if (port->fixed_voltage_request &&
+			    max_src_mv != port->fixed_voltage_request)
+				continue;
 			break;
 		case PDO_TYPE_BATT:
 		case PDO_TYPE_VAR:
+			if (port->fixed_voltage_request)
+				continue;
 			max_src_mv = pdo_max_voltage(pdo);
 			min_src_mv = pdo_min_voltage(pdo);
 			break;
@@ -4935,6 +4968,7 @@ static void tcpm_reset_port(struct tcpm_port *port)
 	tcpm_typec_disconnect(port);
 	port->attached = false;
 	port->pd_capable = false;
+	port->fixed_voltage_request = 0;
 	port->pps_data.supported = false;
 	tcpm_set_partner_usb_comm_capable(port, false);
 
@@ -5175,6 +5209,7 @@ static void tcpm_set_initial_negotiated_rev(struct tcpm_port *port)
 
 static void run_state_machine(struct tcpm_port *port)
 {
+	bool legacy_cable;
 	int ret;
 	enum typec_pwr_opmode opmode;
 	unsigned int msecs;
@@ -5622,6 +5657,8 @@ static void run_state_machine(struct tcpm_port *port)
 		tcpm_set_state(port, unattached_state(port), 0);
 		break;
 	case SNK_WAIT_CAPABILITIES:
+		legacy_cable = port->tcpc->is_legacy_cable &&
+			port->tcpc->is_legacy_cable(port->tcpc);
 		ret = port->tcpc->set_pd_rx(port->tcpc, true);
 		if (ret < 0) {
 			tcpm_set_state(port, SNK_READY, 0);
@@ -5635,7 +5672,8 @@ static void run_state_machine(struct tcpm_port *port)
 		 */
 		if (port->vbus_never_low) {
 			port->vbus_never_low = false;
-			upcoming_state = SNK_SOFT_RESET;
+			upcoming_state = legacy_cable ?
+				SNK_WAIT_CAPABILITIES_TIMEOUT : SNK_SOFT_RESET;
 		} else {
 			if (!port->self_powered)
 				upcoming_state = SNK_WAIT_CAPABILITIES_TIMEOUT;
@@ -5647,6 +5685,8 @@ static void run_state_machine(struct tcpm_port *port)
 			       port->timings.sink_wait_cap_time);
 		break;
 	case SNK_WAIT_CAPABILITIES_TIMEOUT:
+		legacy_cable = port->tcpc->is_legacy_cable &&
+			port->tcpc->is_legacy_cable(port->tcpc);
 		/*
 		 * There are some USB PD sources in the field, which do not
 		 * properly implement the specification and fail to start
@@ -5663,9 +5703,11 @@ static void run_state_machine(struct tcpm_port *port)
 		 * according to the specification.
 		 */
 		if (tcpm_pd_send_control(port, PD_CTRL_GET_SOURCE_CAP, TCPC_TX_SOP))
-			tcpm_set_state_cond(port, hard_reset_state(port), 0);
+			tcpm_set_state_cond(port, legacy_cable ? SNK_READY :
+					    hard_reset_state(port), 0);
 		else
-			tcpm_set_state(port, hard_reset_state(port),
+			tcpm_set_state(port, legacy_cable ? SNK_READY :
+				       hard_reset_state(port),
 				       port->timings.sink_wait_cap_time);
 		break;
 	case SNK_NEGOTIATE_CAPABILITIES:
@@ -5675,6 +5717,8 @@ static void run_state_machine(struct tcpm_port *port)
 		port->hard_reset_count = 0;
 		ret = tcpm_pd_send_request(port);
 		if (ret < 0) {
+			/* Wake a fixed-PDO voltage request that failed to transmit. */
+			tcpm_aug_supply_req_complete(port, ret);
 			/* Restore back to the original state */
 			tcpm_set_auto_vbus_discharge_threshold(port, TYPEC_PWR_MODE_PD,
 							       port->pps_data.active,
@@ -7317,10 +7361,17 @@ static int tcpm_aug_set_op_curr(struct tcpm_port *port, u16 req_op_curr_ma)
 	mutex_unlock(&port->lock);
 
 	if (!wait_for_completion_timeout(&port->aug_supply_req_complete,
-					 msecs_to_jiffies(PD_AUG_PSY_CTRL_TIMEOUT)))
+					 msecs_to_jiffies(PD_AUG_PSY_CTRL_TIMEOUT))) {
+		mutex_lock(&port->lock);
+		if (port->aug_supply_req_pending) {
+			port->aug_supply_req_pending = false;
+			port->aug_supply_req_status = -ETIMEDOUT;
+		}
+		mutex_unlock(&port->lock);
 		ret = -ETIMEDOUT;
-	else
+	} else {
 		ret = port->aug_supply_req_status;
+	}
 
 	goto swap_unlock;
 
@@ -7385,6 +7436,97 @@ static int tcpm_aug_set_out_volt(struct tcpm_port *port, u16 req_out_volt_mv)
 	else
 		ret = port->aug_supply_req_status;
 
+	goto swap_unlock;
+
+port_unlock:
+	mutex_unlock(&port->lock);
+swap_unlock:
+	mutex_unlock(&port->swap_lock);
+
+	return ret;
+}
+
+static int tcpm_fixed_set_out_volt(struct tcpm_port *port,
+				   u16 req_out_volt_mv)
+{
+	unsigned int max_mv, min_mv, old_request;
+	int i, j, ret = -EINVAL;
+
+	mutex_lock(&port->swap_lock);
+	mutex_lock(&port->lock);
+
+	if (!port->pd_capable || port->pps_data.active ||
+	    port->spr_avs_data.active) {
+		ret = -EOPNOTSUPP;
+		goto port_unlock;
+	}
+	if (port->state != SNK_READY) {
+		ret = -EAGAIN;
+		goto port_unlock;
+	}
+	for (i = 0; i < port->nr_source_caps; i++) {
+		if (pdo_type(port->source_caps[i]) != PDO_TYPE_FIXED ||
+		    pdo_fixed_voltage(port->source_caps[i]) != req_out_volt_mv)
+			continue;
+		for (j = 0; j < port->nr_snk_pdo; j++) {
+			switch (pdo_type(port->snk_pdo[j])) {
+			case PDO_TYPE_FIXED:
+				min_mv = pdo_fixed_voltage(port->snk_pdo[j]);
+				max_mv = min_mv;
+				break;
+			case PDO_TYPE_BATT:
+			case PDO_TYPE_VAR:
+				min_mv = pdo_min_voltage(port->snk_pdo[j]);
+				max_mv = pdo_max_voltage(port->snk_pdo[j]);
+				break;
+			default:
+				continue;
+			}
+			if (req_out_volt_mv >= min_mv && req_out_volt_mv <= max_mv) {
+				ret = 0;
+				break;
+			}
+		}
+		if (!ret)
+			break;
+	}
+	if (ret)
+		goto port_unlock;
+	old_request = port->fixed_voltage_request;
+	port->fixed_voltage_request = req_out_volt_mv;
+	if (port->supply_voltage == req_out_volt_mv)
+		goto port_unlock;
+
+	port->upcoming_state = SNK_NEGOTIATE_CAPABILITIES;
+	ret = tcpm_ams_start(port, POWER_NEGOTIATION);
+	if (ret == -EAGAIN) {
+		port->upcoming_state = INVALID_STATE;
+		port->fixed_voltage_request = old_request;
+		goto port_unlock;
+	}
+
+	reinit_completion(&port->aug_supply_req_complete);
+	port->aug_supply_req_status = 0;
+	port->aug_supply_req_pending = true;
+	mutex_unlock(&port->lock);
+
+	if (!wait_for_completion_timeout(&port->aug_supply_req_complete,
+					 msecs_to_jiffies(PD_AUG_PSY_CTRL_TIMEOUT))) {
+		mutex_lock(&port->lock);
+		if (port->aug_supply_req_pending) {
+			port->aug_supply_req_pending = false;
+			port->aug_supply_req_status = -ETIMEDOUT;
+		}
+		mutex_unlock(&port->lock);
+		ret = -ETIMEDOUT;
+	} else {
+		ret = port->aug_supply_req_status;
+	}
+	if (ret) {
+		mutex_lock(&port->lock);
+		port->fixed_voltage_request = old_request;
+		mutex_unlock(&port->lock);
+	}
 	goto swap_unlock;
 
 port_unlock:
@@ -8400,7 +8542,10 @@ static int tcpm_psy_set_prop(struct power_supply *psy,
 		ret = tcpm_psy_set_online(port, val);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-		ret = tcpm_aug_set_out_volt(port, val->intval / 1000);
+		if (port->pps_data.active || port->spr_avs_data.active)
+			ret = tcpm_aug_set_out_volt(port, val->intval / 1000);
+		else
+			ret = tcpm_fixed_set_out_volt(port, val->intval / 1000);
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		ret = tcpm_aug_set_op_curr(port, val->intval / 1000);

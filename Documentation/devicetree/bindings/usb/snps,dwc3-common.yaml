@@ -38,6 +38,11 @@ properties:
       - description: USB2/HS PHY
       - description: USB3/SS PHY
 
+  usb-psy-name:
+    description:
+      Name of the USB power supply used to report gadget VBUS draw changes.
+    $ref: /schemas/types.yaml#/definitions/string
+
   phys:
     minItems: 1
     maxItems: 19
@@ -429,4 +434,3 @@ required:
 
 additionalProperties: true
 ...
-

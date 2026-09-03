@@ -230,6 +230,9 @@ static void qcom_pmic_typec_port_cc_debounce(struct work_struct *work)
 	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 
 	dev_dbg(pmic_typec_port->dev, "Debounce cc complete\n");
+	/* A pre-attached cable may have no new CC edge; synchronize after debounce. */
+	if (pmic_typec_port->tcpm_port)
+		tcpm_cc_change(pmic_typec_port->tcpm_port);
 }
 
 static irqreturn_t pmic_typec_port_isr(int irq, void *dev_id)
@@ -332,6 +335,34 @@ static int qcom_pmic_typec_port_get_vbus(struct tcpc_dev *tcpc)
 	mutex_unlock(&pmic_typec_port->vbus_lock);
 
 	return ret;
+}
+
+static bool qcom_pmic_typec_port_is_legacy_cable(struct tcpc_dev *tcpc)
+{
+	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	unsigned int misc, status;
+	int ret;
+
+	ret = regmap_read(pmic_typec_port->regmap,
+			  pmic_typec_port->base + LEGACY_CABLE_STATUS_REG,
+			  &status);
+	if (ret) {
+		dev_warn_ratelimited(pmic_typec_port->dev,
+				     "Failed to read legacy cable status: %d\n", ret);
+		return false;
+	}
+	if (status & TYPEC_LEGACY_CABLE_STATUS)
+		return true;
+	ret = regmap_read(pmic_typec_port->regmap,
+			  pmic_typec_port->base + TYPEC_MISC_STATUS_REG, &misc);
+	if (ret) {
+		dev_warn_ratelimited(pmic_typec_port->dev,
+				     "Failed to read Type-C misc status: %d\n", ret);
+		return false;
+	}
+
+	return misc & SNK_SRC_MODE;
 }
 
 static int qcom_pmic_typec_port_set_vbus(struct tcpc_dev *tcpc, bool on, bool sink)
@@ -693,6 +724,8 @@ static void qcom_pmic_typec_port_stop(struct pmic_typec *tcpm)
 
 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
 		disable_irq(pmic_typec_port->irq_data[i].irq);
+	cancel_delayed_work_sync(&pmic_typec_port->cc_debounce_dwork);
+	pmic_typec_port->tcpm_port = NULL;
 }
 
 int qcom_pmic_typec_port_probe(struct platform_device *pdev,
@@ -771,6 +804,7 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 	tcpm->tcpc.get_cc = qcom_pmic_typec_port_get_cc;
 	tcpm->tcpc.set_polarity = qcom_pmic_typec_port_set_polarity;
 	tcpm->tcpc.set_vconn = qcom_pmic_typec_port_set_vconn;
+	tcpm->tcpc.is_legacy_cable = qcom_pmic_typec_port_is_legacy_cable;
 	tcpm->tcpc.start_toggling = qcom_pmic_typec_port_start_toggling;
 
 	tcpm->port_start = qcom_pmic_typec_port_start;
