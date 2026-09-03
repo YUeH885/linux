@@ -31,8 +31,15 @@ properties:
           - qcom,spmi-adc7
 
   reg:
-    description: VADC base address in the SPMI PMIC register map
-    maxItems: 1
+    description: VADC and optional calibration base addresses in the SPMI PMIC register map
+    minItems: 1
+    maxItems: 2
+
+  reg-names:
+    minItems: 1
+    items:
+      - const: adc5-usr-base
+      - const: adc5-cal-base
 
   '#address-cells':
     const: 1
@@ -137,6 +144,12 @@ allOf:
             qcom,avg-samples:
               enum: [ 1, 2, 4, 8, 16 ]
               default: 1
+
+    else:
+      properties:
+        reg:
+          maxItems: 1
+        reg-names: false
 
   - if:
       properties:

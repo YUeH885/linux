@@ -42,6 +42,7 @@
 #define ADC5_USR_DIG_PARAM_CAL_SEL_SHIFT	4
 #define ADC5_USR_DIG_PARAM_DEC_RATIO_SEL	0xc
 #define ADC5_USR_DIG_PARAM_DEC_RATIO_SEL_SHIFT	2
+#define ADC5_USR_DIG_PARAM_ABS_CAL_VAL		0x28
 
 #define ADC5_USR_FAST_AVG_CTL			0x43
 #define ADC5_USR_FAST_AVG_CTL_EN		BIT(7)
@@ -72,12 +73,18 @@
 /*
  * Conversion time varies based on the decimation, clock rate, fast average
  * samples and measurements queued across different VADC peripherals.
- * Set the timeout to a max of 100ms.
+ * Wait up to 100ms for the EOC interrupt, then poll in 10ms steps: 400ms when
+ * polling is the only mechanism, 300ms as a fallback after the interrupt wait.
  */
-#define ADC5_CONV_TIME_MIN_US			263
-#define ADC5_CONV_TIME_MAX_US			264
-#define ADC5_CONV_TIME_RETRY			400
+#define ADC5_POLL_DELAY_MIN_US			10000
+#define ADC5_POLL_DELAY_MAX_US			10001
+#define ADC5_POLL_ONLY_RETRY			40
+#define ADC5_POLL_FALLBACK_RETRY		30
 #define ADC5_CONV_TIMEOUT			msecs_to_jiffies(100)
+
+#define ADC5_CAL_DELAY_CTL			0x44
+#define ADC5_CAL_DELAY_CTL_VAL_256S		0x73
+#define ADC5_CAL_DELAY_CTL_VAL_125MS		0x03
 
 /* Digital version >= 5.3 supports hw_settle_2 */
 #define ADC5_HW_SETTLE_DIFF_MINOR		3
@@ -133,6 +140,7 @@ struct adc5_channel_prop {
  * @regmap: SPMI ADC5 peripheral register map field.
  * @dev: SPMI ADC5 device.
  * @base: base address for the ADC peripheral.
+ * @cal_base: base address for the calibration peripheral.
  * @nchannels: number of ADC channels.
  * @chan_props: array of ADC channel properties.
  * @iio_chans: array of IIO channels specification.
@@ -145,6 +153,7 @@ struct adc5_chip {
 	struct regmap		*regmap;
 	struct device		*dev;
 	u16			base;
+	u16			cal_base;
 	unsigned int		nchannels;
 	struct adc5_channel_prop	*chan_props;
 	struct iio_chan_spec	*iio_chans;
@@ -167,6 +176,11 @@ static int adc5_write(struct adc5_chip *adc, u16 offset, u8 *data, int len)
 static int adc5_masked_write(struct adc5_chip *adc, u16 offset, u8 mask, u8 val)
 {
 	return regmap_update_bits(adc->regmap, adc->base + offset, mask, val);
+}
+
+static int adc5_cal_write(struct adc5_chip *adc, u16 offset, u8 val)
+{
+	return regmap_bulk_write(adc->regmap, adc->cal_base + offset, &val, 1);
 }
 
 static int adc5_read_voltage_data(struct adc5_chip *adc, u16 *data)
@@ -194,9 +208,9 @@ static int adc5_read_voltage_data(struct adc5_chip *adc, u16 *data)
 	return 0;
 }
 
-static int adc5_poll_wait_eoc(struct adc5_chip *adc)
+static int adc5_poll_wait_eoc(struct adc5_chip *adc, unsigned int retry)
 {
-	unsigned int count, retry = ADC5_CONV_TIME_RETRY;
+	unsigned int count;
 	u8 status1;
 	int ret;
 
@@ -210,10 +224,24 @@ static int adc5_poll_wait_eoc(struct adc5_chip *adc)
 		if (status1 == ADC5_USR_STATUS1_EOC)
 			return 0;
 
-		usleep_range(ADC5_CONV_TIME_MIN_US, ADC5_CONV_TIME_MAX_US);
+		usleep_range(ADC5_POLL_DELAY_MIN_US, ADC5_POLL_DELAY_MAX_US);
 	}
 
 	return -ETIMEDOUT;
+}
+
+static int adc5_wait_eoc(struct adc5_chip *adc)
+{
+	int ret;
+
+	if (adc->poll_eoc)
+		return adc5_poll_wait_eoc(adc, ADC5_POLL_ONLY_RETRY);
+
+	ret = wait_for_completion_timeout(&adc->complete, ADC5_CONV_TIMEOUT);
+	if (ret)
+		return 0;
+
+	return adc5_poll_wait_eoc(adc, ADC5_POLL_FALLBACK_RETRY);
 }
 
 static void adc5_update_dig_param(struct adc5_chip *adc,
@@ -232,11 +260,62 @@ static void adc5_update_dig_param(struct adc5_chip *adc,
 	*data |= (prop->decimation << ADC5_USR_DIG_PARAM_DEC_RATIO_SEL_SHIFT);
 }
 
+static int adc5_pre_configure_usb_in_read(struct adc5_chip *adc)
+{
+	u8 data;
+	int ret;
+
+	ret = adc5_cal_write(adc, ADC5_CAL_DELAY_CTL,
+			     ADC5_CAL_DELAY_CTL_VAL_256S);
+	if (ret)
+		return ret;
+
+	msleep(20);
+
+	data = ADC5_REF_GND;
+	ret = adc5_write(adc, ADC5_USR_CH_SEL_CTL, &data, 1);
+	if (ret)
+		return ret;
+
+	data = ADC5_USR_EN_CTL1_ADC_EN;
+	ret = adc5_write(adc, ADC5_USR_EN_CTL1, &data, 1);
+	if (ret)
+		return ret;
+
+	if (!adc->poll_eoc)
+		reinit_completion(&adc->complete);
+
+	data = ADC5_USR_CONV_REQ_REQ;
+	ret = adc5_write(adc, ADC5_USR_CONV_REQ, &data, 1);
+	if (ret)
+		return ret;
+
+	data = ADC5_USR_DIG_PARAM_ABS_CAL_VAL;
+	ret = adc5_write(adc, ADC5_USR_DIG_PARAM, &data, 1);
+	if (ret)
+		return ret;
+
+	data = ADC5_USB_IN_V_16;
+	ret = adc5_write(adc, ADC5_USR_CH_SEL_CTL, &data, 1);
+	if (ret)
+		return ret;
+
+	ret = adc5_wait_eoc(adc);
+	if (ret)
+		return ret;
+
+	if (!adc->poll_eoc)
+		reinit_completion(&adc->complete);
+
+	data = ADC5_USR_CONV_REQ_REQ;
+	return adc5_write(adc, ADC5_USR_CONV_REQ, &data, 1);
+}
+
 static int adc5_configure(struct adc5_chip *adc,
 			struct adc5_channel_prop *prop)
 {
 	int ret;
-	u8 buf[6];
+	u8 conv_req = ADC5_USR_CONV_REQ_REQ, buf[5];
 
 	/* Read registers 0x42 through 0x46 */
 	ret = adc5_read(adc, ADC5_USR_DIG_PARAM, buf, sizeof(buf));
@@ -260,13 +339,31 @@ static int adc5_configure(struct adc5_chip *adc,
 	/* Select ADC enable */
 	buf[4] |= ADC5_USR_EN_CTL1_ADC_EN;
 
-	/* Select CONV request */
-	buf[5] |= ADC5_USR_CONV_REQ_REQ;
-
 	if (!adc->poll_eoc)
 		reinit_completion(&adc->complete);
 
-	return adc5_write(adc, ADC5_USR_DIG_PARAM, buf, sizeof(buf));
+	/*
+	 * Write the configuration one register at a time; a burst write across
+	 * the channel select register can leave the peripheral configured for
+	 * the previous channel.
+	 */
+	ret = adc5_write(adc, ADC5_USR_DIG_PARAM, &buf[0], 1);
+	if (ret)
+		return ret;
+	ret = adc5_write(adc, ADC5_USR_FAST_AVG_CTL, &buf[1], 1);
+	if (ret)
+		return ret;
+	ret = adc5_write(adc, ADC5_USR_CH_SEL_CTL, &buf[2], 1);
+	if (ret)
+		return ret;
+	ret = adc5_write(adc, ADC5_USR_DELAY_CTL, &buf[3], 1);
+	if (ret)
+		return ret;
+	ret = adc5_write(adc, ADC5_USR_EN_CTL1, &buf[4], 1);
+	if (ret)
+		return ret;
+
+	return adc5_write(adc, ADC5_USR_CONV_REQ, &conv_req, 1);
 }
 
 static int adc7_configure(struct adc5_chip *adc,
@@ -315,37 +412,32 @@ static int adc5_do_conversion(struct adc5_chip *adc,
 			struct iio_chan_spec const *chan,
 			u16 *data_volt, u16 *data_cur)
 {
-	int ret;
+	bool usb_in_wa = prop->channel == ADC5_USB_IN_V_16 && adc->cal_base;
+	int ret, restore_ret;
 
 	mutex_lock(&adc->lock);
 
-	ret = adc5_configure(adc, prop);
+	ret = usb_in_wa ? adc5_pre_configure_usb_in_read(adc) :
+			adc5_configure(adc, prop);
 	if (ret) {
 		dev_err(adc->dev, "ADC configure failed with %d\n", ret);
-		goto unlock;
+		goto restore;
 	}
 
-	if (adc->poll_eoc) {
-		ret = adc5_poll_wait_eoc(adc);
-		if (ret) {
-			dev_err(adc->dev, "EOC bit not set\n");
-			goto unlock;
-		}
-	} else {
-		ret = wait_for_completion_timeout(&adc->complete,
-							ADC5_CONV_TIMEOUT);
-		if (!ret) {
-			dev_dbg(adc->dev, "Did not get completion timeout.\n");
-			ret = adc5_poll_wait_eoc(adc);
-			if (ret) {
-				dev_err(adc->dev, "EOC bit not set\n");
-				goto unlock;
-			}
-		}
+	ret = adc5_wait_eoc(adc);
+	if (ret) {
+		dev_err(adc->dev, "EOC bit not set\n");
+		goto restore;
 	}
 
 	ret = adc5_read_voltage_data(adc, data_volt);
-unlock:
+restore:
+	if (usb_in_wa) {
+		restore_ret = adc5_cal_write(adc, ADC5_CAL_DELAY_CTL,
+					     ADC5_CAL_DELAY_CTL_VAL_125MS);
+		if (!ret)
+			ret = restore_ret;
+	}
 	mutex_unlock(&adc->lock);
 
 	return ret;
@@ -877,15 +969,19 @@ static int adc5_probe(struct platform_device *pdev)
 	struct iio_dev *indio_dev;
 	struct adc5_chip *adc;
 	struct regmap *regmap;
-	int ret, irq_eoc;
-	u32 reg;
+	int ret, irq_eoc, reg_count;
+	u32 reg[2];
 
 	regmap = dev_get_regmap(dev->parent, NULL);
 	if (!regmap)
 		return -ENODEV;
 
-	ret = device_property_read_u32(dev, "reg", &reg);
-	if (ret < 0)
+	reg_count = device_property_count_u32(dev, "reg");
+	if (reg_count < 1 || reg_count > ARRAY_SIZE(reg))
+		return -EINVAL;
+
+	ret = device_property_read_u32_array(dev, "reg", reg, reg_count);
+	if (ret)
 		return ret;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*adc));
@@ -895,7 +991,9 @@ static int adc5_probe(struct platform_device *pdev)
 	adc = iio_priv(indio_dev);
 	adc->regmap = regmap;
 	adc->dev = dev;
-	adc->base = reg;
+	adc->base = reg[0];
+	if (reg_count == ARRAY_SIZE(reg))
+		adc->cal_base = reg[1];
 
 	init_completion(&adc->complete);
 	mutex_init(&adc->lock);
