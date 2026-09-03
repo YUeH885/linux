@@ -1170,8 +1170,21 @@ config CHARGER_QCOM_PM8150B
 	depends on MFD_SPMI_PMIC
 	depends on IIO
 	help
-	  启用 PM8150B SMB5 充电器和 Gen4 fuel gauge 的标准 power_supply
-	  接口，并接管硬件 JEITA、charger die comparator 和充电 watchdog。
+	  Say Y to expose the PM8150B SMB5 charger and Gen4 fuel gauge through
+	  the standard power supply interface. The driver keeps the hard JEITA
+	  limits programmed by the bootloader, drives the charging policy from
+	  Type-C, Power Delivery and battery telemetry, and pets the charger
+	  watchdog.
+
+config CHARGER_QCOM_SMB1355
+	tristate "Qualcomm SMB1355 parallel charger"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Say Y to expose the SMB1355 parallel charger through the standard
+	  power supply interface. The main charger sets the fast charge current,
+	  float voltage and enable state through it, while the SMB1355 hardware
+	  watchdog stops charging if control is lost.
 
 config FUEL_GAUGE_MM8013
 	tristate "Mitsumi MM8013 fuel gauge driver"
