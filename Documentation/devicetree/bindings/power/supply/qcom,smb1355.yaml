@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/qcom,smb1355.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm SMB1355 parallel charger
+
+maintainers:
+  - Yuzu <yuzu23234@gmail.com>
+
+properties:
+  compatible:
+    const: qcom,smb1355
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      charger@c {
+        compatible = "qcom,smb1355";
+        reg = <0x0c>;
+      };
+    };
