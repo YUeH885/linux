@@ -43,6 +43,17 @@
 			reg = <0 0x9d200000 0 0x01200000>;
 			no-map;
 		};
+
+		ramoops: ramoops@b0000000 {
+			compatible = "ramoops";
+			reg = <0 0xb0000000 0 0x00300000>;
+			record-size = <0x1000>;
+			console-size = <0x40000>;
+			ftrace-size = <0x40000>;
+			pmsg-size = <0x200000>;
+			ecc-size = <0>;
+			no-map;
+		};
 	};
 
 	battery: battery {
