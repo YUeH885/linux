@@ -442,6 +442,10 @@
 	status = "okay";
 };
 
+&gpi_dma1 {
+	status = "okay";
+};
+
 &gpu {
 	status = "okay";
 };
@@ -665,6 +669,10 @@
 	status = "okay";
 };
 
+&qupv3_id_1 {
+	status = "okay";
+};
+
 &qupv3_id_2 {
 	status = "okay";
 };
@@ -692,6 +700,12 @@
 	bus-width = <4>;
 	no-sdio;
 	no-mmc;
+	status = "okay";
+};
+
+&spi8 {
+	/delete-property/ reg-names;
+	/delete-property/ spi-max-frequency;
 	status = "okay";
 };
 
