@@ -507,8 +507,54 @@
 };
 
 &tlmm {
-	/* Reserve the eGPIO range except GPIO152 used by touchscreen VDD. */
-	gpio-reserved-ranges = <93 59>, <153 22>;
+	/* Reserve the eGPIO range except GPIO96 for SD card detect and GPIO152 for touchscreen VDD. */
+	gpio-reserved-ranges = <93 3>, <97 55>, <153 22>;
+
+	sdc2_default: sdc2-default-state {
+		clk-pins {
+			pins = "sdc2_clk";
+			drive-strength = <16>;
+			bias-disable;
+		};
+
+		cmd-pins {
+			pins = "sdc2_cmd";
+			drive-strength = <16>;
+			bias-pull-up;
+		};
+
+		data-pins {
+			pins = "sdc2_data";
+			drive-strength = <16>;
+			bias-pull-up;
+		};
+	};
+
+	sdc2_sleep: sdc2-sleep-state {
+		clk-pins {
+			pins = "sdc2_clk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		cmd-pins {
+			pins = "sdc2_cmd";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+
+		data-pins {
+			pins = "sdc2_data";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+
+	sdc2_card_det: sdc2-card-det-state {
+		pins = "gpio96";
+		function = "gpio";
+		bias-pull-down;
+	};
 
 	panel_reset_active: panel-reset-active-state {
 		pins = "gpio6";
@@ -633,6 +679,19 @@
 };
 
 &remoteproc_mpss {
+	status = "okay";
+};
+
+&sdhc_2 {
+	cd-gpios = <&tlmm 96 GPIO_ACTIVE_HIGH>;
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&sdc2_default &sdc2_card_det>;
+	pinctrl-1 = <&sdc2_sleep &sdc2_card_det>;
+	vmmc-supply = <&vreg_l9c_2p9>;
+	vqmmc-supply = <&vreg_l6c_2p9>;
+	bus-width = <4>;
+	no-sdio;
+	no-mmc;
 	status = "okay";
 };
 
