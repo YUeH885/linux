@@ -4,6 +4,7 @@
 
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/input/input.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include <dt-bindings/usb/pd.h>
 #include "sm8150.dtsi"
@@ -51,6 +52,18 @@
 		voltage-max-design-microvolt = <4430000>;
 		constant-charge-current-max-microamp = <3000000>;
 		constant-charge-voltage-max-microvolt = <4430000>;
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		key-volume-up {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>;
+			wakeup-source;
+			debounce-interval = <15>;
+		};
 	};
 
 	vph_pwr: vph-pwr-regulator {
