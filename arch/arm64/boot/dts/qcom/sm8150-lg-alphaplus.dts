@@ -64,6 +64,15 @@
 			wakeup-source;
 			debounce-interval = <15>;
 		};
+
+		key-hot1 {
+			label = "hot1_key";
+			linux,code = <377>;
+			gpios = <&pm8150_gpios 1 GPIO_ACTIVE_LOW>;
+			wakeup-source;
+			debounce-interval = <15>;
+			linux,can-disable;
+		};
 	};
 
 	vph_pwr: vph-pwr-regulator {
