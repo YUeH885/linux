@@ -5,6 +5,7 @@
 
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -173,6 +174,7 @@ struct pmic_typec_port {
 	struct pmic_typec_port_irq_data	*irq_data;
 
 	struct regulator		*vdd_vbus;
+	struct gpio_desc		*vconn_boost;
 	bool				vbus_enabled;
 	struct mutex			vbus_lock;		/* VBUS state serialization */
 
@@ -570,6 +572,9 @@ static int qcom_pmic_typec_port_set_vconn(struct tcpc_dev *tcpc, bool on)
 	unsigned long flags;
 	int ret;
 
+	if (on && pmic_typec_port->vconn_boost)
+		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 1);
+
 	spin_lock_irqsave(&pmic_typec_port->lock, flags);
 
 	ret = regmap_read(pmic_typec_port->regmap,
@@ -592,6 +597,10 @@ static int qcom_pmic_typec_port_set_vconn(struct tcpc_dev *tcpc, bool on)
 				 mask, value);
 done:
 	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
+	if (!on && pmic_typec_port->vconn_boost)
+		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 0);
+	else if (ret && on && pmic_typec_port->vconn_boost)
+		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 0);
 
 	dev_dbg(dev, "set_vconn: orientation %d control 0x%08x state %s cc %s vconn %s\n",
 		orientation, value, str_on_off(on), misc_to_vconn(misc),
@@ -725,6 +734,8 @@ static void qcom_pmic_typec_port_stop(struct pmic_typec *tcpm)
 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
 		disable_irq(pmic_typec_port->irq_data[i].irq);
 	cancel_delayed_work_sync(&pmic_typec_port->cc_debounce_dwork);
+	if (pmic_typec_port->vconn_boost)
+		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 0);
 	pmic_typec_port->tcpm_port = NULL;
 }
 
@@ -765,6 +776,11 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 		pmic_typec_port->vdd_vbus = devm_regulator_get(dev, "vdd-vbus");
 	if (IS_ERR(pmic_typec_port->vdd_vbus))
 		return PTR_ERR(pmic_typec_port->vdd_vbus);
+
+	pmic_typec_port->vconn_boost = devm_gpiod_get_optional(dev, "vconn-boost",
+								       GPIOD_OUT_LOW);
+	if (IS_ERR(pmic_typec_port->vconn_boost))
+		return PTR_ERR(pmic_typec_port->vconn_boost);
 
 	pmic_typec_port->dev = dev;
 	pmic_typec_port->base = base;
