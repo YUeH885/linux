@@ -427,6 +427,14 @@ static int qcom_pmic_typec_port_get_cc(struct tcpc_dev *tcpc,
 		if (ret)
 			goto done;
 		switch (val & DETECTED_SRC_TYPE_MASK) {
+		case 0:
+			/*
+			 * CC_ATTACHED can be set before the Type-C state machine
+			 * has sampled the partner termination. Report the pins as
+			 * open instead of inventing one, otherwise TCPM commits to
+			 * an attach the hardware has not detected.
+			 */
+			goto done;
 		case AUDIO_ACCESS_RA_RA:
 			val = TYPEC_CC_RA;
 			*cc1 = TYPEC_CC_RA;
@@ -452,6 +460,9 @@ static int qcom_pmic_typec_port_get_cc(struct tcpc_dev *tcpc,
 		if (ret)
 			goto done;
 		switch (val & DETECTED_SNK_TYPE_MASK) {
+		case 0:
+			/* Not sampled yet, as in the source branch above. */
+			goto done;
 		case SNK_RP_STD:
 			val = TYPEC_CC_RP_DEF;
 			break;
