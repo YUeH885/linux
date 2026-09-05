@@ -451,8 +451,6 @@ static int dwc3_usb_role_switch_set(struct usb_role_switch *sw,
 				    enum usb_role role)
 {
 	struct dwc3 *dwc = usb_role_switch_get_drvdata(sw);
-	bool reconnect = READ_ONCE(dwc->role_switch_disconnected);
-	int ret = 0;
 	u32 mode;
 
 	switch (role) {
@@ -472,20 +470,7 @@ static int dwc3_usb_role_switch_set(struct usb_role_switch *sw,
 
 	dwc3_pre_set_role(dwc, role);
 	dwc3_set_mode(dwc, mode);
-	if (role == USB_ROLE_NONE) {
-		if (dwc->gadget)
-			ret = usb_gadget_disconnect(dwc->gadget);
-		if (ret && ret != -EOPNOTSUPP)
-			return ret;
-		WRITE_ONCE(dwc->role_switch_disconnected, true);
-		return 0;
-	}
-	if (role == USB_ROLE_DEVICE && reconnect && dwc->gadget)
-		ret = usb_gadget_connect(dwc->gadget);
-	if (!ret)
-		WRITE_ONCE(dwc->role_switch_disconnected, false);
-
-	return ret;
+	return 0;
 }
 
 static enum usb_role dwc3_usb_role_switch_get(struct usb_role_switch *sw)
@@ -493,9 +478,6 @@ static enum usb_role dwc3_usb_role_switch_get(struct usb_role_switch *sw)
 	struct dwc3 *dwc = usb_role_switch_get_drvdata(sw);
 	unsigned long flags;
 	enum usb_role role;
-
-	if (READ_ONCE(dwc->role_switch_disconnected))
-		return USB_ROLE_NONE;
 
 	spin_lock_irqsave(&dwc->lock, flags);
 	switch (dwc->current_dr_role) {
