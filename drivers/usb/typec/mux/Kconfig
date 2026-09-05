@@ -18,6 +18,15 @@ config TYPEC_MUX_GPIO_SBU
 	  Say Y or M if your system uses a GPIO based mux for managing the
 	  connected state and the swapping of the SBU lines in a Type-C port.
 
+config TYPEC_MUX_LGE_SBU
+	tristate "LGE Alpha GPIO based SBU mux"
+	help
+	  Say Y or M if your LGE Alpha device uses GPIO87 for SBU selection
+	  and GPIO35 for the USB-UART/debug path on its USB Type-C connector.
+	  The driver also controls the board-specific DP AUX switch when the
+	  connector enters DisplayPort Alt Mode.
+	  If compiled as a module, the module will be named lge-sbu-mux.
+
 config TYPEC_MUX_PI3USB30532
 	tristate "Pericom PI3USB30532 Type-C cross switch driver"
 	depends on I2C
