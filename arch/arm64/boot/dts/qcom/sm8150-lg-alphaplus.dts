@@ -121,6 +121,32 @@
 		gpio = <&tlmm 152 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 	};
+
+	/*
+	 * GPIO87 routes the connector SBU pins, GPIO35 selects the UART debug
+	 * path, and GPIO42/GPIO148 enable and orient the DP AUX switch that
+	 * sits between the SBU pins and the DP controller.  This board wires
+	 * the SBU selector inverted.
+	 */
+	lge_sbu_mux: sbu-mux {
+		compatible = "lg,lge-sbu-mux";
+		select-gpios = <&tlmm 87 GPIO_ACTIVE_HIGH>;
+		uart-sel-gpios = <&tlmm 35 GPIO_ACTIVE_HIGH>;
+		aux-enable-gpios = <&tlmm 42 GPIO_ACTIVE_LOW>;
+		aux-select-gpios = <&tlmm 148 GPIO_ACTIVE_HIGH>;
+		lg,reverse-sbu-switch;
+		mode-switch;
+		orientation-switch;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&dp_aux_switch_default>;
+
+		port {
+			lge_sbu_mux_in: endpoint {
+				remote-endpoint = <&pm8150b_sbu_out>;
+			};
+		};
+	};
 };
 
 &apps_rsc {
@@ -511,8 +537,11 @@
 };
 
 &tlmm {
-	/* Reserve the eGPIO range except GPIO96 for SD card detect and GPIO152 for touchscreen VDD. */
-	gpio-reserved-ranges = <93 3>, <97 55>, <153 22>;
+	/*
+	 * Reserve the eGPIO range except GPIO96 for SD card detect, GPIO148 for
+	 * the DP AUX switch select and GPIO152 for touchscreen VDD.
+	 */
+	gpio-reserved-ranges = <93 3>, <97 51>, <149 3>, <153 22>;
 
 	sdc2_default: sdc2-default-state {
 		clk-pins {
@@ -580,6 +609,13 @@
 		drive-strength = <2>;
 		bias-pull-down;
 	};
+
+	dp_aux_switch_default: dp-aux-switch-default-state {
+		pins = "gpio42", "gpio148";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
 };
 
 &ufs_mem_hc {
@@ -606,16 +642,42 @@
 	vdda18-supply = <&vdda_usb_hs_1p8>;
 };
 
+&usb_1_qmpphy {
+	status = "okay";
+	vdda-phy-supply = <&vreg_l3c_1p2>;
+	vdda-pll-supply = <&vdda_usb_ss_dp_core_1>;
+	mode-switch;
+	orientation-switch;
+};
+
+&usb_1_qmpphy_out {
+	remote-endpoint = <&pm8150b_typec_mux_in>;
+};
+
+&usb_1_qmpphy_dp_in {
+	remote-endpoint = <&mdss_dp_out>;
+};
+
+&mdss_dp {
+	status = "okay";
+};
+
+&mdss_dp_out {
+	data-lanes = <0 1>;
+	remote-endpoint = <&usb_1_qmpphy_dp_in>;
+};
+
 &usb_1 {
-	qcom,select-utmi-as-pipe-clk;
 	status = "okay";
 };
 
 &usb_1_dwc3 {
 	dr_mode = "otg";
-	maximum-speed = "high-speed";
-	phys = <&usb_1_hsphy>;
-	phy-names = "usb2-phy";
+	/* DWC31 core_init accesses LLUCTL at offset 0xd024. */
+	reg = <0 0x0a600000 0 0xe000>;
+	maximum-speed = "super-speed";
+	phys = <&usb_1_hsphy>, <&usb_1_qmpphy QMP_USB43DP_USB3_PHY>;
+	phy-names = "usb2-phy", "usb3-phy";
 	usb-psy-name = "usb";
 	usb-role-switch;
 };
@@ -632,21 +694,57 @@
 
 &pm8150b_typec {
 	vdd-pdphy-supply = <&vdd_pdphy>;
+	vconn-boost-gpios = <&pm8150b_gpios 5 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 
 	connector {
 		compatible = "usb-c-connector";
-		power-role = "sink";
-		data-role = "device";
+		power-role = "dual";
+		try-power-role = "sink";
+		data-role = "dual";
 		vbus-supply = <&pm8150b_vbus>;
 
 		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)
 			     PDO_FIXED(9000, 1660, PDO_FIXED_USB_COMM)>;
+		source-pdos = <PDO_FIXED(5000, 3000,
+					 PDO_FIXED_DUAL_ROLE |
+					 PDO_FIXED_USB_COMM |
+					 PDO_FIXED_DATA_SWAP)>;
 		op-sink-microwatt = <13000000>;
 
-		port {
-			pm8150b_hs_in: endpoint {
-				remote-endpoint = <&usb_1_dwc3_hs>;
+		altmodes {
+			displayport {
+				svid = /bits/ 16 <0xff01>;
+				vdo = <0x00001c46>;
+			};
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				pm8150b_hs_in: endpoint {
+					remote-endpoint = <&usb_1_dwc3_hs>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				pm8150b_typec_mux_in: endpoint {
+					remote-endpoint = <&usb_1_qmpphy_out>;
+				};
+			};
+
+			port@2 {
+				reg = <2>;
+
+				pm8150b_sbu_out: endpoint {
+					remote-endpoint = <&lge_sbu_mux_in>;
+				};
 			};
 		};
 	};
