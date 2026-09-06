@@ -788,6 +788,11 @@
 	status = "okay";
 };
 
+/* ADSP firmware (adsp.mdt) comes from the mounted modem_a partition. */
+&remoteproc_adsp {
+	status = "okay";
+};
+
 &sdhc_2 {
 	cd-gpios = <&tlmm 96 GPIO_ACTIVE_HIGH>;
 	pinctrl-names = "default", "sleep";
