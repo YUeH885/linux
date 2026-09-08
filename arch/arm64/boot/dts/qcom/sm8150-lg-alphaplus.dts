@@ -619,6 +619,7 @@
 
 &wifi {
 	status = "okay";
+	qcom,mac-address-file = "ath10k/WCN3990/hw1.0/wlan_mac.bin";
 
 	vdd-0.8-cx-mx-supply = <&vdda_wcss_pll>;
 	vdd-1.8-xo-supply = <&vreg_l7a_1p8>;
