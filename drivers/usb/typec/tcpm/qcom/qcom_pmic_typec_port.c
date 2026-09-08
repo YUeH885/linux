@@ -181,6 +181,7 @@ struct pmic_typec_port {
 	int				cc;
 	bool				debouncing_cc;
 	struct delayed_work		cc_debounce_dwork;
+	bool				started;
 
 	spinlock_t			lock;	/* Register atomicity */
 };
@@ -225,19 +226,25 @@ static void qcom_pmic_typec_port_cc_debounce(struct work_struct *work)
 {
 	struct pmic_typec_port *pmic_typec_port =
 		container_of(work, struct pmic_typec_port, cc_debounce_dwork.work);
+	struct tcpm_port *tcpm_port = NULL;
 	unsigned long flags;
 
 	spin_lock_irqsave(&pmic_typec_port->lock, flags);
 	pmic_typec_port->debouncing_cc = false;
+	tcpm_port = pmic_typec_port->started ?
+		pmic_typec_port->tcpm_port : NULL;
 	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 
 	dev_dbg(pmic_typec_port->dev, "Debounce cc complete\n");
+	if (tcpm_port)
+		tcpm_cc_change(tcpm_port);
 }
 
 static irqreturn_t pmic_typec_port_isr(int irq, void *dev_id)
 {
 	struct pmic_typec_port_irq_data *irq_data = dev_id;
 	struct pmic_typec_port *pmic_typec_port = irq_data->pmic_typec_port;
+	struct tcpm_port *tcpm_port = NULL;
 	u32 misc_stat;
 	bool vbus_change = false;
 	bool cc_change = false;
@@ -263,14 +270,17 @@ static irqreturn_t pmic_typec_port_isr(int irq, void *dev_id)
 		break;
 	}
 
+	tcpm_port = pmic_typec_port->started ?
+		pmic_typec_port->tcpm_port : NULL;
+
 done:
 	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 
-	if (vbus_change)
-		tcpm_vbus_change(pmic_typec_port->tcpm_port);
+	if (vbus_change && tcpm_port)
+		tcpm_vbus_change(tcpm_port);
 
-	if (cc_change)
-		tcpm_cc_change(pmic_typec_port->tcpm_port);
+	if (cc_change && tcpm_port)
+		tcpm_cc_change(tcpm_port);
 
 	return IRQ_HANDLED;
 }
@@ -396,6 +406,8 @@ static int qcom_pmic_typec_port_get_cc(struct tcpc_dev *tcpc,
 		if (ret)
 			goto done;
 		switch (val & DETECTED_SRC_TYPE_MASK) {
+		case 0:
+			goto done;
 		case AUDIO_ACCESS_RA_RA:
 			val = TYPEC_CC_RA;
 			*cc1 = TYPEC_CC_RA;
@@ -421,6 +433,8 @@ static int qcom_pmic_typec_port_get_cc(struct tcpc_dev *tcpc,
 		if (ret)
 			goto done;
 		switch (val & DETECTED_SNK_TYPE_MASK) {
+		case 0:
+			goto done;
 		case SNK_RP_STD:
 			val = TYPEC_CC_RP_DEF;
 			break;
@@ -648,6 +662,7 @@ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
 				      struct tcpm_port *tcpm_port)
 {
 	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	unsigned long flags;
 	int i;
 	int mask;
 	int ret;
@@ -686,7 +701,9 @@ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
 	if (ret)
 		goto done;
 
+	spin_lock_irqsave(&pmic_typec_port->lock, flags);
 	pmic_typec_port->tcpm_port = tcpm_port;
+	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 
 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
 		enable_irq(pmic_typec_port->irq_data[i].irq);
@@ -698,14 +715,34 @@ done:
 	return ret;
 }
 
+void qcom_pmic_typec_port_sync(struct pmic_typec *tcpm)
+{
+	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	struct tcpm_port *tcpm_port;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pmic_typec_port->lock, flags);
+	pmic_typec_port->started = true;
+	tcpm_port = pmic_typec_port->tcpm_port;
+	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
+
+	tcpm_vbus_change(tcpm_port);
+	tcpm_cc_change(tcpm_port);
+}
+
 static void qcom_pmic_typec_port_stop(struct pmic_typec *tcpm)
 {
 	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	unsigned long flags;
 	int i;
 
 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
 		disable_irq(pmic_typec_port->irq_data[i].irq);
 
+	spin_lock_irqsave(&pmic_typec_port->lock, flags);
+	pmic_typec_port->started = false;
+	pmic_typec_port->tcpm_port = NULL;
+	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 	disable_delayed_work_sync(&pmic_typec_port->cc_debounce_dwork);
 	if (pmic_typec_port->vconn_boost)
 		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 0);
