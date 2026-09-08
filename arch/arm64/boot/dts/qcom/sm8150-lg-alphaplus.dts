@@ -77,6 +77,24 @@
 		};
 	};
 
+	touch_vcl: touch-vcl-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "touch_vcl";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&tlmm 59 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	touch_vdd: touch-vdd-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "touch_vdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 152 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
 	vph_pwr: vph-pwr-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "vph_pwr";
@@ -412,6 +430,14 @@
 	status = "okay";
 };
 
+&dispcc {
+	status = "okay";
+};
+
+&gpi_dma2 {
+	status = "okay";
+};
+
 &gpi_dma1 {
 	status = "okay";
 };
@@ -426,10 +452,31 @@
 
 &tlmm {
 	/*
-	 * GPIO93-GPIO174 is the eGPIO range without TLMM control; GPIO96 is
-	 * reserved for the SD card detect function on the TLMM side.
+	 * Reserve the eGPIO range except GPIO96 for SD card detect and
+	 * GPIO152 for touchscreen VDD. Touch IRQ uses PDC90, not TLMM122.
 	 */
-	gpio-reserved-ranges = <93 3>, <97 78>;
+	gpio-reserved-ranges = <93 3>, <97 55>, <153 22>;
+
+	panel_reset_active: panel-reset-active-state {
+		pins = "gpio6";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	panel_reset_sleep: panel-reset-sleep-state {
+		pins = "gpio6";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	mdp_vsync_default: mdp-vsync-default-state {
+		pins = "gpio8";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
 
 	sdc2_default: sdc2-default-state {
 		clk-pins {
@@ -587,6 +634,65 @@
 
 &qupv3_id_1 {
 	status = "okay";
+};
+
+&qupv3_id_2 {
+	status = "okay";
+};
+
+&i2c17 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	touchscreen@28 {
+		compatible = "lg,sw42000";
+		reg = <0x28>;
+		interrupts-extended = <&pdc 90 IRQ_TYPE_LEVEL_LOW>;
+		panel = <&display_panel>;
+		reset-gpios = <&tlmm 54 GPIO_ACTIVE_LOW>;
+		vcl-supply = <&touch_vcl>;
+		vdd-supply = <&touch_vdd>;
+		touchscreen-size-x = <1440>;
+		touchscreen-size-y = <3120>;
+	};
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	status = "okay";
+	vdda-supply = <&vreg_l3c_1p2>;
+	qcom,suspend-ulps-enabled;
+
+	display_panel: panel@0 {
+		compatible = "lg,sw43410";
+		reg = <0>;
+		vddi-supply = <&vreg_l14a_1p8>;
+		vpnl-supply = <&vreg_l17a_3p0>;
+		reset-gpios = <&tlmm 6 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&panel_reset_active &mdp_vsync_default>;
+		pinctrl-1 = <&panel_reset_sleep &mdp_vsync_default>;
+		pinctrl-names = "default", "sleep";
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	qcom,te-source = "mdp_vsync_p";
+	remote-endpoint = <&panel_in>;
+};
+
+&mdss_dsi0_phy {
+	status = "okay";
+	vdds-supply = <&vreg_l5a_0p875>;
 };
 
 &remoteproc_mpss {
