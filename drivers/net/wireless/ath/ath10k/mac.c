@@ -324,6 +324,13 @@ static int ath10k_install_key(struct ath10k_vif *arvif,
 	if (ret)
 		return ret;
 
+	/* WCN3990 does not send an HTT security indication for cipher NONE.
+	 * Group-key removal installs a replacement key and still needs one.
+	 */
+	if (QCA_REV_WCN3990(ar) && cmd == DISABLE_KEY &&
+	    !(flags & WMI_KEY_GROUP))
+		return 0;
+
 	time_left = wait_for_completion_timeout(&ar->install_key_done, 3 * HZ);
 	if (time_left == 0)
 		return -ETIMEDOUT;
