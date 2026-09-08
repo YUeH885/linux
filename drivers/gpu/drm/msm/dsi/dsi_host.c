@@ -2386,9 +2386,9 @@ void msm_dsi_host_reset_phy(struct mipi_dsi_host *host)
 	udelay(100);
 }
 
-void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
-			struct msm_dsi_phy_clk_request *clk_req,
-			bool is_bonded_dsi)
+int msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
+				 struct msm_dsi_phy_clk_request *clk_req,
+				 bool is_bonded_dsi)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
@@ -2397,7 +2397,7 @@ void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
 	ret = cfg_hnd->ops->calc_clk_rate(msm_host, is_bonded_dsi);
 	if (ret) {
 		pr_err("%s: unable to calc clk rate, %d\n", __func__, ret);
-		return;
+		return ret;
 	}
 
 	/* CPHY transmits 16 bits over 7 clock cycles
@@ -2409,6 +2409,8 @@ void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
 	else
 		clk_req->bitclk_rate = msm_host->byte_clk_rate * 8;
 	clk_req->escclk_rate = msm_host->esc_clk_rate;
+
+	return 0;
 }
 
 void msm_dsi_host_enable_irq(struct mipi_dsi_host *host)
@@ -2478,7 +2480,7 @@ static void msm_dsi_sfpb_config(struct msm_dsi_host *msm_host, bool enable)
 
 int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
-			bool is_bonded_dsi, struct msm_dsi_phy *phy)
+			bool is_bonded_dsi, struct msm_dsi_phy *phy, bool ulps_enabled)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
@@ -2501,17 +2503,29 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 	if (ret) {
 		pr_err("%s:Failed to enable vregs.ret=%d\n",
 			__func__, ret);
-		goto unlock_ret;
+		goto fail_disable_sfpb;
 	}
 
-	pm_runtime_get_sync(&msm_host->pdev->dev);
+	ret = pm_runtime_resume_and_get(&msm_host->pdev->dev);
+	if (ret < 0)
+		goto fail_disable_reg;
+
 	ret = cfg_hnd->ops->link_clk_set_rate(msm_host);
 	if (!ret)
 		ret = cfg_hnd->ops->link_clk_enable(msm_host);
 	if (ret) {
 		pr_err("%s: failed to enable link clocks. ret=%d\n",
 		       __func__, ret);
-		goto fail_disable_reg;
+		goto fail_put_pm;
+	}
+
+	/* Exit ULPS with link clocks on, before dsi_ctrl_enable() requests HS. */
+	if (ulps_enabled) {
+		ret = msm_dsi_phy_set_ulps(phy, false);
+		if (ret) {
+			pr_err("%s: failed to exit ULPS, %d\n", __func__, ret);
+			goto fail_disable_clk;
+		}
 	}
 
 	ret = pinctrl_pm_select_default_state(&msm_host->pdev->dev);
@@ -2532,10 +2546,13 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 
 fail_disable_clk:
 	cfg_hnd->ops->link_clk_disable(msm_host);
+fail_put_pm:
 	pm_runtime_put(&msm_host->pdev->dev);
 fail_disable_reg:
 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
 			       msm_host->supplies);
+fail_disable_sfpb:
+	msm_dsi_sfpb_config(msm_host, false);
 unlock_ret:
 	mutex_unlock(&msm_host->dev_mutex);
 	return ret;
