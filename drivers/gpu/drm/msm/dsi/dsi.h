@@ -21,7 +21,11 @@
 #define DSI_MAX	2
 
 struct msm_dsi_phy_shared_timings;
-struct msm_dsi_phy_clk_request;
+
+struct msm_dsi_phy_clk_request {
+	unsigned long bitclk_rate;
+	unsigned long escclk_rate;
+};
 
 enum msm_dsi_phy_usecase {
 	MSM_DSI_PHY_STANDALONE,
@@ -43,6 +47,9 @@ struct msm_dsi {
 
 	struct device *phy_dev;
 	bool phy_enabled;
+	bool ulps_suspend_enabled;
+	bool ulps_enabled;
+	struct msm_dsi_phy_clk_request phy_clk_req;
 
 	int id;
 };
@@ -74,7 +81,7 @@ void msm_dsi_host_enable_irq(struct mipi_dsi_host *host);
 void msm_dsi_host_disable_irq(struct mipi_dsi_host *host);
 int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
-			bool is_bonded_dsi, struct msm_dsi_phy *phy);
+			bool is_bonded_dsi, struct msm_dsi_phy *phy, bool ulps_enabled);
 int msm_dsi_host_power_off(struct mipi_dsi_host *host);
 int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
 				  const struct drm_display_mode *mode);
@@ -88,9 +95,9 @@ void msm_dsi_host_set_phy_mode(struct mipi_dsi_host *host,
 int msm_dsi_host_set_src_pll(struct mipi_dsi_host *host,
 			struct msm_dsi_phy *src_phy);
 void msm_dsi_host_reset_phy(struct mipi_dsi_host *host);
-void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
-	struct msm_dsi_phy_clk_request *clk_req,
-	bool is_bonded_dsi);
+int msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
+				 struct msm_dsi_phy_clk_request *clk_req,
+				 bool is_bonded_dsi);
 void msm_dsi_host_destroy(struct mipi_dsi_host *host);
 int msm_dsi_host_modeset_init(struct mipi_dsi_host *host,
 					struct drm_device *dev);
@@ -133,17 +140,15 @@ struct msm_dsi_phy_shared_timings {
 	bool byte_intf_clk_div_2;
 };
 
-struct msm_dsi_phy_clk_request {
-	unsigned long bitclk_rate;
-	unsigned long escclk_rate;
-};
-
 void msm_dsi_phy_driver_register(void);
 void msm_dsi_phy_driver_unregister(void);
 int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
 			struct msm_dsi_phy_clk_request *clk_req,
 			struct msm_dsi_phy_shared_timings *shared_timings);
 void msm_dsi_phy_disable(struct msm_dsi_phy *phy);
+void msm_dsi_phy_get_shared_timings(struct msm_dsi_phy *phy,
+				    struct msm_dsi_phy_shared_timings *shared_timings);
+int msm_dsi_phy_set_ulps(struct msm_dsi_phy *phy, bool enable);
 void msm_dsi_phy_set_usecase(struct msm_dsi_phy *phy,
 			     enum msm_dsi_phy_usecase uc);
 void msm_dsi_phy_pll_save_state(struct msm_dsi_phy *phy);
@@ -152,4 +157,3 @@ void msm_dsi_phy_snapshot(struct msm_disp_state *disp_state, struct msm_dsi_phy 
 bool msm_dsi_phy_set_continuous_clock(struct msm_dsi_phy *phy, bool enable);
 
 #endif /* __DSI_CONNECTOR_H__ */
-

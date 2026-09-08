@@ -1207,6 +1207,49 @@ static bool dsi_7nm_set_continuous_clock(struct msm_dsi_phy *phy, bool enable)
 	return enable;
 }
 
+static int dsi_7nm_phy_set_ulps(struct msm_dsi_phy *phy, bool enable)
+{
+	void __iomem *base = phy->base;
+	const u32 lanes = GENMASK(4, 0);
+	u32 status;
+	int ret;
+
+	if (phy->cphy_mode)
+		return -EOPNOTSUPP;
+
+	if (enable) {
+		/* The clock lane cannot reach stop state while forced into HS. */
+		dsi_7nm_set_continuous_clock(phy, false);
+		ret = readl_poll_timeout(base + REG_DSI_7nm_PHY_CMN_LANE_STATUS1,
+					 status, (status & lanes) == lanes, 10, 100);
+		if (ret)
+			return ret;
+
+		writel(lanes, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL1);
+		usleep_range(100, 110);
+		dsi_phy_hw_v4_0_config_lpcdrx(phy, false);
+
+		status = readl(base + REG_DSI_7nm_PHY_CMN_LANE_STATUS0);
+		return status & lanes ? -EIO : 0;
+	}
+
+	status = readl(base + REG_DSI_7nm_PHY_CMN_LANE_STATUS0);
+	if (status & lanes)
+		return -EIO;
+
+	dsi_phy_hw_v4_0_config_lpcdrx(phy, true);
+	writel(lanes, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL2);
+	usleep_range(1000, 1010);
+	writel(0, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL1);
+	writel(0, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL2);
+	writel(lanes, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL3);
+	writel(0, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL3);
+	usleep_range(100, 110);
+
+	status = readl(base + REG_DSI_7nm_PHY_CMN_LANE_STATUS0);
+	return (status & lanes) == lanes ? 0 : -EIO;
+}
+
 static void dsi_7nm_phy_disable(struct msm_dsi_phy *phy)
 {
 	struct dsi_pll_7nm *pll = phy->pll_data;
@@ -1237,6 +1280,11 @@ static void dsi_7nm_phy_disable(struct msm_dsi_phy *phy)
 	data &= ~0x1F;
 	writel(data, base + REG_DSI_7nm_PHY_CMN_CTRL_0);
 	writel(0, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL0);
+
+	/* Clear ULPS and forced-HS requests, including failed transitions. */
+	writel(0, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL1);
+	writel(0, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL2);
+	writel(0, base + REG_DSI_7nm_PHY_CMN_LANE_CTRL3);
 
 	spin_lock_irqsave(&pll->pll_enable_lock, flags);
 	pll->pll_enable_cnt = 0;
@@ -1328,6 +1376,7 @@ const struct msm_dsi_phy_cfg dsi_phy_7nm_8150_cfgs = {
 		.save_pll_state = dsi_7nm_pll_save_state,
 		.restore_pll_state = dsi_7nm_pll_restore_state,
 		.set_continuous_clock = dsi_7nm_set_continuous_clock,
+		.set_ulps = dsi_7nm_phy_set_ulps,
 	},
 	.min_pll_rate = 1000000000UL,
 	.max_pll_rate = 3500000000UL,
