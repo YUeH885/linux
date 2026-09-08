@@ -2764,6 +2764,12 @@ static void ath10k_wmi_event_chan_info_paired(struct ath10k *ar,
 	struct survey_info *survey;
 	int idx;
 
+	if (!params->freq &&
+	    (params->cmd_flags & WMI_CHAN_INFO_FLAG_COMPLETE)) {
+		ar->ch_info_can_report_survey = false;
+		return;
+	}
+
 	idx = freq_to_idx(ar, params->freq);
 	if (idx >= ARRAY_SIZE(ar->survey)) {
 		ath10k_warn(ar, "chan info: invalid frequency %d (idx %d out of bounds)\n",
