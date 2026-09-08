@@ -5175,6 +5175,7 @@ static void tcpm_set_initial_negotiated_rev(struct tcpm_port *port)
 
 static void run_state_machine(struct tcpm_port *port)
 {
+	bool avoid_hard_reset;
 	int ret;
 	enum typec_pwr_opmode opmode;
 	unsigned int msecs;
@@ -5647,6 +5648,8 @@ static void run_state_machine(struct tcpm_port *port)
 			       port->timings.sink_wait_cap_time);
 		break;
 	case SNK_WAIT_CAPABILITIES_TIMEOUT:
+		avoid_hard_reset = port->tcpc->avoid_snk_hard_reset &&
+			port->tcpc->avoid_snk_hard_reset(port->tcpc);
 		/*
 		 * There are some USB PD sources in the field, which do not
 		 * properly implement the specification and fail to start
@@ -5663,9 +5666,11 @@ static void run_state_machine(struct tcpm_port *port)
 		 * according to the specification.
 		 */
 		if (tcpm_pd_send_control(port, PD_CTRL_GET_SOURCE_CAP, TCPC_TX_SOP))
-			tcpm_set_state_cond(port, hard_reset_state(port), 0);
+			tcpm_set_state_cond(port, avoid_hard_reset ? SNK_READY :
+					    hard_reset_state(port), 0);
 		else
-			tcpm_set_state(port, hard_reset_state(port),
+			tcpm_set_state(port, avoid_hard_reset ? SNK_READY :
+				       hard_reset_state(port),
 				       port->timings.sink_wait_cap_time);
 		break;
 	case SNK_NEGOTIATE_CAPABILITIES:
@@ -6006,10 +6011,15 @@ static void run_state_machine(struct tcpm_port *port)
 			port->rx_msgid = -1;
 			/* remove existing capabilities */
 			tcpm_partner_source_caps_reset(port);
+			avoid_hard_reset = port->pwr_role == TYPEC_SINK &&
+				port->tcpc->avoid_snk_hard_reset &&
+				port->tcpc->avoid_snk_hard_reset(port->tcpc);
+			upcoming_state = avoid_hard_reset ?
+				SNK_WAIT_CAPABILITIES_TIMEOUT : hard_reset_state(port);
 			if (tcpm_pd_send_control(port, PD_CTRL_SOFT_RESET, TCPC_TX_SOP))
-				tcpm_set_state_cond(port, hard_reset_state(port), 0);
+				tcpm_set_state_cond(port, upcoming_state, 0);
 			else
-				tcpm_set_state_cond(port, hard_reset_state(port),
+				tcpm_set_state_cond(port, upcoming_state,
 						    PD_T_SENDER_RESPONSE);
 		}
 		break;
