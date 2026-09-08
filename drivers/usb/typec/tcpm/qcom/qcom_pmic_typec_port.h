@@ -22,6 +22,8 @@ struct pmic_typec_port_resources {
 	const struct pmic_typec_port_irq_params	irq_params[PMIC_TYPEC_MAX_IRQS];
 };
 
+struct pmic_typec;
+
 /* API */
 
 extern const struct pmic_typec_port_resources pm8150b_port_res;
@@ -31,5 +33,6 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 			       const struct pmic_typec_port_resources *res,
 			       struct regmap *regmap,
 			       u32 base);
+void qcom_pmic_typec_port_sync(struct pmic_typec *tcpm);
 
 #endif /* __QCOM_PMIC_TYPE_C_PORT_H__ */
