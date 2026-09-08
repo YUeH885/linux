@@ -2822,6 +2822,12 @@ int dpu_encoder_wait_for_commit_done(struct drm_encoder *drm_enc)
 	for (i = 0; i < dpu_enc->num_phys_encs; i++) {
 		struct dpu_encoder_phys *phys = dpu_enc->phys_encs[i];
 
+		/* The pre-enable flush has nothing to wait for after a full disable. */
+		if (phys->enable_state == DPU_ENC_DISABLED &&
+		    !atomic_read(&phys->pending_kickoff_cnt) &&
+		    !atomic_read(&phys->pending_ctlstart_cnt))
+			continue;
+
 		if (phys->ops.wait_for_commit_done) {
 			DPU_ATRACE_BEGIN("wait_for_commit_done");
 			ret = phys->ops.wait_for_commit_done(phys);
