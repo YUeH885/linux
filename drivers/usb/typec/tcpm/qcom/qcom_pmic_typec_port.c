@@ -181,6 +181,7 @@ struct pmic_typec_port {
 	int				cc;
 	bool				debouncing_cc;
 	struct delayed_work		cc_debounce_dwork;
+	bool				early_usb_attach;
 	bool				started;
 
 	spinlock_t			lock;	/* Register atomicity */
@@ -263,8 +264,16 @@ static irqreturn_t pmic_typec_port_isr(int irq, void *dev_id)
 	case PMIC_TYPEC_VBUS_IRQ:
 		vbus_change = true;
 		break;
-	case PMIC_TYPEC_CC_STATE_IRQ:
 	case PMIC_TYPEC_ATTACH_DETACH_IRQ:
+		ret = regmap_read(pmic_typec_port->regmap,
+				  pmic_typec_port->base + TYPEC_STATE_MACHINE_STATUS_REG,
+				  &misc_stat);
+		if (ret)
+			goto done;
+		if (!(misc_stat & TYPEC_ATTACH_DETACH_STATE))
+			pmic_typec_port->early_usb_attach = false;
+		fallthrough;
+	case PMIC_TYPEC_CC_STATE_IRQ:
 		if (!pmic_typec_port->debouncing_cc)
 			cc_change = true;
 		break;
@@ -344,6 +353,51 @@ static int qcom_pmic_typec_port_get_vbus(struct tcpc_dev *tcpc)
 	mutex_unlock(&pmic_typec_port->vbus_lock);
 
 	return ret;
+}
+
+static bool qcom_pmic_typec_port_avoid_snk_hard_reset(struct tcpc_dev *tcpc)
+{
+	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	unsigned int misc, status;
+	unsigned long flags;
+	bool avoid;
+	int ret;
+
+	spin_lock_irqsave(&pmic_typec_port->lock, flags);
+	avoid = pmic_typec_port->early_usb_attach;
+
+	ret = regmap_read(pmic_typec_port->regmap,
+			  pmic_typec_port->base + TYPEC_MISC_STATUS_REG, &misc);
+	if (ret) {
+		dev_warn_ratelimited(pmic_typec_port->dev,
+				     "Failed to read Type-C misc status: %d\n", ret);
+		goto done;
+	}
+
+	if (!(misc & CC_ATTACHED))
+		goto done;
+
+	if (!avoid) {
+		ret = regmap_read(pmic_typec_port->regmap,
+				  pmic_typec_port->base + LEGACY_CABLE_STATUS_REG,
+				  &status);
+		if (ret) {
+			dev_warn_ratelimited(pmic_typec_port->dev,
+					     "Failed to read legacy cable status: %d\n",
+					     ret);
+			goto done;
+		}
+
+		avoid = status & TYPEC_LEGACY_CABLE_STATUS;
+	}
+
+	dev_dbg(pmic_typec_port->dev, "avoid sink hard reset %d, early attach %d\n",
+		avoid, pmic_typec_port->early_usb_attach);
+done:
+	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
+
+	return avoid;
 }
 
 static int qcom_pmic_typec_port_set_vbus(struct tcpc_dev *tcpc, bool on, bool sink)
@@ -799,6 +853,9 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 	spin_lock_init(&pmic_typec_port->lock);
 	INIT_DELAYED_WORK(&pmic_typec_port->cc_debounce_dwork,
 			  qcom_pmic_typec_port_cc_debounce);
+	/* VBUS before CC attach can make a standard Type-C cable look legacy. */
+	pmic_typec_port->early_usb_attach =
+		qcom_pmic_typec_port_vbus_detect(pmic_typec_port);
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
@@ -829,6 +886,8 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 	tcpm->tcpc.get_cc = qcom_pmic_typec_port_get_cc;
 	tcpm->tcpc.set_polarity = qcom_pmic_typec_port_set_polarity;
 	tcpm->tcpc.set_vconn = qcom_pmic_typec_port_set_vconn;
+	tcpm->tcpc.avoid_snk_hard_reset =
+		qcom_pmic_typec_port_avoid_snk_hard_reset;
 	tcpm->tcpc.start_toggling = qcom_pmic_typec_port_start_toggling;
 
 	tcpm->port_start = qcom_pmic_typec_port_start;
