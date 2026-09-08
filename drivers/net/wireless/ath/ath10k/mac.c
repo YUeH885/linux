@@ -4907,6 +4907,9 @@ static struct ieee80211_sta_vht_cap ath10k_create_vht_cap(struct ath10k *ar)
 
 	vht_cap.vht_supported = 1;
 	vht_cap.cap = ar->vht_cap_info;
+	/* WCN3990 WMI uses bit 30 for TX LDPC, not extended NSS bandwidth. */
+	if (QCA_REV_WCN3990(ar))
+		vht_cap.cap &= ~IEEE80211_VHT_CAP_EXT_NSS_BW_MASK;
 
 	if (ar->vht_cap_info & (IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE |
 				IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE)) {
