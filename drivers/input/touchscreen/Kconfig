@@ -1414,4 +1414,19 @@ config TOUCHSCREEN_HIMAX_HX83112B
 	  To compile this driver as a module, choose M here: the
 	  module will be called himax_hx83112b.
 
+config TOUCHSCREEN_LG_SW42000
+	tristate "LG SW42000 touchscreen controller"
+	depends on I2C && DRM_PANEL
+	depends on GPIOLIB || COMPILE_TEST
+	help
+	  Say Y here to enable support for LG SW42000 touchscreen controllers.
+	  The driver communicates over I2C and reports contacts through the
+	  input Type-B multitouch interface. It follows the DRM panel state
+	  to enter deep sleep or resume normal scanning.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called lg-sw42000.
+
 endif
