@@ -1058,6 +1058,7 @@ properties:
 
       - items:
           - enum:
+              - lg,alphaplus
               - microsoft,surface-duo
               - qcom,sm8150-hdk
               - qcom,sm8150-mtp
