@@ -13,6 +13,7 @@
 #include <linux/seq_file.h>
 
 #include <drm/drm_atomic.h>
+#include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_file.h>
 #include <drm/drm_probe_helper.h>
@@ -177,6 +178,8 @@ struct dpu_encoder_virt {
 
 	bool enabled;
 	bool commit_done_timedout;
+	bool first_frame_pending;
+	bool frame_started;
 
 	unsigned int num_phys_encs;
 	struct dpu_encoder_phys *phys_encs[MAX_PHYS_ENCODERS_PER_VIRTUAL];
@@ -1374,6 +1377,14 @@ static void dpu_encoder_virt_atomic_enable(struct drm_encoder *drm_enc,
 	mutex_lock(&dpu_enc->enc_lock);
 
 	dpu_enc->commit_done_timedout = false;
+	dpu_enc->frame_started = false;
+	dpu_enc->first_frame_pending = false;
+	if (dpu_enc->disp_info.intf_type == INTF_DSI &&
+	    dpu_enc->disp_info.is_cmd_mode) {
+		drm_for_each_bridge_in_chain_scoped(drm_enc, bridge)
+			dpu_enc->first_frame_pending |=
+				drm_panel_bridge_needs_first_frame(bridge);
+	}
 
 	dpu_enc->connector = drm_atomic_get_new_connector_for_encoder(state, drm_enc);
 
@@ -2197,6 +2208,7 @@ void dpu_encoder_kickoff(struct drm_encoder *drm_enc)
 
 	/* All phys encs are ready to go, trigger the kickoff */
 	_dpu_encoder_kickoff_phys(dpu_enc);
+	dpu_enc->frame_started = true;
 
 	/* allow phys encs to handle any post-kickoff business */
 	for (i = 0; i < dpu_enc->num_phys_encs; i++) {
@@ -2872,6 +2884,16 @@ int dpu_encoder_wait_for_commit_done(struct drm_encoder *drm_enc)
 			if (ret)
 				return ret;
 		}
+	}
+
+	if (dpu_enc->enabled && dpu_enc->frame_started && dpu_enc->first_frame_pending) {
+		/* CTL_START only acknowledges the kickoff, not the complete image. */
+		ret = dpu_encoder_wait_for_tx_complete(drm_enc);
+		if (ret)
+			return ret;
+		dpu_enc->first_frame_pending = false;
+		drm_for_each_bridge_in_chain_scoped(drm_enc, bridge)
+			drm_panel_bridge_notify_first_frame(bridge);
 	}
 
 	return ret;
