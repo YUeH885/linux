@@ -389,7 +389,7 @@ msm_gem_vma_new(struct drm_gpuvm *gpuvm, struct drm_gem_object *obj,
 		BUG_ON(offset != 0);
 		BUG_ON(!obj);  /* NULL mappings not valid for kernel managed VM */
 		ret = drm_mm_insert_node_in_range(&vm->mm, &vma->node,
-						obj->size, PAGE_SIZE, 0,
+						obj->size, vm->va_alignment, 0,
 						range_start, range_end, 0);
 
 		if (ret)
@@ -801,6 +801,7 @@ static const struct drm_sched_backend_ops msm_vm_bind_ops = {
  * @name: the name of the VM
  * @va_start: the start offset of the VA space
  * @va_size: the size of the VA space
+ * @va_alignment: alignment for kernel managed VA allocations
  * @managed: is it a kernel managed VM?
  *
  * In a kernel managed VM, the kernel handles address allocation, and only
@@ -813,7 +814,7 @@ static const struct drm_sched_backend_ops msm_vm_bind_ops = {
  */
 struct drm_gpuvm *
 msm_gem_vm_create(struct drm_device *drm, struct msm_mmu *mmu, const char *name,
-		  u64 va_start, u64 va_size, bool managed)
+		  u64 va_start, u64 va_size, u64 va_alignment, bool managed)
 {
 	/*
 	 * We mostly want to use DRM_GPUVM_RESV_PROTECTED, except that
@@ -861,6 +862,7 @@ msm_gem_vm_create(struct drm_device *drm, struct msm_mmu *mmu, const char *name,
 
 	vm->mmu = mmu;
 	mutex_init(&vm->mmu_lock);
+	vm->va_alignment = va_alignment;
 	vm->managed = managed;
 
 	drm_mm_init(&vm->mm, va_start, va_size);
