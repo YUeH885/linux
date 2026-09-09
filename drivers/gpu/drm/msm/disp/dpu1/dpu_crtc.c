@@ -815,42 +815,12 @@ static void _dpu_crtc_get_pcc_coeff(struct drm_crtc_state *state,
 	cfg->b.b = CONVERT_S3_15(ctm->matrix[8]);
 }
 
-static void _dpu_crtc_get_gc_lut(struct drm_crtc_state *state,
-		struct dpu_hw_gc_lut *gc_lut)
-{
-	struct drm_color_lut *lut;
-	int i;
-	u32 val_even, val_odd;
-
-	lut = (struct drm_color_lut *)state->gamma_lut->data;
-
-	if (!lut)
-		return;
-
-	/* Pack 1024 10-bit entries in 512 32-bit registers */
-	for (i = 0; i < PGC_TBL_LEN; i++) {
-		val_even = drm_color_lut_extract(lut[i * 2].green, 10);
-		val_odd = drm_color_lut_extract(lut[i * 2 + 1].green, 10);
-		gc_lut->c0[i] = val_even | (val_odd << 16);
-		val_even = drm_color_lut_extract(lut[i * 2].blue, 10);
-		val_odd = drm_color_lut_extract(lut[i * 2 + 1].blue, 10);
-		gc_lut->c1[i] = val_even | (val_odd << 16);
-		val_even = drm_color_lut_extract(lut[i * 2].red, 10);
-		val_odd = drm_color_lut_extract(lut[i * 2 + 1].red, 10);
-		gc_lut->c2[i] = val_even | (val_odd << 16);
-	}
-
-	/* Disable 8-bit rounding mode */
-	gc_lut->flags = 0;
-}
-
 static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 {
 	struct drm_crtc_state *state = crtc->state;
 	struct dpu_crtc_state *cstate = to_dpu_crtc_state(crtc->state);
 	struct dpu_crtc_mixer *mixer = cstate->mixers;
 	struct dpu_hw_pcc_cfg cfg;
-	struct dpu_hw_gc_lut *gc_lut;
 	struct dpu_hw_ctl *ctl;
 	struct dpu_hw_dspp *dspp;
 	int i;
@@ -866,6 +836,12 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 		if (!dspp)
 			continue;
 
+		if (dspp->ops.setup_igc) {
+			dspp->ops.setup_igc(dspp, state->degamma_lut ?
+					      state->degamma_lut->data : NULL);
+			ctl->ops.update_pending_flush_dspp(ctl, dspp->idx, DPU_DSPP_IGC);
+		}
+
 		if (dspp->ops.setup_pcc) {
 			if (!state->ctm) {
 				dspp->ops.setup_pcc(dspp, NULL);
@@ -880,16 +856,7 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 		}
 
 		if (dspp->ops.setup_gc) {
-			if (!state->gamma_lut) {
-				dspp->ops.setup_gc(dspp, NULL);
-			} else {
-				gc_lut = kzalloc_obj(*gc_lut);
-				if (!gc_lut)
-					continue;
-				_dpu_crtc_get_gc_lut(state, gc_lut);
-				dspp->ops.setup_gc(dspp, gc_lut);
-				kfree(gc_lut);
-			}
+			dspp->ops.setup_gc(dspp, state->gamma_lut ? state->gamma_lut->data : NULL);
 
 			/* stage config flush mask */
 			ctl->ops.update_pending_flush_dspp(ctl,
@@ -1409,7 +1376,8 @@ static struct msm_display_topology dpu_crtc_get_topology(
 	 *
 	 * If DSC is enabled, use 2 LMs for 2:2:1 topology
 	 *
-	 * Add dspps to the reservation requirements if ctm or gamma_lut are requested
+	 * Reserve DSPPs for color processing. IGC-capable pipelines retain their
+	 * DSPPs so clearing the final color property also programs bypass.
 	 *
 	 * Only hardcode num_lm to 2 for cases where num_intf == 2 and CWB is not
 	 * enabled. This is because in cases where CWB is enabled, num_intf will
@@ -1429,7 +1397,8 @@ static struct msm_display_topology dpu_crtc_get_topology(
 	else
 		topology.num_lm = 1;
 
-	if (crtc_state->ctm || crtc_state->gamma_lut)
+	if (crtc_state->ctm || crtc_state->gamma_lut || crtc_state->degamma_lut ||
+	    dpu_kms->catalog->dspp_top)
 		topology.num_dspp = topology.num_lm;
 
 	return topology;
@@ -1539,6 +1508,14 @@ static int dpu_crtc_atomic_check(struct drm_crtc *crtc,
 	int rc = 0;
 
 	bool needs_dirtyfb = dpu_crtc_needs_dirtyfb(crtc_state);
+
+	/* Hardware ports consume fixed-size tables, including the final entry. */
+	if (crtc_state->degamma_lut &&
+	    drm_color_lut_size(crtc_state->degamma_lut) != DPU_DEGAMMA_LUT_SIZE)
+		return -EINVAL;
+	if (crtc_state->gamma_lut &&
+	    drm_color_lut_size(crtc_state->gamma_lut) != DPU_GAMMA_LUT_SIZE)
+		return -EINVAL;
 
 	/* don't reallocate resources if only ACTIVE has beeen changed */
 	if (crtc_state->mode_changed || crtc_state->connectors_changed ||
@@ -1923,7 +1900,10 @@ struct drm_crtc *dpu_crtc_init(struct drm_device *dev, struct drm_plane *plane,
 
 		if (dspp->sblk->gc.base) {
 			drm_mode_crtc_set_gamma_size(crtc, DPU_GAMMA_LUT_SIZE);
-			drm_crtc_enable_color_mgmt(crtc, 0, true, DPU_GAMMA_LUT_SIZE);
+			drm_crtc_enable_color_mgmt(crtc,
+						   dspp->sblk->igc.version == 0x30001 ?
+						   DPU_DEGAMMA_LUT_SIZE : 0,
+						   true, DPU_GAMMA_LUT_SIZE);
 		} else {
 			drm_crtc_enable_color_mgmt(crtc, 0, true, 0);
 		}
