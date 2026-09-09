@@ -1600,7 +1600,18 @@ struct drm_bridge *devm_drm_panel_bridge_add_typed(struct device *dev,
 struct drm_bridge *drmm_panel_bridge_add(struct drm_device *drm,
 					     struct drm_panel *panel);
 struct drm_connector *drm_panel_bridge_connector(struct drm_bridge *bridge);
+bool drm_panel_bridge_needs_first_frame(struct drm_bridge *bridge);
+void drm_panel_bridge_notify_first_frame(struct drm_bridge *bridge);
 #else
+static inline bool drm_panel_bridge_needs_first_frame(struct drm_bridge *bridge)
+{
+	return false;
+}
+
+static inline void drm_panel_bridge_notify_first_frame(struct drm_bridge *bridge)
+{
+}
+
 static inline bool drm_bridge_is_panel(const struct drm_bridge *bridge)
 {
 	return false;

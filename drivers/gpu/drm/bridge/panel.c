@@ -234,6 +234,47 @@ bool drm_bridge_is_panel(const struct drm_bridge *bridge)
 EXPORT_SYMBOL(drm_bridge_is_panel);
 
 /**
+ * drm_panel_bridge_needs_first_frame - check for a first-frame consumer
+ * @bridge: bridge to inspect
+ *
+ * Return: true for a panel bridge with a first-frame callback.
+ */
+bool drm_panel_bridge_needs_first_frame(struct drm_bridge *bridge)
+{
+	if (!drm_bridge_is_panel(bridge))
+		return false;
+
+	return !!drm_bridge_to_panel_bridge(bridge)->panel->funcs->first_frame;
+}
+EXPORT_SYMBOL_GPL(drm_panel_bridge_needs_first_frame);
+
+/**
+ * drm_panel_bridge_notify_first_frame - notify a panel of completed pixels
+ * @bridge: bridge to notify
+ *
+ * The controller calls this once after a successful full-frame transfer
+ * following enable(), in process context serialized against modesets.
+ */
+void drm_panel_bridge_notify_first_frame(struct drm_bridge *bridge)
+{
+	struct drm_panel *panel;
+	int ret;
+
+	if (!drm_panel_bridge_needs_first_frame(bridge))
+		return;
+
+	panel = drm_bridge_to_panel_bridge(bridge)->panel;
+	mutex_lock(&panel->follower_lock);
+	if (panel->enabled) {
+		ret = panel->funcs->first_frame(panel);
+		if (ret)
+			dev_err(panel->dev, "Failed to complete first-frame setup: %d\n", ret);
+	}
+	mutex_unlock(&panel->follower_lock);
+}
+EXPORT_SYMBOL_GPL(drm_panel_bridge_notify_first_frame);
+
+/**
  * drm_panel_bridge_add - Creates a &drm_bridge and &drm_connector that
  * just calls the appropriate functions from &drm_panel.
  *
