@@ -82,6 +82,7 @@ enum {
 enum {
 	DPU_DSPP_PCC = 0x1,
 	DPU_DSPP_GC,
+	DPU_DSPP_IGC,
 	DPU_DSPP_MAX
 };
 
@@ -331,10 +332,12 @@ struct dpu_lm_sub_blks {
  * struct dpu_dspp_sub_blks: Information of DSPP block
  * @pcc: pixel color correction block
  * @gc: gamma correction block
+ * @igc: inverse gamma correction block
  */
 struct dpu_dspp_sub_blks {
 	struct dpu_pp_blk pcc;
 	struct dpu_pp_blk gc;
+	struct dpu_pp_blk igc;
 };
 
 struct dpu_pingpong_sub_blks {
@@ -751,6 +754,7 @@ struct dpu_mdss_cfg {
 
 	u32 dspp_count;
 	const struct dpu_dspp_cfg *dspp;
+	u32 dspp_top;
 
 	u32 cwb_count;
 	const struct dpu_cwb_cfg *cwb;

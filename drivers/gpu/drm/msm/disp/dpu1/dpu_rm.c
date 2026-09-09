@@ -44,6 +44,7 @@ int dpu_rm_init(struct drm_device *dev,
 		void __iomem *mmio)
 {
 	int rc, i;
+	struct dpu_hw_dspp_top *dspp_top = NULL;
 
 	if (!rm || !cat || !mmio) {
 		DPU_ERROR("invalid kms\n");
@@ -151,11 +152,17 @@ int dpu_rm_init(struct drm_device *dev,
 		rm->ctl_blks[ctl->id - CTL_0] = &hw->base;
 	}
 
+	if (cat->dspp_top) {
+		dspp_top = dpu_hw_dspp_top_init(dev, mmio + cat->dspp_top);
+		if (IS_ERR(dspp_top))
+			return PTR_ERR(dspp_top);
+	}
+
 	for (i = 0; i < cat->dspp_count; i++) {
 		struct dpu_hw_dspp *hw;
 		const struct dpu_dspp_cfg *dspp = &cat->dspp[i];
 
-		hw = dpu_hw_dspp_init(dev, dspp, mmio);
+		hw = dpu_hw_dspp_init(dev, dspp, mmio, dspp_top);
 		if (IS_ERR(hw)) {
 			rc = PTR_ERR(hw);
 			DPU_ERROR("failed dspp object creation: err %d\n", rc);
