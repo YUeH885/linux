@@ -38,6 +38,8 @@ struct sw43410_panel {
 	struct mutex lock;
 	u16 applied_brightness;
 	bool ready;
+	bool first_frame_received;
+	bool dim_enabled;
 	bool removing;
 	bool vddi_enabled;
 	bool vpnl_enabled;
@@ -425,6 +427,8 @@ static int sw43410_enable(struct drm_panel *panel)
 
 	ctx->ready = false;
 	sw43410_reset(ctx);
+	ctx->first_frame_received = false;
+	ctx->dim_enabled = false;
 
 	ret = sw43410_program(ctx);
 	if (ret < 0)
@@ -462,7 +466,7 @@ static int sw43410_enable(struct drm_panel *panel)
 	if (ret < 0)
 		goto disable;
 
-	/* drm_panel_enable() replays the cached backlight properties after unlock. */
+	/* Keep the initialization brightness until the first image is complete. */
 	ctx->applied_brightness = 1;
 	ctx->ready = true;
 	goto unlock;
@@ -512,26 +516,64 @@ static int sw43410_backlight_update_status(struct backlight_device *backlight)
 {
 	struct sw43410_panel *ctx = bl_get_data(backlight);
 	struct mipi_dsi_device *dsi = ctx->link;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
+	bool blank = backlight_is_blank(backlight);
 	u16 brightness;
 	int ret = 0;
 
 	mutex_lock(&ctx->lock);
 	if (!ctx->ready)
 		goto unlock;
+	if (!blank && !ctx->first_frame_received)
+		goto unlock;
 
 	brightness = backlight_get_brightness(backlight);
 	/* Stock MP blmap uses 7 for its lowest nonzero brightness indices. */
-	if (!backlight_is_blank(backlight))
+	if (!blank)
 		brightness = max_t(u16, brightness, 7);
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
+	/* Blanking must be immediate, rather than a hardware brightness ramp. */
+	if (blank && ctx->dim_enabled) {
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x53, 0x0c, 0x30);
+		if (dsi_ctx.accum_err) {
+			ret = dsi_ctx.accum_err;
+			goto restore_mode;
+		}
+		ctx->dim_enabled = false;
+	}
 	ret = mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
-	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
-	if (!ret)
-		ctx->applied_brightness = brightness;
+	if (ret)
+		goto restore_mode;
+	ctx->applied_brightness = brightness;
+	if (!blank && !ctx->dim_enabled) {
+		/* Restore the initial target without a ramp, then enable BC DIM. */
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x53, 0x4c, 0x30);
+		ret = dsi_ctx.accum_err;
+		if (!ret)
+			ctx->dim_enabled = true;
+	}
 
+restore_mode:
+	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 unlock:
 	mutex_unlock(&ctx->lock);
 	return ret;
+}
+
+static int sw43410_first_frame(struct drm_panel *panel)
+{
+	struct sw43410_panel *ctx = to_sw43410(panel);
+
+	mutex_lock(&ctx->lock);
+	if (!ctx->ready || ctx->removing) {
+		mutex_unlock(&ctx->lock);
+		return 0;
+	}
+	ctx->first_frame_received = true;
+	mutex_unlock(&ctx->lock);
+
+	/* Backlight core serializes the latest request before taking ctx->lock. */
+	return backlight_update_status(panel->backlight);
 }
 
 static int sw43410_backlight_get_brightness(struct backlight_device *backlight)
@@ -575,6 +617,7 @@ static int sw43410_backlight_init(struct sw43410_panel *ctx)
 static const struct drm_panel_funcs sw43410_panel_funcs = {
 	.prepare = sw43410_prepare,
 	.enable = sw43410_enable,
+	.first_frame = sw43410_first_frame,
 	.disable = sw43410_disable,
 	.unprepare = sw43410_unprepare,
 	.get_modes = sw43410_get_modes,
