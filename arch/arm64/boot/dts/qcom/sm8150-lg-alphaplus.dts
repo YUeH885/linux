@@ -56,6 +56,15 @@
 		};
 	};
 
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion-polymer";
+		charge-full-design-microamp-hours = <3400000>;
+		voltage-max-design-microvolt = <4430000>;
+		constant-charge-current-max-microamp = <3000000>;
+		constant-charge-voltage-max-microvolt = <4430000>;
+	};
+
 	gpio-keys {
 		compatible = "gpio-keys";
 
@@ -566,6 +575,7 @@
 };
 
 &usb_1_dwc3 {
+	usb-psy-name = "usb";
 	dr_mode = "otg";
 	/* DWC31 core_init accesses LLUCTL at offset 0xd024. */
 	reg = <0 0x0a600000 0 0xe000>;
@@ -630,6 +640,62 @@
 
 &pon_pwrkey {
 	status = "okay";
+};
+
+&spmi_bus {
+	pmic@2 {
+		charger@1000 {
+			compatible = "qcom,pm8150b-charger";
+			reg = <0x1000>;
+			interrupts = <0x2 0x10 0x1 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x12 0x0 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x13 0x4 IRQ_TYPE_EDGE_BOTH>,
+				     <0x2 0x13 0x6 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x16 0x1 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x40 0x0 IRQ_TYPE_EDGE_BOTH>,
+				     <0x2 0x42 0x2 IRQ_TYPE_EDGE_BOTH>,
+				     <0x2 0x13 0x2 IRQ_TYPE_EDGE_BOTH>;
+			interrupt-names = "chg-state-change", "bat-temp",
+					  "usbin-plugin", "usbin-src-change", "wdog-bark",
+					  "soc-update", "batt-temp-delta", "usbin-uv";
+			io-channels = <&pm8150b_adc ADC5_USB_IN_I>,
+				      <&pm8150b_adc ADC5_MID_CHG_DIV6>;
+			io-channel-names = "usbin_i", "mid_chg";
+			monitored-battery = <&battery>;
+			qcom,parallel-charger = <&smb1355>;
+			qcom,parallel-percent = <70>;
+			qcom,auto-recharge-soc = <98>;
+			qcom,usb-c-port = <&pm8150b_typec>;
+			wakeup-source;
+		};
+	};
+};
+
+&pm8150b_adc {
+	channel@7 {
+		reg = <ADC5_USB_IN_I>;
+		qcom,pre-scaling = <1 1>;
+		label = "usbin_i";
+	};
+
+	channel@1e {
+		reg = <ADC5_MID_CHG_DIV6>;
+		qcom,pre-scaling = <1 6>;
+		label = "mid_chg";
+	};
+};
+
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&i2c4 {
+	status = "okay";
+
+	smb1355: charger@c {
+		compatible = "qcom,smb1355";
+		reg = <0x0c>;
+	};
 };
 
 &qupv3_id_1 {
