@@ -36,6 +36,7 @@ struct sw43410_panel {
 	struct drm_dsc_config dsc;
 	/* Backlight update_lock nests outside this lock; never call backlight core. */
 	struct mutex lock;
+	u16 applied_brightness;
 	bool ready;
 	bool removing;
 	bool vddi_enabled;
@@ -462,6 +463,7 @@ static int sw43410_enable(struct drm_panel *panel)
 		goto disable;
 
 	/* drm_panel_enable() replays the cached backlight properties after unlock. */
+	ctx->applied_brightness = 1;
 	ctx->ready = true;
 	goto unlock;
 
@@ -518,17 +520,35 @@ static int sw43410_backlight_update_status(struct backlight_device *backlight)
 		goto unlock;
 
 	brightness = backlight_get_brightness(backlight);
+	/* Stock MP blmap uses 7 for its lowest nonzero brightness indices. */
+	if (!backlight_is_blank(backlight))
+		brightness = max_t(u16, brightness, 7);
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 	ret = mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+	if (!ret)
+		ctx->applied_brightness = brightness;
 
 unlock:
 	mutex_unlock(&ctx->lock);
 	return ret;
 }
 
+static int sw43410_backlight_get_brightness(struct backlight_device *backlight)
+{
+	struct sw43410_panel *ctx = bl_get_data(backlight);
+	int brightness;
+
+	mutex_lock(&ctx->lock);
+	brightness = ctx->ready ? ctx->applied_brightness : 0;
+	mutex_unlock(&ctx->lock);
+
+	return brightness;
+}
+
 static const struct backlight_ops sw43410_backlight_ops = {
 	.update_status = sw43410_backlight_update_status,
+	.get_brightness = sw43410_backlight_get_brightness,
 };
 
 static int sw43410_backlight_init(struct sw43410_panel *ctx)
@@ -536,8 +556,9 @@ static int sw43410_backlight_init(struct sw43410_panel *ctx)
 	struct device *dev = &ctx->link->dev;
 	const struct backlight_properties props = {
 		.type = BACKLIGHT_RAW,
-		.brightness = 158,
-		.max_brightness = 4095,
+		/* Stock MP blmap maps the default index 158 to 252. */
+		.brightness = 252,
+		.max_brightness = 1023,
 	};
 
 	ctx->base.backlight = devm_backlight_device_register(dev, dev_name(dev),
