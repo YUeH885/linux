@@ -104,6 +104,9 @@ struct msm_gem_vm {
 	 */
 	struct drm_mm mm;
 
+	/** @va_alignment: Alignment for kernel managed VA allocations */
+	u64 va_alignment;
+
 	/** @mmu: The mmu object which manages the pgtables */
 	struct msm_mmu *mmu;
 
@@ -155,7 +158,7 @@ struct msm_gem_vm {
 
 struct drm_gpuvm *
 msm_gem_vm_create(struct drm_device *drm, struct msm_mmu *mmu, const char *name,
-		  u64 va_start, u64 va_size, bool managed);
+		  u64 va_start, u64 va_size, u64 va_alignment, bool managed);
 
 void msm_gem_vm_close(struct drm_gpuvm *gpuvm);
 void msm_gem_vm_unusable(struct drm_gpuvm *gpuvm);
