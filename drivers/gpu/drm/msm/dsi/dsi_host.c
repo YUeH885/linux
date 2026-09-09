@@ -2523,15 +2523,6 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 		goto fail_put_pm;
 	}
 
-	/* Exit ULPS with link clocks on, before dsi_ctrl_enable() requests HS. */
-	if (ulps_enabled) {
-		ret = msm_dsi_phy_set_ulps(phy, false);
-		if (ret) {
-			pr_err("%s: failed to exit ULPS, %d\n", __func__, ret);
-			goto fail_disable_clk;
-		}
-	}
-
 	ret = pinctrl_pm_select_default_state(&msm_host->pdev->dev);
 	if (ret) {
 		pr_err("%s: failed to set pinctrl default state, %d\n",
@@ -2542,6 +2533,16 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 	dsi_timing_setup(msm_host, is_bonded_dsi);
 	dsi_sw_reset(msm_host);
 	dsi_ctrl_enable(msm_host, phy_shared_timings, phy);
+
+	/* ULPS exit must clear the PHY HS request set by controller setup. */
+	if (ulps_enabled) {
+		ret = msm_dsi_phy_set_ulps(phy, false);
+		if (ret) {
+			pr_err("%s: failed to exit ULPS, %d\n", __func__, ret);
+			dsi_ctrl_disable(msm_host);
+			goto fail_disable_clk;
+		}
+	}
 
 	msm_host->power_on = true;
 	mutex_unlock(&msm_host->dev_mutex);
