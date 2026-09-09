@@ -2175,7 +2175,6 @@ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
 	 * mdp clock need to be enabled to receive dsi interrupt
 	 */
 	pm_runtime_get_sync(&msm_host->pdev->dev);
-	cfg_hnd->ops->link_clk_set_rate(msm_host);
 	cfg_hnd->ops->link_clk_enable(msm_host);
 
 	/* TODO: vote for bus bandwidth */
@@ -2552,6 +2551,8 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 fail_disable_clk:
 	cfg_hnd->ops->link_clk_disable(msm_host);
 fail_put_pm:
+	if (cfg_hnd->major == MSM_DSI_VER_MAJOR_6G)
+		dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
 	pm_runtime_put(&msm_host->pdev->dev);
 fail_disable_reg:
 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
@@ -2579,6 +2580,9 @@ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
 	pinctrl_pm_select_sleep_state(&msm_host->pdev->dev);
 
 	cfg_hnd->ops->link_clk_disable(msm_host);
+	/* DCS transfers release clock references, not the active display vote. */
+	if (cfg_hnd->major == MSM_DSI_VER_MAJOR_6G)
+		dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
 	pm_runtime_put(&msm_host->pdev->dev);
 
 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
