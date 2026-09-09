@@ -625,6 +625,9 @@ int msm_dsi_manager_register(struct msm_dsi *msm_dsi)
 	msm_dsi->ulps_suspend_enabled =
 		of_property_read_bool(msm_dsi->pdev->dev.of_node,
 				      "qcom,suspend-ulps-enabled");
+	msm_dsi->ulps_idle_enabled =
+		of_property_read_bool(msm_dsi->pdev->dev.of_node,
+				      "qcom,idle-ulps-enabled");
 
 	ret = dsi_mgr_parse_of(msm_dsi->pdev->dev.of_node, id);
 	if (ret) {

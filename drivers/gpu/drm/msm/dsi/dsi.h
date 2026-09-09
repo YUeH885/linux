@@ -48,6 +48,7 @@ struct msm_dsi {
 	struct device *phy_dev;
 	bool phy_enabled;
 	bool ulps_suspend_enabled;
+	bool ulps_idle_enabled;
 	bool ulps_enabled;
 	struct msm_dsi_phy_clk_request phy_clk_req;
 
@@ -83,6 +84,7 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
 			bool is_bonded_dsi, struct msm_dsi_phy *phy, bool ulps_enabled);
 int msm_dsi_host_power_off(struct mipi_dsi_host *host);
+int msm_dsi_host_set_idle(struct mipi_dsi_host *host, bool idle);
 int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
 				  const struct drm_display_mode *mode);
 enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,

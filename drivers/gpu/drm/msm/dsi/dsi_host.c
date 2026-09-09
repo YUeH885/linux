@@ -35,6 +35,8 @@
 #define DSI_RESET_TOGGLE_DELAY_MS 20
 
 static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc);
+static int dsi_host_leave_idle(struct msm_dsi_host *msm_host);
+static int dsi_host_enter_idle(struct msm_dsi_host *msm_host);
 
 static int dsi_get_version(const void __iomem *base, u32 *major, u32 *minor)
 {
@@ -186,6 +188,10 @@ struct msm_dsi_host {
 	bool registered;
 	bool power_on;
 	bool enabled;
+	/* Protected by dev_mutex, including the complete DCS transfer. */
+	bool idle_requested;
+	bool link_idle;
+	struct msm_dsi_phy *phy;
 	int irq;
 };
 
@@ -1567,16 +1573,40 @@ static void dsi_err_worker(struct work_struct *work)
 	struct msm_dsi_host *msm_host =
 		container_of(work, struct msm_dsi_host, err_work);
 	u32 status = msm_host->err_work_state;
+	int ret;
 
 	pr_err_ratelimited("%s: status=%x\n", __func__, status);
-	if (status & DSI_ERR_STATE_MDP_FIFO_UNDERFLOW)
+	mutex_lock(&msm_host->dev_mutex);
+	if (!msm_host->power_on)
+		goto unlock;
+
+	if (status & DSI_ERR_STATE_MDP_FIFO_UNDERFLOW) {
+		ret = dsi_host_leave_idle(msm_host);
+		if (ret) {
+			dev_err(&msm_host->pdev->dev,
+				"Failed to resume link for error recovery: %d\n", ret);
+			goto enable_irq;
+		}
 		dsi_sw_reset(msm_host);
+		if (msm_host->idle_requested) {
+			ret = dsi_host_enter_idle(msm_host);
+			if (ret)
+				dev_err(&msm_host->pdev->dev,
+					"Failed to idle link after error recovery: %d\n", ret);
+		}
+	}
 
-	/* It is safe to clear here because error irq is disabled. */
+enable_irq:
+	/* Clear before unmasking so the next interrupt cannot lose its status. */
 	msm_host->err_work_state = 0;
-
 	/* enable dsi error interrupt */
 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 1);
+	mutex_unlock(&msm_host->dev_mutex);
+	return;
+unlock:
+	/* It is safe to clear here because error irq is disabled. */
+	msm_host->err_work_state = 0;
+	mutex_unlock(&msm_host->dev_mutex);
 }
 
 static void dsi_ack_err_status(struct msm_dsi_host *msm_host)
@@ -2158,11 +2188,98 @@ void msm_dsi_host_unregister(struct mipi_dsi_host *host)
 	}
 }
 
+static int dsi_host_leave_idle(struct msm_dsi_host *msm_host)
+{
+	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+	int ret;
+
+	lockdep_assert_held(&msm_host->dev_mutex);
+	if (!msm_host->link_idle)
+		return 0;
+
+	ret = cfg_hnd->ops->link_clk_set_rate(msm_host);
+	if (ret)
+		goto drop_opp;
+	ret = cfg_hnd->ops->link_clk_enable(msm_host);
+	if (ret)
+		goto drop_opp;
+
+	ret = msm_dsi_phy_set_ulps(msm_host->phy, false);
+	if (ret) {
+		cfg_hnd->ops->link_clk_disable(msm_host);
+		goto drop_opp;
+	}
+
+	msm_host->link_idle = false;
+	dev_dbg(&msm_host->pdev->dev, "DSI link resumed from idle ULPS\n");
+	return 0;
+
+drop_opp:
+	dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
+	return ret;
+}
+
+static int dsi_host_enter_idle(struct msm_dsi_host *msm_host)
+{
+	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+	u32 status;
+	int ret;
+
+	lockdep_assert_held(&msm_host->dev_mutex);
+	if (msm_host->link_idle)
+		return 0;
+
+	/* DPU has completed its frame; a timed-out DCS transfer may still be busy. */
+	status = dsi_read(msm_host, REG_DSI_STATUS0);
+	if (status & (DSI_STATUS0_CMD_MODE_DMA_BUSY | DSI_STATUS0_CMD_MODE_MDP_BUSY))
+		return -EBUSY;
+
+	ret = msm_dsi_phy_set_ulps(msm_host->phy, true);
+	if (ret)
+		return ret;
+
+	cfg_hnd->ops->link_clk_disable(msm_host);
+	msm_host->link_idle = true;
+	ret = dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
+	dev_dbg(&msm_host->pdev->dev, "DSI link entered idle ULPS, OPP release: %d\n", ret);
+	return ret;
+}
+
+int msm_dsi_host_set_idle(struct mipi_dsi_host *host, bool idle)
+{
+	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	int ret = 0;
+
+	mutex_lock(&msm_host->dev_mutex);
+	if (!msm_host->power_on || !msm_host->enabled)
+		goto unlock;
+	if (msm_host->cfg_hnd->major != MSM_DSI_VER_MAJOR_6G)
+		goto unlock;
+
+	msm_host->idle_requested = idle;
+	ret = idle ? dsi_host_enter_idle(msm_host) : dsi_host_leave_idle(msm_host);
+unlock:
+	mutex_unlock(&msm_host->dev_mutex);
+	return ret;
+}
+
 int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
 				const struct mipi_dsi_msg *msg)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+	int ret;
+
+	/* Bonded transfers acquire host 0 before host 1. */
+	mutex_lock_nested(&msm_host->dev_mutex, msm_host->id);
+	if (!msm_host->power_on) {
+		ret = -EIO;
+		goto unlock;
+	}
+
+	ret = dsi_host_leave_idle(msm_host);
+	if (ret)
+		goto unlock;
 
 	/* TODO: make sure dsi_cmd_mdp is idle.
 	 * Since DSI6G v1.2.0, we can set DSI_TRIG_CTRL.BLOCK_DMA_WITHIN_FRAME
@@ -2174,8 +2291,14 @@ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
 	 * mdss interrupt is generated in mdp core clock domain
 	 * mdp clock need to be enabled to receive dsi interrupt
 	 */
-	pm_runtime_get_sync(&msm_host->pdev->dev);
-	cfg_hnd->ops->link_clk_enable(msm_host);
+	ret = pm_runtime_resume_and_get(&msm_host->pdev->dev);
+	if (ret < 0)
+		goto restore_idle;
+	ret = cfg_hnd->ops->link_clk_enable(msm_host);
+	if (ret) {
+		pm_runtime_put(&msm_host->pdev->dev);
+		goto restore_idle;
+	}
 
 	/* TODO: vote for bus bandwidth */
 
@@ -2190,6 +2313,19 @@ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_CMD_DMA_DONE, 1);
 
 	return 0;
+
+restore_idle:
+	if (msm_host->idle_requested) {
+		int idle_ret = dsi_host_enter_idle(msm_host);
+
+		if (idle_ret)
+			dev_err(&msm_host->pdev->dev,
+				"Failed to restore idle after transfer setup failure: %d\n",
+				idle_ret);
+	}
+unlock:
+	mutex_unlock(&msm_host->dev_mutex);
+	return ret;
 }
 
 void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
@@ -2197,6 +2333,7 @@ void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+	int ret;
 
 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_CMD_DMA_DONE, 0);
 	dsi_write(msm_host, REG_DSI_CTRL, msm_host->dma_cmd_ctrl_restore);
@@ -2208,6 +2345,13 @@ void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
 
 	cfg_hnd->ops->link_clk_disable(msm_host);
 	pm_runtime_put(&msm_host->pdev->dev);
+	if (msm_host->idle_requested) {
+		ret = dsi_host_enter_idle(msm_host);
+		if (ret)
+			dev_err_ratelimited(&msm_host->pdev->dev,
+					    "Failed to restore idle ULPS: %d\n", ret);
+	}
+	mutex_unlock(&msm_host->dev_mutex);
 }
 
 int msm_dsi_host_cmd_tx(struct mipi_dsi_host *host,
@@ -2435,27 +2579,27 @@ int msm_dsi_host_enable(struct mipi_dsi_host *host)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 
+	mutex_lock(&msm_host->dev_mutex);
 	dsi_op_mode_config(msm_host,
 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), true);
 
-	/* TODO: clock should be turned off for command mode,
-	 * and only turned on before MDP START.
-	 * This part of code should be enabled once mdp driver support it.
-	 */
-	/* if (msm_panel->mode == MSM_DSI_CMD_MODE) {
-	 *	dsi_link_clk_disable(msm_host);
-	 *	pm_runtime_put(&msm_host->pdev->dev);
-	 * }
-	 */
 	msm_host->enabled = true;
+	mutex_unlock(&msm_host->dev_mutex);
 	return 0;
 }
 
 int msm_dsi_host_disable(struct mipi_dsi_host *host)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	int ret;
 
+	mutex_lock(&msm_host->dev_mutex);
+	msm_host->idle_requested = false;
 	msm_host->enabled = false;
+	ret = dsi_host_leave_idle(msm_host);
+	if (ret)
+		goto unlock;
+
 	dsi_op_mode_config(msm_host,
 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), false);
 
@@ -2465,7 +2609,9 @@ int msm_dsi_host_disable(struct mipi_dsi_host *host)
 	 */
 	dsi_sw_reset(msm_host);
 
-	return 0;
+unlock:
+	mutex_unlock(&msm_host->dev_mutex);
+	return ret;
 }
 
 static void msm_dsi_sfpb_config(struct msm_dsi_host *msm_host, bool enable)
@@ -2544,6 +2690,9 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 		}
 	}
 
+	msm_host->phy = phy;
+	msm_host->idle_requested = false;
+	msm_host->link_idle = false;
 	msm_host->power_on = true;
 	mutex_unlock(&msm_host->dev_mutex);
 
@@ -2580,7 +2729,8 @@ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
 
 	pinctrl_pm_select_sleep_state(&msm_host->pdev->dev);
 
-	cfg_hnd->ops->link_clk_disable(msm_host);
+	if (!msm_host->link_idle)
+		cfg_hnd->ops->link_clk_disable(msm_host);
 	/* DCS transfers release clock references, not the active display vote. */
 	if (cfg_hnd->major == MSM_DSI_VER_MAJOR_6G)
 		dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
@@ -2594,6 +2744,8 @@ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
 	DBG("-");
 
 	msm_host->power_on = false;
+	msm_host->idle_requested = false;
+	msm_host->link_idle = false;
 
 unlock_ret:
 	mutex_unlock(&msm_host->dev_mutex);

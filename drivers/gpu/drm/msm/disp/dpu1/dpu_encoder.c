@@ -893,12 +893,24 @@ static void _dpu_encoder_resource_disable(struct drm_encoder *drm_enc)
 	pm_runtime_put_sync(&dpu_kms->pdev->dev);
 }
 
+static int dpu_encoder_dsi_set_idle(struct dpu_encoder_virt *dpu_enc, bool idle)
+{
+	struct msm_drm_private *priv = dpu_enc->base.dev->dev_private;
+	const struct msm_display_info *info = &dpu_enc->disp_info;
+
+	if (info->intf_type != INTF_DSI || !info->is_cmd_mode)
+		return 0;
+
+	return msm_dsi_set_idle(priv->kms->dsi[info->h_tile_instance[0]], idle);
+}
+
 static int dpu_encoder_resource_control(struct drm_encoder *drm_enc,
 		u32 sw_event)
 {
 	struct dpu_encoder_virt *dpu_enc;
 	struct msm_drm_private *priv;
 	bool is_vid_mode = false;
+	int ret;
 
 	if (!drm_enc || !drm_enc->dev || !drm_enc->crtc) {
 		DPU_ERROR("invalid parameters\n");
@@ -929,6 +941,12 @@ static int dpu_encoder_resource_control(struct drm_encoder *drm_enc,
 					sw_event);
 
 		mutex_lock(&dpu_enc->rc_lock);
+
+		ret = dpu_encoder_dsi_set_idle(dpu_enc, false);
+		if (ret) {
+			mutex_unlock(&dpu_enc->rc_lock);
+			return ret;
+		}
 
 		/* return if the resource control is already in ON state */
 		if (dpu_enc->rc_state == DPU_ENC_RC_STATE_ON) {
@@ -1073,6 +1091,13 @@ static int dpu_encoder_resource_control(struct drm_encoder *drm_enc,
 				  DRMID(drm_enc), sw_event, dpu_enc->rc_state);
 			mutex_unlock(&dpu_enc->rc_lock);
 			return 0;
+		}
+
+		ret = dpu_encoder_dsi_set_idle(dpu_enc, true);
+		if (ret) {
+			DPU_ERROR_ENC(dpu_enc, "DSI idle entry failed: %d\n", ret);
+			mutex_unlock(&dpu_enc->rc_lock);
+			return ret;
 		}
 
 		if (is_vid_mode)
@@ -2066,12 +2091,13 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
  *	Delayed: Block until next trigger can be issued.
  * @drm_enc:	encoder pointer
  */
-void dpu_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc)
+int dpu_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc)
 {
 	struct dpu_encoder_virt *dpu_enc;
 	struct dpu_encoder_phys *phys;
 	bool needs_hw_reset = false;
 	unsigned int i;
+	int ret;
 
 	dpu_enc = to_dpu_encoder_virt(drm_enc);
 
@@ -2088,7 +2114,11 @@ void dpu_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc)
 	}
 	DPU_ATRACE_END("enc_prepare_for_kickoff");
 
-	dpu_encoder_resource_control(drm_enc, DPU_ENC_RC_EVENT_KICKOFF);
+	ret = dpu_encoder_resource_control(drm_enc, DPU_ENC_RC_EVENT_KICKOFF);
+	if (ret) {
+		DPU_ERROR_ENC(dpu_enc, "Failed to restore display resources: %d\n", ret);
+		return ret;
+	}
 
 	/* if any phys needs reset, reset all phys, in-order */
 	if (needs_hw_reset) {
@@ -2100,6 +2130,8 @@ void dpu_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc)
 
 	if (dpu_enc->dsc)
 		dpu_encoder_prep_dsc(dpu_enc, dpu_enc->dsc);
+
+	return 0;
 }
 
 /**
