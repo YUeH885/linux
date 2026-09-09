@@ -283,6 +283,14 @@ static void __dwc3_set_mode(struct work_struct *work)
 	}
 
 out:
+	/* Keep the gadget registered across NONE; let UDC work handle pullups. */
+	if (dwc->role_sw && dwc->current_dr_role == DWC3_GCTL_PRTCAP_DEVICE &&
+	    dwc->gadget) {
+		spin_lock_irqsave(&dwc->lock, flags);
+		usb_udc_vbus_handler(dwc->gadget,
+				     dwc->role_switch_role == USB_ROLE_DEVICE);
+		spin_unlock_irqrestore(&dwc->lock, flags);
+	}
 	pm_runtime_put_autosuspend(dwc->dev);
 	mutex_unlock(&dwc->mutex);
 }

@@ -1057,6 +1057,7 @@ struct dwc3_glue_ops {
  * @role_sw: usb_role_switch handle
  * @role_switch_default_mode: default operation mode of controller while
  *			usb role is USB_ROLE_NONE.
+ * @role_switch_role: requested USB role, including the detached NONE state
  * @usb_psy: pointer to power supply interface.
  * @usb_psy_name: name of the USB power supply
  * @psy_nb: power supply notifier block
@@ -1250,6 +1251,7 @@ struct dwc3 {
 	enum usb_phy_interface	hsphy_mode;
 	struct usb_role_switch	*role_sw;
 	enum usb_dr_mode	role_switch_default_mode;
+	enum usb_role		role_switch_role;
 
 	struct power_supply	*usb_psy;
 	const char		*usb_psy_name;
