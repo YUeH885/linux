@@ -656,7 +656,10 @@ static int sw43410_probe(struct mipi_dsi_device *dsi)
 
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_LPM;
+	dsi->mode_flags = MIPI_DSI_MODE_LPM |
+			  MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT |
+			  MIPI_DSI_MODE_FIXED_HS_RATE;
+	dsi->hs_rate = 920145600;
 
 	ret = sw43410_backlight_init(ctx);
 	if (ret < 0)

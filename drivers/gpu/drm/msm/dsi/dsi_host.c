@@ -175,6 +175,7 @@ struct msm_dsi_host {
 	unsigned int lanes;
 	enum mipi_dsi_pixel_format format;
 	unsigned long mode_flags;
+	unsigned long hs_rate;
 
 	/* lane data parsed via DT */
 	int dlane_swap;
@@ -618,15 +619,16 @@ dsi_adjust_pclk_for_compression(const struct drm_display_mode *mode,
 	return mult_frac(mode->clock * 1000u, new_htotal, mode->htotal);
 }
 
-static unsigned long dsi_get_pclk_rate(const struct drm_display_mode *mode,
-		const struct drm_dsc_config *dsc, bool is_bonded_dsi)
+static unsigned long dsi_get_required_pclk_rate(struct msm_dsi_host *msm_host,
+		const struct drm_display_mode *mode, bool is_bonded_dsi)
 {
 	unsigned long pclk_rate;
 
 	pclk_rate = mode->clock * 1000u;
 
-	if (dsc)
-		pclk_rate = dsi_adjust_pclk_for_compression(mode, dsc, is_bonded_dsi);
+	if (msm_host->dsc)
+		pclk_rate = dsi_adjust_pclk_for_compression(mode, msm_host->dsc,
+							  is_bonded_dsi);
 
 	/*
 	 * For bonded DSI mode, the current DRM mode has the complete width of the
@@ -640,14 +642,23 @@ static unsigned long dsi_get_pclk_rate(const struct drm_display_mode *mode,
 	return pclk_rate;
 }
 
-unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_dsi,
-				    const struct drm_display_mode *mode)
+static unsigned long dsi_get_pclk_rate(struct msm_dsi_host *msm_host,
+		const struct drm_display_mode *mode, bool is_bonded_dsi)
 {
-	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
+
+	/* hs_rate is per lane, including when two hosts drive a bonded panel. */
+	if (msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE)
+		return mult_frac(msm_host->hs_rate, msm_host->lanes, bpp);
+
+	return dsi_get_required_pclk_rate(msm_host, mode, is_bonded_dsi);
+}
+
+static unsigned long dsi_byte_clk_from_pclk(struct msm_dsi_host *msm_host,
+					     unsigned long pclk_rate)
+{
 	u8 lanes = msm_host->lanes;
 	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
-	unsigned long pclk_rate = dsi_get_pclk_rate(mode, msm_host->dsc, is_bonded_dsi);
-	unsigned long pclk_bpp;
 
 	if (lanes == 0) {
 		pr_err("%s: forcing mdss_dsi lanes to 1\n", __func__);
@@ -656,21 +667,51 @@ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_d
 
 	/* CPHY "byte_clk" is in units of 16 bits */
 	if (msm_host->cphy_mode)
-		pclk_bpp = mult_frac(pclk_rate, bpp, 16 * lanes);
-	else
-		pclk_bpp = mult_frac(pclk_rate, bpp, 8 * lanes);
+		return mult_frac(pclk_rate, bpp, 16 * lanes);
 
-	return pclk_bpp;
+	return mult_frac(pclk_rate, bpp, 8 * lanes);
+}
+
+unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_dsi,
+				    const struct drm_display_mode *mode)
+{
+	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	unsigned long pclk_rate;
+
+	if (msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE)
+		return msm_host->hs_rate / 8;
+
+	pclk_rate = dsi_get_required_pclk_rate(msm_host, mode, is_bonded_dsi);
+
+	return dsi_byte_clk_from_pclk(msm_host, pclk_rate);
 }
 
 static void dsi_calc_pclk(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 {
-	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host->mode, msm_host->dsc, is_bonded_dsi);
+	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host, msm_host->mode,
+						     is_bonded_dsi);
 	msm_host->byte_clk_rate = dsi_byte_clk_get_rate(&msm_host->base, is_bonded_dsi,
 							msm_host->mode);
 
 	DBG("pclk=%lu, bclk=%lu", msm_host->pixel_clk_rate,
 				msm_host->byte_clk_rate);
+}
+
+static long dsi_round_byte_clk_rate(struct msm_dsi_host *msm_host,
+				    unsigned long rate)
+{
+	struct clk *clk = msm_host->byte_clk;
+
+	/*
+	 * Hosts with explicit PLL handles reparent the byte RCG after PHY enable.
+	 * Other hosts, including SM8150, use DT-assigned parents, so rounding the
+	 * byte clock already follows the target PLL parent chain.
+	 */
+	if ((msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    msm_host->dsi_pll_byte_clk)
+		clk = msm_host->dsi_pll_byte_clk;
+
+	return clk_round_rate(clk, rate);
 }
 
 int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
@@ -684,12 +725,18 @@ int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 
 	dsi_calc_pclk(msm_host, is_bonded_dsi);
 
-	rounded_byte_clk_rate = clk_round_rate(msm_host->byte_clk,
-					       msm_host->byte_clk_rate);
+	rounded_byte_clk_rate = dsi_round_byte_clk_rate(msm_host,
+						msm_host->byte_clk_rate);
 	if (rounded_byte_clk_rate < 0) {
 		pr_err("%s: failed to round byte clock rate, %ld\n",
 		       __func__, rounded_byte_clk_rate);
 		return rounded_byte_clk_rate;
+	}
+	if ((msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    rounded_byte_clk_rate != msm_host->byte_clk_rate) {
+		pr_err("%s: target HS rate %lu is not supported\n",
+		       __func__, msm_host->hs_rate);
+		return -EINVAL;
 	}
 
 	msm_host->byte_clk_rate = rounded_byte_clk_rate;
@@ -1739,15 +1786,31 @@ static int dsi_host_attach(struct mipi_dsi_host *host,
 					struct mipi_dsi_device *dsi)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	int bpp = mipi_dsi_pixel_format_to_bpp(dsi->format);
 	int ret;
 
 	if (dsi->lanes > msm_host->num_data_lanes)
+		return -EINVAL;
+	if ((dsi->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    (!dsi->lanes || !dsi->hs_rate))
+		return -EINVAL;
+	if ((dsi->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    (msm_host->cfg_hnd->major != MSM_DSI_VER_MAJOR_6G ||
+	     msm_host->cphy_mode || (dsi->mode_flags & MIPI_DSI_MODE_VIDEO))) {
+		dev_err(&dsi->dev,
+			"fixed HS rate requires a 6G D-PHY command-mode host\n");
+		return -EOPNOTSUPP;
+	}
+	if ((dsi->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    (bpp < 0 || dsi->hs_rate % 8 ||
+	     (u64)dsi->hs_rate * dsi->lanes % bpp))
 		return -EINVAL;
 
 	msm_host->channel = dsi->channel;
 	msm_host->lanes = dsi->lanes;
 	msm_host->format = dsi->format;
 	msm_host->mode_flags = dsi->mode_flags;
+	msm_host->hs_rate = dsi->hs_rate;
 	if (dsi->dsc) {
 		msm_host->dsc = dsi->dsc;
 		if (dsi->mode_flags & MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT)
@@ -2771,13 +2834,31 @@ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
 	return 0;
 }
 
-enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,
-					    const struct drm_display_mode *mode)
+enum drm_mode_status msm_dsi_host_check_mode(struct mipi_dsi_host *host,
+					     bool is_bonded_dsi,
+					     const struct drm_display_mode *mode)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	struct drm_dsc_config *dsc = msm_host->dsc;
+	unsigned long byte_clk_rate, required_byte_clk_rate;
+	long rounded_byte_clk_rate;
 	int pic_width = mode->hdisplay;
 	int pic_height = mode->vdisplay;
+
+	if (msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) {
+		byte_clk_rate = dsi_byte_clk_get_rate(host, is_bonded_dsi, mode);
+		required_byte_clk_rate = dsi_byte_clk_from_pclk(msm_host,
+				dsi_get_required_pclk_rate(msm_host, mode,
+							   is_bonded_dsi));
+		if (byte_clk_rate < required_byte_clk_rate)
+			return MODE_CLOCK_LOW;
+
+		rounded_byte_clk_rate = dsi_round_byte_clk_rate(msm_host,
+							byte_clk_rate);
+		if (rounded_byte_clk_rate < 0 ||
+		    rounded_byte_clk_rate != byte_clk_rate)
+			return MODE_CLOCK_RANGE;
+	}
 
 	if (!msm_host->dsc)
 		return MODE_OK;
