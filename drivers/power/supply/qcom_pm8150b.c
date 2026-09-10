@@ -499,8 +499,10 @@ static int pm8150b_fg_current(struct pm8150b_charger *chip, int *current_ua)
 
 	ret = pm8150b_fg_read_shadow(chip, PM8150B_FG_IBATT,
 				     PM8150B_FG_IBATT_COPY, &raw);
-	if (!ret)
-		*current_ua = div_s64((s64)(s16)raw * 488281, 1000);
+	if (!ret) {
+		/* The FG sign is opposite to the power-supply ABI convention. */
+		*current_ua = -div_s64((s64)(s16)raw * 488281, 1000);
+	}
 
 	return ret;
 }
