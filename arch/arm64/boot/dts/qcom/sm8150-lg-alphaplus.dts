@@ -665,14 +665,14 @@
 				     <0x2 0x13 0x4 IRQ_TYPE_EDGE_BOTH>,
 				     <0x2 0x13 0x6 IRQ_TYPE_EDGE_RISING>,
 				     <0x2 0x16 0x1 IRQ_TYPE_EDGE_RISING>,
-				     <0x2 0x40 0x0 IRQ_TYPE_EDGE_BOTH>,
+				     <0x2 0x40 0x3 IRQ_TYPE_EDGE_RISING>,
 				     <0x2 0x42 0x2 IRQ_TYPE_EDGE_BOTH>,
 				     <0x2 0x13 0x2 IRQ_TYPE_EDGE_BOTH>,
 				     <0x2 0x16 0x6 IRQ_TYPE_EDGE_BOTH>,
 				     <0x2 0x13 0x7 IRQ_TYPE_EDGE_RISING>;
 			interrupt-names = "chg-state-change", "bat-temp",
 					  "usbin-plugin", "usbin-src-change", "wdog-bark",
-					  "soc-update", "batt-temp-delta", "usbin-uv",
+					  "msoc-delta", "batt-temp-delta", "usbin-uv",
 					  "temp-change", "usbin-icl-change";
 			io-channels = <&pm8150b_adc ADC5_USB_IN_I>,
 				      <&pm8150b_adc ADC5_MID_CHG_DIV6>;
