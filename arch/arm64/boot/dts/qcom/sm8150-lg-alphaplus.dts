@@ -573,6 +573,7 @@
 
 &usb_1 {
 	status = "okay";
+	wakeup-source;
 };
 
 &usb_1_dwc3 {
