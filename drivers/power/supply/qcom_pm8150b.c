@@ -2425,6 +2425,9 @@ static int pm8150b_probe(struct platform_device *pdev)
 	if (!chip->parallel)
 		return dev_err_probe(chip->dev, -EPROBE_DEFER,
 				     "SMB1355 power_supply not registered\n");
+	if (!device_link_add(chip->dev, chip->parallel->dev.parent,
+			     DL_FLAG_AUTOREMOVE_CONSUMER))
+		return -ENOMEM;
 	ret = device_property_read_u32(chip->dev, "qcom,parallel-percent", &raw);
 	if (ret || raw < 1 || raw > 99)
 		return dev_err_probe(chip->dev, ret ?: -EINVAL,
@@ -2592,6 +2595,8 @@ static int pm8150b_resume(struct device *dev)
 	if (!chip->shutting_down)
 		mod_delayed_work(system_dfl_wq, &chip->policy_work, 0);
 	mutex_unlock(&chip->usb_lock);
+	/* Finish maintenance before userspace can request another suspend. */
+	flush_delayed_work(&chip->policy_work);
 
 	return 0;
 }
