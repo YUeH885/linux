@@ -14,7 +14,8 @@ description: |
   limiting belongs to the main charger; the secondary controls its FCC and
   float voltage. The main policy periodically renews the enable request.
   Hardware die-temperature mitigation and watchdog cutoff remain active
-  while charging.
+  while charging. The charger is a child of a Qualcomm I2C PMIC core, which
+  provides register access and the interrupt domain.
 
 properties:
   compatible:
@@ -23,20 +24,61 @@ properties:
   reg:
     maxItems: 1
 
+  interrupts:
+    minItems: 3
+    maxItems: 3
+
+  interrupt-names:
+    items:
+      - const: wdog-bark
+      - const: chg-state-change
+      - const: temperature-change
+
+  qcom,hw-die-temp-mitigation:
+    type: boolean
+    description:
+      Use the hardware die-temperature comparator instead of software scanning.
+
+  qcom,die-temp-threshold-degc:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 34
+    maximum: 97
+    description:
+      Lower die-temperature comparator threshold in degrees Celsius.
+
+  wakeup-source: true
+
 required:
   - compatible
   - reg
+  - interrupts
+  - interrupt-names
 
 additionalProperties: false
 
 examples:
   - |
-    i2c {
-      #address-cells = <1>;
-      #size-cells = <0>;
+    #include <dt-bindings/interrupt-controller/irq.h>
 
-      charger@c {
+    i2c_pmic: i2c-pmic {
+      #address-cells = <1>;
+      #size-cells = <1>;
+      interrupt-controller;
+      #interrupt-cells = <3>;
+
+      charger@1000 {
         compatible = "qcom,smb1355";
-        reg = <0x0c>;
+        reg = <0x1000 0x700>;
+        interrupt-parent = <&i2c_pmic>;
+        interrupts = <0x16 1 IRQ_TYPE_EDGE_RISING>,
+                     <0x10 1 IRQ_TYPE_EDGE_RISING>,
+                     <0x16 6 IRQ_TYPE_EDGE_RISING>;
+        interrupt-names = "wdog-bark", "chg-state-change",
+                          "temperature-change";
+        qcom,hw-die-temp-mitigation;
+        qcom,die-temp-threshold-degc = <90>;
+        wakeup-source;
       };
     };
+
+...

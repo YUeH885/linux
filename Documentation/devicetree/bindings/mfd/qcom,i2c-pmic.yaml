@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mfd/qcom,i2c-pmic.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm I2C PMIC core
+
+maintainers:
+  - Yuzu <yuzu23234@gmail.com>
+
+description: |
+  Qualcomm PMICs accessed over I2C expose an SPMI-style 16-bit register map.
+  The core provides that regmap to platform children and demultiplexes a
+  summary interrupt into the per-peripheral interrupt registers.
+
+properties:
+  compatible:
+    const: qcom,i2c-pmic
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 3
+    description: |
+      The first cell is the 8-bit peripheral address, the second is the
+      interrupt bit number from 0 through 7, and the third is an IRQ_TYPE_*.
+
+  "#address-cells":
+    const: 1
+
+  "#size-cells":
+    const: 1
+
+  pinctrl-0: true
+
+  pinctrl-names:
+    items:
+      - const: default
+
+  qcom,periph-map:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 1
+    maxItems: 32
+    items:
+      minimum: 0
+      maximum: 255
+    description: |
+      Peripheral addresses corresponding in order to bits in the summary
+      status registers, from the least significant bit upward.
+
+  wakeup-source: true
+
+patternProperties:
+  "^.*@[0-9a-f]+$":
+    type: object
+    additionalProperties: true
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - interrupt-controller
+  - "#interrupt-cells"
+  - "#address-cells"
+  - "#size-cells"
+  - qcom,periph-map
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      i2c_pmic: pmic@c {
+        compatible = "qcom,i2c-pmic";
+        reg = <0x0c>;
+        interrupt-parent = <&spmi_bus>;
+        interrupts = <0x2 0xc5 0 IRQ_TYPE_LEVEL_LOW>;
+        interrupt-controller;
+        #interrupt-cells = <3>;
+        #address-cells = <1>;
+        #size-cells = <1>;
+        qcom,periph-map = <0x10 0x12 0x13 0x16>;
+        wakeup-source;
+
+        charger@1000 {
+          compatible = "qcom,smb1355";
+          reg = <0x1000 0x700>;
+          interrupt-parent = <&i2c_pmic>;
+          interrupts = <0x16 1 IRQ_TYPE_EDGE_RISING>,
+                       <0x10 1 IRQ_TYPE_EDGE_RISING>,
+                       <0x16 6 IRQ_TYPE_EDGE_RISING>;
+          interrupt-names = "wdog-bark", "chg-state-change",
+                            "temperature-change";
+          qcom,hw-die-temp-mitigation;
+          qcom,die-temp-threshold-degc = <90>;
+          wakeup-source;
+        };
+      };
+    };
+
+...

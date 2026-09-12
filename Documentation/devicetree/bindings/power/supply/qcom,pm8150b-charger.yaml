@@ -22,7 +22,7 @@ properties:
     maxItems: 1
 
   interrupts:
-    maxItems: 8
+    maxItems: 10
 
   interrupt-names:
     items:
@@ -34,6 +34,8 @@ properties:
       - const: soc-update
       - const: batt-temp-delta
       - const: usbin-uv
+      - const: temp-change
+      - const: usbin-icl-change
 
   io-channels:
     items:
@@ -65,6 +67,36 @@ properties:
     description:
       State of charge, in percent, at which SOC-based recharge restarts
       charging.
+
+  qcom,wd-bark-time-secs:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [16, 32, 64, 128]
+    description:
+      Watchdog bark timeout in seconds.
+
+  qcom,wd-snarl-time-config:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 0
+    maximum: 7
+    description:
+      Factory watchdog snarl timeout selector.
+
+  qcom,hw-die-temp-mitigation:
+    type: boolean
+    description:
+      Enable the charger die-temperature monitor and comparator. Temperature
+      monitoring sources are disabled unless enabled by the corresponding
+      mitigation property.
+
+  qcom,hw-connector-mitigation:
+    type: boolean
+    description:
+      Enable the connector-thermistor temperature monitor.
+
+  qcom,hw-skin-temp-mitigation:
+    type: boolean
+    description:
+      Enable the skin-thermistor temperature monitor.
 
   qcom,usb-c-port:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -113,13 +145,17 @@ examples:
                      <0x2 0x16 0x1 IRQ_TYPE_EDGE_RISING>,
                      <0x2 0x40 0x0 IRQ_TYPE_EDGE_BOTH>,
                      <0x2 0x42 0x2 IRQ_TYPE_EDGE_BOTH>,
-                     <0x2 0x13 0x2 IRQ_TYPE_EDGE_BOTH>;
+                     <0x2 0x13 0x2 IRQ_TYPE_EDGE_BOTH>,
+                     <0x2 0x16 0x6 IRQ_TYPE_EDGE_BOTH>,
+                     <0x2 0x13 0x7 IRQ_TYPE_EDGE_RISING>;
         interrupt-names = "chg-state-change", "bat-temp", "usbin-plugin",
                           "usbin-src-change", "wdog-bark", "soc-update",
-                          "batt-temp-delta", "usbin-uv";
+                          "batt-temp-delta", "usbin-uv", "temp-change",
+                          "usbin-icl-change";
         io-channels = <&pm8150b_adc 7>, <&pm8150b_adc 30>;
         io-channel-names = "usbin_i", "mid_chg";
         monitored-battery = <&battery>;
+        qcom,hw-die-temp-mitigation;
         qcom,parallel-charger = <&smb1355>;
         qcom,parallel-percent = <70>;
         qcom,auto-recharge-soc = <98>;
