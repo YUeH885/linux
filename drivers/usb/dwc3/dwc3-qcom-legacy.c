@@ -16,6 +16,7 @@
 #include <linux/interconnect.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/phy/phy.h>
 #include <linux/usb/of.h>
 #include <linux/reset.h>
@@ -23,6 +24,11 @@
 #include <linux/usb/hcd.h>
 #include <linux/usb.h>
 #include "core.h"
+
+static const struct property_entry dwc3_qcom_retention_props[] = {
+	PROPERTY_ENTRY_BOOL("snps,gadget-retention"),
+	{ }
+};
 
 /* USB QSCRATCH Hardware registers */
 #define QSCRATCH_HS_PHY_CTRL			0x10
@@ -793,6 +799,13 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 	if (ignore_pipe_clk)
 		dwc3_qcom_select_utmi_clk(qcom);
 
+	if (of_device_is_compatible(dev->of_node, "qcom,sm8150-dwc3")) {
+		ret = device_create_managed_software_node(dev,
+						dwc3_qcom_retention_props, NULL);
+		if (ret)
+			goto clk_disable;
+	}
+
 	ret = dwc3_qcom_of_register_core(pdev);
 	if (ret) {
 		dev_err(dev, "failed to register DWC3 Core, err=%d\n", ret);
@@ -866,12 +879,16 @@ static void dwc3_qcom_remove(struct platform_device *pdev)
 static int __maybe_unused dwc3_qcom_pm_suspend(struct device *dev)
 {
 	struct dwc3_qcom *qcom = dev_get_drvdata(dev);
+	struct dwc3 *dwc = platform_get_drvdata(qcom->dwc3);
 	bool wakeup = device_may_wakeup(dev);
 	int ret;
 
-	ret = dwc3_qcom_suspend(qcom, wakeup);
-	if (ret)
-		return ret;
+	/* The retained gadget can still DMA and must keep its clocks and votes. */
+	if (!dwc || !dwc->gadget_retained) {
+		ret = dwc3_qcom_suspend(qcom, wakeup);
+		if (ret)
+			return ret;
+	}
 
 	qcom->pm_suspended = true;
 

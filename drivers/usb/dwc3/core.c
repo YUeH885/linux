@@ -14,6 +14,7 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/suspend.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/interrupt.h>
@@ -1702,19 +1703,18 @@ static void dwc3_get_software_properties(struct dwc3 *dwc,
 	if (properties->needs_full_reinit)
 		dwc->needs_full_reinit = true;
 
-	dwc->gsbuscfg0_reqinfo = DWC3_GSBUSCFG0_REQINFO_UNSPECIFIED;
-
-	if (properties->gsbuscfg0_reqinfo !=
-	    DWC3_GSBUSCFG0_REQINFO_UNSPECIFIED) {
-		dwc->gsbuscfg0_reqinfo = properties->gsbuscfg0_reqinfo;
-		return;
-	}
+	dwc->gadget_retention = properties->gadget_retention;
+	dwc->gsbuscfg0_reqinfo = properties->gsbuscfg0_reqinfo;
 
 	/*
 	 * Iterate over all parent nodes for finding swnode properties
 	 * and non-DT (non-ABI) properties.
 	 */
 	for (tmpdev = dwc->dev; tmpdev; tmpdev = tmpdev->parent) {
+		if (device_property_read_bool(tmpdev, "snps,gadget-retention"))
+			dwc->gadget_retention = true;
+		if (properties->gsbuscfg0_reqinfo != DWC3_GSBUSCFG0_REQINFO_UNSPECIFIED)
+			continue;
 		ret = device_property_read_u16(tmpdev,
 					       "snps,gsbuscfg0-reqinfo",
 					       &gsbuscfg0_reqinfo);
@@ -2570,6 +2570,18 @@ static int dwc3_suspend_common(struct dwc3 *dwc, pm_message_t msg)
 	case DWC3_GCTL_PRTCAP_DEVICE:
 		if (pm_runtime_suspended(dwc->dev))
 			break;
+		if (pm_suspend_target_state == PM_SUSPEND_TO_IDLE &&
+		    !PMSG_IS_AUTO(msg) && dwc->gadget_retention && dwc->connected &&
+		    device_may_wakeup(dwc->sysdev) && !dwc->needs_full_reinit) {
+			/* Keep the host's configuration and arm normal gadget traffic. */
+			ret = enable_irq_wake(dwc->irq_gadget);
+			if (ret) {
+				dwc3_enable_susphy(dwc, dwc->susphy_state);
+				return ret;
+			}
+			dwc->gadget_retained = true;
+			break;
+		}
 		ret = dwc3_gadget_suspend(dwc);
 		if (ret)
 			return ret;
@@ -2633,6 +2645,11 @@ static int dwc3_resume_common(struct dwc3 *dwc, pm_message_t msg)
 
 	switch (dwc->current_dr_role) {
 	case DWC3_GCTL_PRTCAP_DEVICE:
+		if (dwc->gadget_retained) {
+			disable_irq_wake(dwc->irq_gadget);
+			dwc->gadget_retained = false;
+			break;
+		}
 		ret = dwc3_core_init_for_resume(dwc);
 		if (ret)
 			return ret;
