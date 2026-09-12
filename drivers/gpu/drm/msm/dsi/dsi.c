@@ -21,6 +21,18 @@ int msm_dsi_set_idle(struct msm_dsi *msm_dsi, bool idle)
 	return msm_dsi_host_set_idle(msm_dsi->host, idle);
 }
 
+void msm_dsi_system_suspend(struct msm_dsi *msm_dsi)
+{
+	if (!msm_dsi || !msm_dsi->ulps_enabled)
+		return;
+
+	/* System sleep can discard PHY registers even when ULPS retains power. */
+	msm_dsi_phy_disable(msm_dsi->phy);
+	msm_dsi->phy_enabled = false;
+	msm_dsi->ulps_enabled = false;
+	msm_dsi->phy_clk_req = (struct msm_dsi_phy_clk_request) { 0 };
+}
+
 struct drm_dsc_config *msm_dsi_get_dsc_config(struct msm_dsi *msm_dsi)
 {
 	return msm_dsi_host_get_dsc_config(msm_dsi->host);

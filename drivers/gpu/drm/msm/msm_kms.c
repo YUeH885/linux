@@ -343,11 +343,20 @@ int msm_kms_pm_prepare(struct device *dev)
 {
 	struct msm_drm_private *priv = dev_get_drvdata(dev);
 	struct drm_device *ddev = priv ? priv->dev : NULL;
+	int i;
+	int ret;
 
 	if (!priv || !priv->kms)
 		return 0;
 
-	return drm_mode_config_helper_suspend(ddev);
+	ret = drm_mode_config_helper_suspend(ddev);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < ARRAY_SIZE(priv->kms->dsi); i++)
+		msm_dsi_system_suspend(priv->kms->dsi[i]);
+
+	return 0;
 }
 
 void msm_kms_pm_complete(struct device *dev)

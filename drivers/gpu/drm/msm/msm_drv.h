@@ -299,6 +299,7 @@ int msm_dsi_modeset_init(struct msm_dsi *msm_dsi, struct drm_device *dev,
 void msm_dsi_snapshot(struct msm_disp_state *disp_state, struct msm_dsi *msm_dsi);
 bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi);
 int msm_dsi_set_idle(struct msm_dsi *msm_dsi, bool idle);
+void msm_dsi_system_suspend(struct msm_dsi *msm_dsi);
 bool msm_dsi_is_bonded_dsi(struct msm_dsi *msm_dsi);
 bool msm_dsi_is_master_dsi(struct msm_dsi *msm_dsi);
 bool msm_dsi_wide_bus_enabled(struct msm_dsi *msm_dsi);
@@ -327,6 +328,10 @@ static inline bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi)
 static inline int msm_dsi_set_idle(struct msm_dsi *msm_dsi, bool idle)
 {
 	return 0;
+}
+
+static inline void msm_dsi_system_suspend(struct msm_dsi *msm_dsi)
+{
 }
 static inline bool msm_dsi_is_bonded_dsi(struct msm_dsi *msm_dsi)
 {
