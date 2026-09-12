@@ -2201,6 +2201,14 @@ static irqreturn_t pm8150b_changed_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t pm8150b_soc_delta_irq(int irq, void *data)
+{
+	struct pm8150b_charger *chip = data;
+
+	power_supply_changed(chip->battery);
+	return IRQ_HANDLED;
+}
+
 static irqreturn_t pm8150b_usb_update_irq(int irq, void *data)
 {
 	struct pm8150b_charger *chip = data;
@@ -2505,7 +2513,8 @@ static int pm8150b_probe(struct platform_device *pdev)
 				  pm8150b_usbin_uv_irq, true);
 	if (ret)
 		return ret;
-	ret = pm8150b_request_irq(pdev, "soc-update", pm8150b_changed_irq, false);
+	/* SOC_UPDATE fires for each measurement, even without an SOC change. */
+	ret = pm8150b_request_irq(pdev, "msoc-delta", pm8150b_soc_delta_irq, false);
 	if (ret)
 		return ret;
 	ret = pm8150b_request_irq(pdev, "batt-temp-delta",
