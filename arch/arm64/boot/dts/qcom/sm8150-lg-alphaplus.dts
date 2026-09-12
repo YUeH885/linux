@@ -5,6 +5,7 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include <dt-bindings/usb/pd.h>
 #include "sm8150.dtsi"
@@ -642,6 +643,17 @@
 	status = "okay";
 };
 
+&pm8150b_gpios {
+	smb1355_stat_default: smb1355-stat-default-state {
+		pins = "gpio6";
+		function = "normal";
+		input-enable;
+		bias-pull-up;
+		qcom,pull-up-strength = <PMIC_GPIO_PULL_UP_30>;
+		power-source = <0>;
+	};
+};
+
 &spmi_bus {
 	pmic@2 {
 		charger@1000 {
@@ -654,10 +666,13 @@
 				     <0x2 0x16 0x1 IRQ_TYPE_EDGE_RISING>,
 				     <0x2 0x40 0x0 IRQ_TYPE_EDGE_BOTH>,
 				     <0x2 0x42 0x2 IRQ_TYPE_EDGE_BOTH>,
-				     <0x2 0x13 0x2 IRQ_TYPE_EDGE_BOTH>;
+				     <0x2 0x13 0x2 IRQ_TYPE_EDGE_BOTH>,
+				     <0x2 0x16 0x6 IRQ_TYPE_EDGE_BOTH>,
+				     <0x2 0x13 0x7 IRQ_TYPE_EDGE_RISING>;
 			interrupt-names = "chg-state-change", "bat-temp",
 					  "usbin-plugin", "usbin-src-change", "wdog-bark",
-					  "soc-update", "batt-temp-delta", "usbin-uv";
+					  "soc-update", "batt-temp-delta", "usbin-uv",
+					  "temp-change", "usbin-icl-change";
 			io-channels = <&pm8150b_adc ADC5_USB_IN_I>,
 				      <&pm8150b_adc ADC5_MID_CHG_DIV6>;
 			io-channel-names = "usbin_i", "mid_chg";
@@ -666,6 +681,7 @@
 			qcom,parallel-percent = <70>;
 			qcom,auto-recharge-soc = <98>;
 			qcom,usb-c-port = <&pm8150b_typec>;
+			qcom,hw-die-temp-mitigation;
 			wakeup-source;
 		};
 	};
@@ -692,9 +708,33 @@
 &i2c4 {
 	status = "okay";
 
-	smb1355: charger@c {
-		compatible = "qcom,smb1355";
+	smb1355_pmic: pmic@c {
+		compatible = "qcom,i2c-pmic";
 		reg = <0x0c>;
+		interrupt-parent = <&spmi_bus>;
+		interrupts = <0x2 0xc5 0 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-controller;
+		#interrupt-cells = <3>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&smb1355_stat_default>;
+		qcom,periph-map = <0x10 0x12 0x13 0x16>;
+		wakeup-source;
+
+		smb1355: charger@1000 {
+			compatible = "qcom,smb1355";
+			reg = <0x1000 0x700>;
+			interrupt-parent = <&smb1355_pmic>;
+			interrupts = <0x16 1 IRQ_TYPE_EDGE_RISING>,
+				     <0x10 1 IRQ_TYPE_EDGE_RISING>,
+				     <0x16 6 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "wdog-bark", "chg-state-change",
+					  "temperature-change";
+			qcom,hw-die-temp-mitigation;
+			qcom,die-temp-threshold-degc = <90>;
+			wakeup-source;
+		};
 	};
 };
 
