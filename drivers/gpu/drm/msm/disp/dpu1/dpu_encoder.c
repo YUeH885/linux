@@ -10,6 +10,7 @@
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
 #include <linux/debugfs.h>
 #include <linux/kthread.h>
+#include <linux/pm_qos.h>
 #include <linux/seq_file.h>
 
 #include <drm/drm_atomic.h>
@@ -18,6 +19,7 @@
 #include <drm/drm_file.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_managed.h>
 
 #include "msm_drv.h"
 #include "dpu_kms.h"
@@ -165,6 +167,7 @@ enum dpu_enc_rc_states {
  * @rc_lock:			resource control mutex lock to protect
  *				virt encoder over various state changes
  * @rc_state:			resource controller state
+ * @cpu_latency_qos:		CPU wakeup latency request while resources are active
  * @delayed_off_work:		delayed worker to schedule disabling of
  *				clks and resources after IDLE_TIMEOUT time.
  * @topology:                   topology of the display
@@ -209,6 +212,7 @@ struct dpu_encoder_virt {
 	bool idle_pc_supported;
 	struct mutex rc_lock;
 	enum dpu_enc_rc_states rc_state;
+	struct pm_qos_request cpu_latency_qos;
 	struct delayed_work delayed_off_work;
 	struct msm_display_topology topology;
 
@@ -868,6 +872,12 @@ static void _dpu_encoder_resource_enable(struct drm_encoder *drm_enc)
 	/* enable DPU core clks */
 	pm_runtime_get_sync(&dpu_kms->pdev->dev);
 
+	/* A late CPU wakeup can miss the next command-mode TE after frame done. */
+	if (dpu_enc->disp_info.is_cmd_mode &&
+	    dpu_kms->catalog->perf->cpu_dma_latency_us)
+		cpu_latency_qos_update_request(&dpu_enc->cpu_latency_qos,
+				dpu_kms->catalog->perf->cpu_dma_latency_us);
+
 	/* enable all the irq */
 	_dpu_encoder_irq_enable(drm_enc);
 }
@@ -891,6 +901,11 @@ static void _dpu_encoder_resource_disable(struct drm_encoder *drm_enc)
 
 	/* disable all the irq */
 	_dpu_encoder_irq_disable(drm_enc);
+
+	if (dpu_enc->disp_info.is_cmd_mode &&
+	    dpu_kms->catalog->perf->cpu_dma_latency_us)
+		cpu_latency_qos_update_request(&dpu_enc->cpu_latency_qos,
+					      PM_QOS_DEFAULT_VALUE);
 
 	/* disable DPU core clks */
 	pm_runtime_put_sync(&dpu_kms->pdev->dev);
@@ -2791,6 +2806,13 @@ static const struct drm_encoder_funcs dpu_encoder_funcs = {
 	.debugfs_init = dpu_encoder_debugfs_init,
 };
 
+static void dpu_encoder_cpu_latency_qos_remove(struct drm_device *dev, void *data)
+{
+	struct dpu_encoder_virt *dpu_enc = data;
+
+	cpu_latency_qos_remove_request(&dpu_enc->cpu_latency_qos);
+}
+
 /**
  * dpu_encoder_init - initialize virtual encoder object
  * @dev:        Pointer to drm device structure
@@ -2835,6 +2857,15 @@ struct drm_encoder *dpu_encoder_init(struct drm_device *dev,
 	dpu_enc->idle_timeout = IDLE_TIMEOUT;
 
 	memcpy(&dpu_enc->disp_info, disp_info, sizeof(*disp_info));
+
+	if (disp_info->is_cmd_mode && dpu_kms->catalog->perf->cpu_dma_latency_us) {
+		cpu_latency_qos_add_request(&dpu_enc->cpu_latency_qos,
+					   PM_QOS_DEFAULT_VALUE);
+		ret = drmm_add_action_or_reset(dev, dpu_encoder_cpu_latency_qos_remove,
+					       dpu_enc);
+		if (ret)
+			return ERR_PTR(ret);
+	}
 
 	DPU_DEBUG_ENC(dpu_enc, "created\n");
 
