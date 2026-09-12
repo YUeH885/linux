@@ -11,7 +11,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/pm_wakeirq.h>
+#include <linux/pm_wakeup.h>
 #include <linux/power_supply.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -40,6 +40,7 @@
 #define PM8150B_AICL_CONT_THRESHOLD	0x1384
 #define PM8150B_POWER_PATH_STATUS	0x110b
 #define PM8150B_BATIF_INT_RT_STS	0x1210
+#define PM8150B_BATIF_ADC_CHANNEL_EN	0x1282
 #define PM8150B_APSD_STATUS		0x1307
 #define PM8150B_APSD_RESULT		0x1308
 #define PM8150B_USB_INT_RT_STS		0x1310
@@ -52,6 +53,7 @@
 #define PM8150B_USB_ICL_OPTIONS		0x1366
 #define PM8150B_USB_ICL_CFG		0x1370
 #define PM8150B_USB_AICL_OPTIONS	0x1380
+#define PM8150B_MISC_DIE_TEMP_STATUS	0x1607
 #define PM8150B_WDOG_PET		0x1643
 #define PM8150B_AICL_CMD		0x1644
 #define PM8150B_SMB_EN_CMD		0x1648
@@ -119,11 +121,28 @@
 #define PM8150B_CHGR_ADC_TERM_SAMPLE_COUNT	BIT(0)
 #define PM8150B_THERMREG_SW_ICL_ADJUST	BIT(7)
 #define PM8150B_THERMREG_MITIGATION_MASK	(PM8150B_THERMREG_SW_ICL_ADJUST | \
-					 GENMASK(4, 0))
+					 GENMASK(5, 0))
+#define PM8150B_THERMREG_CONNECTOR_ADC_SRC_EN	BIT(4)
+#define PM8150B_THERMREG_SKIN_ADC_SRC_EN	BIT(2)
+#define PM8150B_THERMREG_DIE_ADC_SRC_EN	BIT(1)
+#define PM8150B_THERMREG_DIE_CMP_SRC_EN	BIT(0)
+#define PM8150B_CONN_THM_CHANNEL_EN	BIT(4)
+#define PM8150B_MISC_THM_CHANNEL_EN	BIT(1)
+#define PM8150B_DIE_TEMP_CHANNEL_EN	BIT(2)
+#define PM8150B_DIE_TEMP_RST_BIT	BIT(2)
+#define PM8150B_DIE_TEMP_ICL_LIMIT_UA	500000
 #define PM8150B_WDOG_TRIGGER_AFP	BIT(7)
 #define PM8150B_WDOG_BARK_IRQ_ENABLE	BIT(6)
 #define PM8150B_WDOG_ENABLE_ON_PLUGIN	BIT(1)
 #define PM8150B_WDOG_PET_BIT		BIT(0)
+#define PM8150B_WDOG_BITE_DISABLE_CHARGING	BIT(7)
+#define PM8150B_WDOG_SNARL_TIMEOUT_MASK	GENMASK(6, 4)
+#define PM8150B_WDOG_BARK_TIMEOUT_MASK	GENMASK(3, 2)
+#define PM8150B_WDOG_BITE_TIMEOUT_MASK	GENMASK(1, 0)
+#define PM8150B_WDOG_BITE_TIMEOUT_8S	0x03
+#define PM8150B_WDOG_DEFAULT_BARK_SECS	64
+#define PM8150B_WDOG_DEFAULT_SNARL_CFG	0x07
+#define PM8150B_WDOG_MIN_BARK_SECS	16
 #define PM8150B_SMB_EN_OVERRIDE_VALUE	BIT(4)
 #define PM8150B_SMB_EN_OVERRIDE		BIT(3)
 #define PM8150B_EN_STAT_CMD		BIT(2)
@@ -180,9 +199,9 @@
 #define PM8150B_AICL_STORM_MAX_MV	4800
 #define PM8150B_UV_STORM_PERIOD_MS	3000
 #define PM8150B_UV_STORM_COUNT		5
+#define PM8150B_ICL_CHANGE_DELAY_MS	1000
 #define PM8150B_PARALLEL_MIN_FCC_UA	500000
 #define PM8150B_PARALLEL_MIN_TOTAL_ICL_UA	1400000
-#define PM8150B_WDOG_TIMEOUT_64S	0xfb
 
 enum pm8150b_charge_phase {
 	PM8150B_INHIBIT_CHARGE,
@@ -207,6 +226,7 @@ struct pm8150b_policy_snapshot {
 	bool battery_temp_limited;
 	bool battery_missing;
 	bool battery_overvoltage;
+	bool die_temp_rst;
 };
 
 struct pm8150b_policy_target {
@@ -266,6 +286,11 @@ struct pm8150b_charger {
 	int taper_fcc_ua;
 	int usb_voltage_max_uv;
 	int auto_recharge_soc;
+	unsigned int wd_bark_time_secs;
+	unsigned int wd_snarl_time_cfg;
+	bool hw_die_temp_mitigation;
+	bool hw_connector_mitigation;
+	bool hw_skin_temp_mitigation;
 	int charge_phase;
 	int fg_smb_measure_enabled;
 	bool fg_dma_alg_wait;
@@ -276,6 +301,7 @@ struct pm8150b_charger {
 	bool charging_state_valid;
 	bool parallel_enabled;
 	bool parallel_uncertain;
+	bool suspended;
 	int technology;
 	int charge_full_design_uah;
 	int voltage_max_design_uv;
@@ -1077,8 +1103,19 @@ static int pm8150b_apply_limits(struct pm8150b_charger *chip,
 	int total_fcc_ua, total_icl_ua, fv_uv;
 	int ret;
 
-	/* Apply a reduced contract limit before resuming an input. */
+	/* Apply the resolved source limit before changing the input voltage. */
 	ret = pm8150b_set_usb_icl(chip, target->input_current_ua);
+	if (ret)
+		return ret;
+	if (chip->pd_active) {
+		ret = pm8150b_set_pd_input_voltage(chip,
+						   chip->usb_voltage_max_uv);
+	} else {
+		ret = pm8150b_set_fsw(chip, PM8150B_USB_VOLTAGE_5V_UV);
+		if (!ret)
+			ret = regmap_write(chip->regmap,
+					   PM8150B_USB_ADAPTER_ALLOW_OVERRIDE, 0);
+	}
 	if (ret)
 		return ret;
 	ret = regmap_update_bits(chip->regmap, PM8150B_USBIN_CMD_IL,
@@ -1237,7 +1274,7 @@ single:
 static int pm8150b_read_policy_snapshot(struct pm8150b_charger *chip,
 					struct pm8150b_policy_snapshot *s)
 {
-	unsigned int status7, status2, batif;
+	unsigned int status7, status2, batif, die_temp;
 	int online, present, ret;
 
 	memset(s, 0, sizeof(*s));
@@ -1276,6 +1313,13 @@ static int pm8150b_read_policy_snapshot(struct pm8150b_charger *chip,
 		return ret;
 	s->battery_missing = batif & (PM8150B_BAT_TERMINAL_MISSING |
 				     PM8150B_BAT_THERM_MISSING);
+	if (chip->hw_die_temp_mitigation) {
+		ret = regmap_read(chip->regmap, PM8150B_MISC_DIE_TEMP_STATUS,
+				  &die_temp);
+		if (ret)
+			return ret;
+		s->die_temp_rst = die_temp & PM8150B_DIE_TEMP_RST_BIT;
+	}
 
 	return 0;
 }
@@ -1375,6 +1419,9 @@ static void pm8150b_calculate_policy(struct pm8150b_charger *chip,
 	if (s->aicl_max_reached)
 		target->input_current_ua = min(target->input_current_ua,
 					     PM8150B_USB_ICL_UNKNOWN_UA);
+	if (s->die_temp_rst)
+		target->input_current_ua = min(target->input_current_ua,
+					     PM8150B_DIE_TEMP_ICL_LIMIT_UA);
 	if (target->input_current_ua < PM8150B_USB_ICL_UNKNOWN_UA) {
 		target->suspend_input = true;
 		target->disable_charging = true;
@@ -1446,7 +1493,7 @@ static void pm8150b_policy_work(struct work_struct *work)
 	int present = 0, ret;
 
 	mutex_lock(&chip->usb_lock);
-	if (chip->shutting_down) {
+	if (chip->shutting_down || chip->suspended) {
 		mutex_unlock(&chip->usb_lock);
 		return;
 	}
@@ -1559,11 +1606,7 @@ static int pm8150b_read_typec_supply(struct pm8150b_charger *chip,
 		chip->pd_active = false;
 		chip->typec_current_max_ua = 0;
 		chip->usb_voltage_max_uv = PM8150B_USB_VOLTAGE_5V_UV;
-		ret = regmap_write(chip->regmap,
-				   PM8150B_USB_ADAPTER_ALLOW_OVERRIDE, 0);
-		if (!ret)
-			ret = pm8150b_set_fsw(chip, PM8150B_USB_VOLTAGE_5V_UV);
-		return ret;
+		return 0;
 	}
 
 	ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_USB_TYPE, &type);
@@ -1582,12 +1625,7 @@ static int pm8150b_read_typec_supply(struct pm8150b_charger *chip,
 			   PM8150B_USB_ICL_FAST_5V_UA);
 	if (voltage.intval > PM8150B_USB_VOLTAGE_5V_UV)
 		current_ua = min(current_ua, PM8150B_USB_ICL_FAST_9V_UA);
-	if (chip->applied_icl_ua > current_ua) {
-		ret = pm8150b_set_usb_icl(chip, current_ua);
-		if (ret)
-			return ret;
-	}
-
+	/* Resolve BC1.2 and gadget limits before applying this TCPM snapshot. */
 	chip->typec_online = true;
 	chip->typec_current_max_ua = current_ua;
 	chip->pd_active = pm8150b_is_pd_type(type.intval);
@@ -1598,16 +1636,10 @@ static int pm8150b_read_typec_supply(struct pm8150b_charger *chip,
 		chip->usb_voltage_max_uv =
 			clamp(voltage.intval, PM8150B_USB_VOLTAGE_5V_UV,
 			      PM8150B_USB_VOLTAGE_9V_UV);
-		ret = pm8150b_set_pd_input_voltage(chip,
-						   chip->usb_voltage_max_uv);
 	} else {
 		chip->usb_voltage_max_uv = PM8150B_USB_VOLTAGE_5V_UV;
-		ret = pm8150b_set_fsw(chip, PM8150B_USB_VOLTAGE_5V_UV);
-		if (!ret)
-			ret = regmap_write(chip->regmap,
-					   PM8150B_USB_ADAPTER_ALLOW_OVERRIDE, 0);
 	}
-	return ret;
+	return 0;
 }
 
 static int pm8150b_typec_notifier(struct notifier_block *nb,
@@ -2024,11 +2056,90 @@ static int pm8150b_clamp_profile(struct pm8150b_charger *chip)
 	return 0;
 }
 
+static void pm8150b_parse_watchdog_config(struct pm8150b_charger *chip)
+{
+	unsigned int value;
+
+	chip->wd_bark_time_secs = PM8150B_WDOG_DEFAULT_BARK_SECS;
+	if (!device_property_read_u32(chip->dev, "qcom,wd-bark-time-secs",
+				      &value)) {
+		switch (value) {
+		case 16:
+		case 32:
+		case 64:
+		case 128:
+			chip->wd_bark_time_secs = value;
+			break;
+		}
+	}
+
+	chip->wd_snarl_time_cfg = PM8150B_WDOG_DEFAULT_SNARL_CFG;
+	if (!device_property_read_u32(chip->dev, "qcom,wd-snarl-time-config",
+				      &value))
+		chip->wd_snarl_time_cfg = value;
+}
+
+static int pm8150b_configure_mitigation(struct pm8150b_charger *chip)
+{
+	u8 chan = 0, src_cfg = 0;
+	int ret;
+
+	/*
+	 * Only enable the temperature channels declared by the board, clearing
+	 * inherited sources. SMB1355 owns its temperature protection and may
+	 * power down its measurement circuitry when the parallel path is off.
+	 */
+	if (chip->hw_die_temp_mitigation) {
+		chan |= PM8150B_DIE_TEMP_CHANNEL_EN;
+		src_cfg |= PM8150B_THERMREG_DIE_ADC_SRC_EN |
+			   PM8150B_THERMREG_DIE_CMP_SRC_EN;
+	}
+	if (chip->hw_connector_mitigation) {
+		chan |= PM8150B_CONN_THM_CHANNEL_EN;
+		src_cfg |= PM8150B_THERMREG_CONNECTOR_ADC_SRC_EN;
+	}
+	if (chip->hw_skin_temp_mitigation) {
+		chan |= PM8150B_MISC_THM_CHANNEL_EN;
+		src_cfg |= PM8150B_THERMREG_SKIN_ADC_SRC_EN;
+	}
+	if (!src_cfg)
+		src_cfg = PM8150B_THERMREG_SW_ICL_ADJUST;
+
+	ret = regmap_update_bits(chip->regmap, PM8150B_BATIF_ADC_CHANNEL_EN,
+				 PM8150B_CONN_THM_CHANNEL_EN |
+				 PM8150B_DIE_TEMP_CHANNEL_EN |
+				 PM8150B_MISC_THM_CHANNEL_EN, chan);
+	if (ret)
+		return ret;
+
+	return regmap_update_bits(chip->regmap, PM8150B_THERMREG_SRC_CFG,
+				  PM8150B_THERMREG_MITIGATION_MASK, src_cfg);
+}
+
+static void pm8150b_parse_mitigation(struct pm8150b_charger *chip)
+{
+	chip->hw_die_temp_mitigation =
+		device_property_read_bool(chip->dev, "qcom,hw-die-temp-mitigation");
+	chip->hw_connector_mitigation =
+		device_property_read_bool(chip->dev, "qcom,hw-connector-mitigation");
+	chip->hw_skin_temp_mitigation =
+		device_property_read_bool(chip->dev, "qcom,hw-skin-temp-mitigation");
+}
+
 static int pm8150b_enable_safety(struct pm8150b_charger *chip)
 {
 	u8 threshold[4];
+	u8 wdog_timeout;
 	u16 hot, cold;
 	int ret;
+
+	wdog_timeout = (ilog2(chip->wd_bark_time_secs /
+				     PM8150B_WDOG_MIN_BARK_SECS) << 2) &
+			       PM8150B_WDOG_BARK_TIMEOUT_MASK;
+	wdog_timeout |= (chip->wd_snarl_time_cfg << 4) &
+				PM8150B_WDOG_SNARL_TIMEOUT_MASK;
+	wdog_timeout |= PM8150B_WDOG_BITE_DISABLE_CHARGING |
+			PM8150B_WDOG_BITE_TIMEOUT_8S;
 
 	ret = regmap_bulk_read(chip->regmap, PM8150B_CHGR_HARD_JEITA_THR,
 			       threshold, sizeof(threshold));
@@ -2056,14 +2167,16 @@ static int pm8150b_enable_safety(struct pm8150b_charger *chip)
 				 PM8150B_CHGR_ADC_TERM_SAMPLE_COUNT);
 	if (ret)
 		return ret;
-	/* Keep hardware die mitigation active independently of software policy. */
-	ret = regmap_update_bits(chip->regmap, PM8150B_THERMREG_SRC_CFG,
-				 PM8150B_THERMREG_SW_ICL_ADJUST | BIT(0), BIT(0));
+	ret = pm8150b_configure_mitigation(chip);
 	if (ret)
 		return ret;
 
-	ret = regmap_write(chip->regmap, PM8150B_WDOG_TIMEOUT_CFG,
-			   PM8150B_WDOG_TIMEOUT_64S);
+	ret = regmap_update_bits(chip->regmap, PM8150B_WDOG_TIMEOUT_CFG,
+				 PM8150B_WDOG_BITE_DISABLE_CHARGING |
+				 PM8150B_WDOG_SNARL_TIMEOUT_MASK |
+				 PM8150B_WDOG_BARK_TIMEOUT_MASK |
+				 PM8150B_WDOG_BITE_TIMEOUT_MASK,
+				 wdog_timeout);
 	if (ret)
 		return ret;
 	ret = regmap_update_bits(chip->regmap, PM8150B_WDOG_CFG,
@@ -2109,6 +2222,19 @@ static irqreturn_t pm8150b_charge_state_irq(int irq, void *data)
 		mod_delayed_work(system_dfl_wq, &chip->policy_work, 0);
 	mutex_unlock(&chip->usb_lock);
 	power_supply_changed(chip->battery);
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t pm8150b_icl_change_irq(int irq, void *data)
+{
+	struct pm8150b_charger *chip = data;
+
+	mutex_lock(&chip->usb_lock);
+	if (!chip->shutting_down && !chip->suspended)
+		mod_delayed_work(system_dfl_wq, &chip->policy_work,
+				 msecs_to_jiffies(PM8150B_ICL_CHANGE_DELAY_MS));
+	mutex_unlock(&chip->usb_lock);
 
 	return IRQ_HANDLED;
 }
@@ -2179,11 +2305,26 @@ out:
 
 static irqreturn_t pm8150b_wdog_bark_irq(int irq, void *data)
 {
-	return pm8150b_usb_update_irq(irq, data);
+	struct pm8150b_charger *chip = data;
+	int ret;
+
+	/* Renew the hardware lease before returning from the IRQ. */
+	ret = regmap_write(chip->regmap, PM8150B_WDOG_PET,
+			   PM8150B_WDOG_PET_BIT);
+	if (ret)
+		dev_err_ratelimited(chip->dev,
+				    "Failed to pet charger watchdog: %d\n", ret);
+
+	return IRQ_HANDLED;
+}
+
+static void pm8150b_disable_irq_wake(void *data)
+{
+	disable_irq_wake((unsigned long)data);
 }
 
 static int pm8150b_request_irq(struct platform_device *pdev, const char *name,
-			       irq_handler_t handler, int *irq_out)
+			       irq_handler_t handler, bool wake)
 {
 	int irq, ret;
 
@@ -2195,10 +2336,17 @@ static int pm8150b_request_irq(struct platform_device *pdev, const char *name,
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "Failed to request %s IRQ\n", name);
-	if (irq_out)
-		*irq_out = irq;
+	if (!wake)
+		return 0;
 
-	return 0;
+	ret = enable_irq_wake(irq);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Failed to enable %s IRQ wake\n", name);
+
+	return devm_add_action_or_reset(&pdev->dev,
+					pm8150b_disable_irq_wake,
+					(void *)(unsigned long)irq);
 }
 
 static void pm8150b_stop(void *data)
@@ -2227,7 +2375,7 @@ static int pm8150b_probe(struct platform_device *pdev)
 	struct power_supply_config config = {};
 	struct pm8150b_charger *chip;
 	unsigned int raw;
-	int ret, wdog_irq;
+	int ret;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip)
@@ -2248,6 +2396,8 @@ static int pm8150b_probe(struct platform_device *pdev)
 	chip->fg_smb_measure_enabled = -1;
 	chip->temp_zone = PM8150B_TEMP_NORMAL;
 	platform_set_drvdata(pdev, chip);
+	pm8150b_parse_watchdog_config(chip);
+	pm8150b_parse_mitigation(chip);
 
 	chip->typec_fwnode = fwnode_find_reference(dev_fwnode(chip->dev),
 						   "qcom,usb-c-port", 0);
@@ -2323,45 +2473,54 @@ static int pm8150b_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(chip->dev, ret, "Failed to disable parallel charger\n");
 
-	ret = pm8150b_request_irq(pdev, "chg-state-change",
-				  pm8150b_charge_state_irq, NULL);
-	if (ret)
-		return ret;
-	ret = pm8150b_request_irq(pdev, "bat-temp",
-				  pm8150b_usb_update_irq, NULL);
-	if (ret)
-		return ret;
-	ret = pm8150b_request_irq(pdev, "usbin-plugin",
-				  pm8150b_usb_update_irq, NULL);
-	if (ret)
-		return ret;
-	ret = pm8150b_request_irq(pdev, "usbin-src-change",
-				  pm8150b_usb_update_irq, NULL);
-	if (ret)
-		return ret;
-	ret = pm8150b_request_irq(pdev, "usbin-uv",
-				  pm8150b_usbin_uv_irq, NULL);
-	if (ret)
-		return ret;
-	ret = pm8150b_request_irq(pdev, "soc-update", pm8150b_changed_irq, NULL);
-	if (ret)
-		return ret;
-	ret = pm8150b_request_irq(pdev, "batt-temp-delta",
-				  pm8150b_usb_update_irq, NULL);
-	if (ret)
-		return ret;
-	ret = pm8150b_request_irq(pdev, "wdog-bark",
-				  pm8150b_wdog_bark_irq, &wdog_irq);
-	if (ret)
-		return ret;
-
 	ret = devm_device_init_wakeup(chip->dev);
 	if (ret)
 		return ret;
-	ret = devm_pm_set_wake_irq(chip->dev, wdog_irq);
+
+	/*
+	 * The charger state machine toggles several times per second while
+	 * charging; waking on every transition defeats suspend. Policy reruns
+	 * on resume and hardware JEITA plus the watchdog stay armed.
+	 */
+	ret = pm8150b_request_irq(pdev, "chg-state-change",
+				  pm8150b_charge_state_irq, false);
 	if (ret)
-		return dev_err_probe(chip->dev, ret,
-				     "Failed to set watchdog IRQ as wake source\n");
+		return ret;
+	ret = pm8150b_request_irq(pdev, "bat-temp",
+				  pm8150b_usb_update_irq, true);
+	if (ret)
+		return ret;
+	ret = pm8150b_request_irq(pdev, "usbin-plugin",
+				  pm8150b_usb_update_irq, true);
+	if (ret)
+		return ret;
+	ret = pm8150b_request_irq(pdev, "usbin-src-change",
+				  pm8150b_usb_update_irq, true);
+	if (ret)
+		return ret;
+	ret = pm8150b_request_irq(pdev, "usbin-uv",
+				  pm8150b_usbin_uv_irq, true);
+	if (ret)
+		return ret;
+	ret = pm8150b_request_irq(pdev, "soc-update", pm8150b_changed_irq, false);
+	if (ret)
+		return ret;
+	ret = pm8150b_request_irq(pdev, "batt-temp-delta",
+				  pm8150b_usb_update_irq, true);
+	if (ret)
+		return ret;
+	ret = pm8150b_request_irq(pdev, "wdog-bark",
+				  pm8150b_wdog_bark_irq, true);
+	if (ret)
+		return ret;
+	ret = pm8150b_request_irq(pdev, "temp-change",
+				  pm8150b_usb_update_irq, true);
+	if (ret)
+		return ret;
+	ret = pm8150b_request_irq(pdev, "usbin-icl-change",
+				  pm8150b_icl_change_irq, true);
+	if (ret)
+		return ret;
 
 	ret = pm8150b_enable_safety(chip);
 	if (ret)
@@ -2412,6 +2571,34 @@ static void pm8150b_shutdown(struct platform_device *pdev)
 	pm8150b_stop(platform_get_drvdata(pdev));
 }
 
+static int pm8150b_suspend(struct device *dev)
+{
+	struct pm8150b_charger *chip = dev_get_drvdata(dev);
+
+	mutex_lock(&chip->usb_lock);
+	chip->suspended = true;
+	mutex_unlock(&chip->usb_lock);
+	cancel_delayed_work_sync(&chip->policy_work);
+
+	return 0;
+}
+
+static int pm8150b_resume(struct device *dev)
+{
+	struct pm8150b_charger *chip = dev_get_drvdata(dev);
+
+	mutex_lock(&chip->usb_lock);
+	chip->suspended = false;
+	if (!chip->shutting_down)
+		mod_delayed_work(system_dfl_wq, &chip->policy_work, 0);
+	mutex_unlock(&chip->usb_lock);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(pm8150b_pm_ops,
+				pm8150b_suspend, pm8150b_resume);
+
 static const struct of_device_id pm8150b_match_table[] = {
 	{ .compatible = "qcom,pm8150b-charger" },
 	{}
@@ -2424,6 +2611,7 @@ static struct platform_driver pm8150b_driver = {
 	.driver = {
 		.name = "qcom-pm8150b-charger",
 		.of_match_table = pm8150b_match_table,
+		.pm = pm_sleep_ptr(&pm8150b_pm_ops),
 	},
 };
 module_platform_driver(pm8150b_driver);

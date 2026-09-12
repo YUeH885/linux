@@ -1190,8 +1190,7 @@ config CHARGER_QCOM_PM8150B
 
 config CHARGER_QCOM_SMB1355
 	tristate "Qualcomm SMB1355 parallel charger"
-	depends on I2C
-	select REGMAP_I2C
+	depends on MFD_QCOM_I2C_PMIC
 	help
 	  Expose the SMB1355 secondary charger for control by the main
 	  charger, with hardware thermal mitigation and watchdog cutoff.
