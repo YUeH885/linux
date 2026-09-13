@@ -362,7 +362,12 @@ static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&wdt->wdd))
+	/*
+	 * The watchdog counts from the always-on sleep clock while the
+	 * platform sleeps and cannot be fed, so stop it even when only the
+	 * hardware is running without a userspace owner.
+	 */
+	if (watchdog_hw_running(&wdt->wdd))
 		qcom_wdt_stop(&wdt->wdd);
 
 	return 0;
@@ -372,7 +377,7 @@ static int __maybe_unused qcom_wdt_resume(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&wdt->wdd))
+	if (watchdog_hw_running(&wdt->wdd))
 		qcom_wdt_start(&wdt->wdd);
 
 	return 0;
