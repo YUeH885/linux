@@ -2070,6 +2070,18 @@ static int qcom_geni_serial_suspend(struct device *dev)
 	int ret;
 
 	/*
+	 * RX traffic can latch an edge while the wake IRQ is disabled. Clear
+	 * it before stopping RX so that subsequent wake edges are preserved.
+	 * An already suspended port may have a real wake event pending.
+	 */
+	if (port->wakeup_irq > 0 && !pm_runtime_status_suspended(dev)) {
+		ret = irq_set_irqchip_state(port->wakeup_irq,
+					   IRQCHIP_STATE_PENDING, false);
+		if (ret)
+			return ret;
+	}
+
+	/*
 	 * This is done so we can hit the lowest possible state in suspend
 	 * even with no_console_suspend
 	 */
