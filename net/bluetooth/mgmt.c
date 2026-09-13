@@ -6110,8 +6110,8 @@ static int start_discovery_internal(struct sock *sk, struct hci_dev *hdev,
 		goto failed;
 	}
 
-	/* Can't start discovery when it is paused */
-	if (hdev->discovery_paused) {
+	/* Suspend can start before discovery has been marked as paused. */
+	if (hdev->suspended || hdev->discovery_paused) {
 		err = mgmt_cmd_complete(sk, hdev->id, op, MGMT_STATUS_BUSY,
 					&cp->type, sizeof(cp->type));
 		goto failed;
@@ -6196,7 +6196,7 @@ static int start_service_discovery(struct sock *sk, struct hci_dev *hdev,
 		goto failed;
 	}
 
-	if (hdev->discovery_paused) {
+	if (hdev->suspended || hdev->discovery_paused) {
 		err = mgmt_cmd_complete(sk, hdev->id,
 					MGMT_OP_START_SERVICE_DISCOVERY,
 					MGMT_STATUS_BUSY, &cp->type,
