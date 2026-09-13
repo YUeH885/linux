@@ -327,8 +327,32 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
 	return 0;
 }
 
+static int say_hello(struct sockaddr_qrtr *dest)
+{
+	struct qrtr_ctrl_pkt pkt = { .cmd = cpu_to_le32(QRTR_TYPE_HELLO) };
+	struct msghdr msg = {
+		.msg_name = dest,
+		.msg_namelen = sizeof(*dest),
+	};
+	struct kvec iv = { .iov_base = &pkt, .iov_len = sizeof(pkt) };
+	int ret;
+
+	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
+	if (ret < 0)
+		pr_err("failed to send hello msg\n");
+
+	return ret;
+}
+
 static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
 {
+	int ret;
+
+	/* Complete the peer handshake before announcing local services. */
+	ret = say_hello(sq);
+	if (ret < 0)
+		return ret;
+
 	return announce_servers(sq);
 }
 
@@ -744,6 +768,10 @@ int qrtr_ns_init(void)
 	qrtr_ns.bcast_sq.sq_family = AF_QIPCRTR;
 	qrtr_ns.bcast_sq.sq_node = QRTR_NODE_BCAST;
 	qrtr_ns.bcast_sq.sq_port = QRTR_PORT_CTRL;
+
+	ret = say_hello(&qrtr_ns.bcast_sq);
+	if (ret < 0)
+		goto err_wq;
 
 	/* As the qrtr ns socket owner and creator is the same module, we have
 	 * to decrease the qrtr module reference count to guarantee that it
