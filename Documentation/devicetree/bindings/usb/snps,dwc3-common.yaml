@@ -28,6 +28,11 @@ allOf:
       $ref: usb-xhci.yaml#
 
 properties:
+  usb-psy-name:
+    $ref: /schemas/types.yaml#/definitions/string
+    description:
+      Name of the USB input power supply receiving gadget current-limit requests.
+
   extcon:
     maxItems: 1
     deprecated: true
@@ -429,4 +434,3 @@ required:
 
 additionalProperties: true
 ...
-
