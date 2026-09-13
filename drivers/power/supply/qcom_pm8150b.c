@@ -1956,7 +1956,11 @@ static int pm8150b_usb_set_property(struct power_supply *psy,
 	chip->gadget_current_limit_ua = min(val->intval,
 						PM8150B_USB_ICL_FAST_5V_UA);
 	chip->gadget_current_limit_valid = true;
-	mod_delayed_work(system_dfl_wq, &chip->policy_work, 0);
+	/* Gadget teardown also updates the limit during system sleep. Apply
+	 * the latest request after every device has finished resuming.
+	 */
+	if (!chip->suspended)
+		mod_delayed_work(system_dfl_wq, &chip->policy_work, 0);
 	mutex_unlock(&chip->usb_lock);
 
 	return 0;
@@ -2583,7 +2587,7 @@ static void pm8150b_shutdown(struct platform_device *pdev)
 	pm8150b_stop(platform_get_drvdata(pdev));
 }
 
-static int pm8150b_suspend(struct device *dev)
+static int pm8150b_prepare(struct device *dev)
 {
 	struct pm8150b_charger *chip = dev_get_drvdata(dev);
 
@@ -2595,7 +2599,7 @@ static int pm8150b_suspend(struct device *dev)
 	return 0;
 }
 
-static int pm8150b_resume(struct device *dev)
+static void pm8150b_complete(struct device *dev)
 {
 	struct pm8150b_charger *chip = dev_get_drvdata(dev);
 
@@ -2604,14 +2608,14 @@ static int pm8150b_resume(struct device *dev)
 	if (!chip->shutting_down)
 		mod_delayed_work(system_dfl_wq, &chip->policy_work, 0);
 	mutex_unlock(&chip->usb_lock);
-	/* Finish maintenance before userspace can request another suspend. */
+	/* All consumers have resumed; include their cached limit requests. */
 	flush_delayed_work(&chip->policy_work);
-
-	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(pm8150b_pm_ops,
-				pm8150b_suspend, pm8150b_resume);
+static const struct dev_pm_ops pm8150b_pm_ops = {
+	.prepare = pm8150b_prepare,
+	.complete = pm8150b_complete,
+};
 
 static const struct of_device_id pm8150b_match_table[] = {
 	{ .compatible = "qcom,pm8150b-charger" },
@@ -2632,3 +2636,7 @@ module_platform_driver(pm8150b_driver);
 
 MODULE_DESCRIPTION("Qualcomm PM8150B charger and fuel gauge driver");
 MODULE_LICENSE("GPL");
+
+#if IS_ENABLED(CONFIG_CHARGER_QCOM_PM8150B_PM_KUNIT_TEST)
+#include "qcom_pm8150b_pm_test.c"
+#endif

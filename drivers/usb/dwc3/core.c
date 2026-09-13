@@ -2819,6 +2819,9 @@ int dwc3_pm_suspend(struct dwc3 *dwc)
 	int		ret;
 
 	ret = dwc3_suspend_common(dwc, PMSG_SUSPEND);
+	/* Deliver teardown's current limit while suppliers are still prepared. */
+	if (dwc->usb_psy)
+		flush_work(&dwc->vbus_draw_work);
 	if (ret)
 		return ret;
 
@@ -2846,6 +2849,9 @@ int dwc3_pm_resume(struct dwc3 *dwc)
 
 out:
 	pm_runtime_enable(dev);
+	/* Supplier complete callbacks must see the last resume-time request. */
+	if (dwc->usb_psy)
+		flush_work(&dwc->vbus_draw_work);
 
 	return ret;
 }
