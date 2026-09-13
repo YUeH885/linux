@@ -10,13 +10,16 @@
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
 #include <linux/debugfs.h>
 #include <linux/kthread.h>
+#include <linux/pm_qos.h>
 #include <linux/seq_file.h>
 
 #include <drm/drm_atomic.h>
+#include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_file.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_managed.h>
 
 #include "msm_drv.h"
 #include "dpu_kms.h"
@@ -164,6 +167,7 @@ enum dpu_enc_rc_states {
  * @rc_lock:			resource control mutex lock to protect
  *				virt encoder over various state changes
  * @rc_state:			resource controller state
+ * @cpu_latency_qos:		CPU wakeup latency request while resources are active
  * @delayed_off_work:		delayed worker to schedule disabling of
  *				clks and resources after IDLE_TIMEOUT time.
  * @topology:                   topology of the display
@@ -177,6 +181,8 @@ struct dpu_encoder_virt {
 
 	bool enabled;
 	bool commit_done_timedout;
+	bool first_frame_pending;
+	bool frame_started;
 
 	unsigned int num_phys_encs;
 	struct dpu_encoder_phys *phys_encs[MAX_PHYS_ENCODERS_PER_VIRTUAL];
@@ -206,6 +212,7 @@ struct dpu_encoder_virt {
 	bool idle_pc_supported;
 	struct mutex rc_lock;
 	enum dpu_enc_rc_states rc_state;
+	struct pm_qos_request cpu_latency_qos;
 	struct delayed_work delayed_off_work;
 	struct msm_display_topology topology;
 
@@ -865,6 +872,12 @@ static void _dpu_encoder_resource_enable(struct drm_encoder *drm_enc)
 	/* enable DPU core clks */
 	pm_runtime_get_sync(&dpu_kms->pdev->dev);
 
+	/* A late CPU wakeup can miss the next command-mode TE after frame done. */
+	if (dpu_enc->disp_info.is_cmd_mode &&
+	    dpu_kms->catalog->perf->cpu_dma_latency_us)
+		cpu_latency_qos_update_request(&dpu_enc->cpu_latency_qos,
+				dpu_kms->catalog->perf->cpu_dma_latency_us);
+
 	/* enable all the irq */
 	_dpu_encoder_irq_enable(drm_enc);
 }
@@ -889,8 +902,24 @@ static void _dpu_encoder_resource_disable(struct drm_encoder *drm_enc)
 	/* disable all the irq */
 	_dpu_encoder_irq_disable(drm_enc);
 
+	if (dpu_enc->disp_info.is_cmd_mode &&
+	    dpu_kms->catalog->perf->cpu_dma_latency_us)
+		cpu_latency_qos_update_request(&dpu_enc->cpu_latency_qos,
+					      PM_QOS_DEFAULT_VALUE);
+
 	/* disable DPU core clks */
 	pm_runtime_put_sync(&dpu_kms->pdev->dev);
+}
+
+static int dpu_encoder_dsi_set_idle(struct dpu_encoder_virt *dpu_enc, bool idle)
+{
+	struct msm_drm_private *priv = dpu_enc->base.dev->dev_private;
+	const struct msm_display_info *info = &dpu_enc->disp_info;
+
+	if (info->intf_type != INTF_DSI || !info->is_cmd_mode)
+		return 0;
+
+	return msm_dsi_set_idle(priv->kms->dsi[info->h_tile_instance[0]], idle);
 }
 
 static int dpu_encoder_resource_control(struct drm_encoder *drm_enc,
@@ -899,6 +928,7 @@ static int dpu_encoder_resource_control(struct drm_encoder *drm_enc,
 	struct dpu_encoder_virt *dpu_enc;
 	struct msm_drm_private *priv;
 	bool is_vid_mode = false;
+	int ret;
 
 	if (!drm_enc || !drm_enc->dev || !drm_enc->crtc) {
 		DPU_ERROR("invalid parameters\n");
@@ -929,6 +959,12 @@ static int dpu_encoder_resource_control(struct drm_encoder *drm_enc,
 					sw_event);
 
 		mutex_lock(&dpu_enc->rc_lock);
+
+		ret = dpu_encoder_dsi_set_idle(dpu_enc, false);
+		if (ret) {
+			mutex_unlock(&dpu_enc->rc_lock);
+			return ret;
+		}
 
 		/* return if the resource control is already in ON state */
 		if (dpu_enc->rc_state == DPU_ENC_RC_STATE_ON) {
@@ -1073,6 +1109,13 @@ static int dpu_encoder_resource_control(struct drm_encoder *drm_enc,
 				  DRMID(drm_enc), sw_event, dpu_enc->rc_state);
 			mutex_unlock(&dpu_enc->rc_lock);
 			return 0;
+		}
+
+		ret = dpu_encoder_dsi_set_idle(dpu_enc, true);
+		if (ret) {
+			DPU_ERROR_ENC(dpu_enc, "DSI idle entry failed: %d\n", ret);
+			mutex_unlock(&dpu_enc->rc_lock);
+			return ret;
 		}
 
 		if (is_vid_mode)
@@ -1348,6 +1391,14 @@ static void dpu_encoder_virt_atomic_enable(struct drm_encoder *drm_enc,
 	mutex_lock(&dpu_enc->enc_lock);
 
 	dpu_enc->commit_done_timedout = false;
+	dpu_enc->frame_started = false;
+	dpu_enc->first_frame_pending = false;
+	if (dpu_enc->disp_info.intf_type == INTF_DSI &&
+	    dpu_enc->disp_info.is_cmd_mode) {
+		drm_for_each_bridge_in_chain(drm_enc, bridge)
+			dpu_enc->first_frame_pending |=
+				drm_panel_bridge_needs_first_frame(bridge);
+	}
 
 	dpu_enc->connector = drm_atomic_get_new_connector_for_encoder(state, drm_enc);
 
@@ -2066,12 +2117,13 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
  *	Delayed: Block until next trigger can be issued.
  * @drm_enc:	encoder pointer
  */
-void dpu_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc)
+int dpu_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc)
 {
 	struct dpu_encoder_virt *dpu_enc;
 	struct dpu_encoder_phys *phys;
 	bool needs_hw_reset = false;
 	unsigned int i;
+	int ret;
 
 	dpu_enc = to_dpu_encoder_virt(drm_enc);
 
@@ -2088,7 +2140,11 @@ void dpu_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc)
 	}
 	DPU_ATRACE_END("enc_prepare_for_kickoff");
 
-	dpu_encoder_resource_control(drm_enc, DPU_ENC_RC_EVENT_KICKOFF);
+	ret = dpu_encoder_resource_control(drm_enc, DPU_ENC_RC_EVENT_KICKOFF);
+	if (ret) {
+		DPU_ERROR_ENC(dpu_enc, "Failed to restore display resources: %d\n", ret);
+		return ret;
+	}
 
 	/* if any phys needs reset, reset all phys, in-order */
 	if (needs_hw_reset) {
@@ -2100,6 +2156,8 @@ void dpu_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc)
 
 	if (dpu_enc->dsc)
 		dpu_encoder_prep_dsc(dpu_enc, dpu_enc->dsc);
+
+	return 0;
 }
 
 /**
@@ -2164,6 +2222,7 @@ void dpu_encoder_kickoff(struct drm_encoder *drm_enc)
 
 	/* All phys encs are ready to go, trigger the kickoff */
 	_dpu_encoder_kickoff_phys(dpu_enc);
+	dpu_enc->frame_started = true;
 
 	/* allow phys encs to handle any post-kickoff business */
 	for (i = 0; i < dpu_enc->num_phys_encs; i++) {
@@ -2747,6 +2806,13 @@ static const struct drm_encoder_funcs dpu_encoder_funcs = {
 	.debugfs_init = dpu_encoder_debugfs_init,
 };
 
+static void dpu_encoder_cpu_latency_qos_remove(struct drm_device *dev, void *data)
+{
+	struct dpu_encoder_virt *dpu_enc = data;
+
+	cpu_latency_qos_remove_request(&dpu_enc->cpu_latency_qos);
+}
+
 /**
  * dpu_encoder_init - initialize virtual encoder object
  * @dev:        Pointer to drm device structure
@@ -2792,6 +2858,15 @@ struct drm_encoder *dpu_encoder_init(struct drm_device *dev,
 
 	memcpy(&dpu_enc->disp_info, disp_info, sizeof(*disp_info));
 
+	if (disp_info->is_cmd_mode && dpu_kms->catalog->perf->cpu_dma_latency_us) {
+		cpu_latency_qos_add_request(&dpu_enc->cpu_latency_qos,
+					   PM_QOS_DEFAULT_VALUE);
+		ret = drmm_add_action_or_reset(dev, dpu_encoder_cpu_latency_qos_remove,
+					       dpu_enc);
+		if (ret)
+			return ERR_PTR(ret);
+	}
+
 	DPU_DEBUG_ENC(dpu_enc, "created\n");
 
 	return &dpu_enc->base;
@@ -2822,6 +2897,12 @@ int dpu_encoder_wait_for_commit_done(struct drm_encoder *drm_enc)
 	for (i = 0; i < dpu_enc->num_phys_encs; i++) {
 		struct dpu_encoder_phys *phys = dpu_enc->phys_encs[i];
 
+		/* The pre-enable flush has nothing to wait for after a full disable. */
+		if (phys->enable_state == DPU_ENC_DISABLED &&
+		    !atomic_read(&phys->pending_kickoff_cnt) &&
+		    !atomic_read(&phys->pending_ctlstart_cnt))
+			continue;
+
 		if (phys->ops.wait_for_commit_done) {
 			DPU_ATRACE_BEGIN("wait_for_commit_done");
 			ret = phys->ops.wait_for_commit_done(phys);
@@ -2833,6 +2914,16 @@ int dpu_encoder_wait_for_commit_done(struct drm_encoder *drm_enc)
 			if (ret)
 				return ret;
 		}
+	}
+
+	if (dpu_enc->enabled && dpu_enc->frame_started && dpu_enc->first_frame_pending) {
+		/* CTL_START only acknowledges the kickoff, not the complete image. */
+		ret = dpu_encoder_wait_for_tx_complete(drm_enc);
+		if (ret)
+			return ret;
+		dpu_enc->first_frame_pending = false;
+		drm_for_each_bridge_in_chain(drm_enc, bridge)
+			drm_panel_bridge_notify_first_frame(bridge);
 	}
 
 	return ret;

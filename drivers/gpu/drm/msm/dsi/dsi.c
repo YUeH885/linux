@@ -12,6 +12,27 @@ bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi)
 	return !(host_flags & MIPI_DSI_MODE_VIDEO);
 }
 
+int msm_dsi_set_idle(struct msm_dsi *msm_dsi, bool idle)
+{
+	if (!msm_dsi->ulps_idle_enabled || msm_dsi_is_bonded_dsi(msm_dsi) ||
+	    !msm_dsi_is_cmd_mode(msm_dsi))
+		return 0;
+
+	return msm_dsi_host_set_idle(msm_dsi->host, idle);
+}
+
+void msm_dsi_system_suspend(struct msm_dsi *msm_dsi)
+{
+	if (!msm_dsi || !msm_dsi->ulps_enabled)
+		return;
+
+	/* System sleep can discard PHY registers even when ULPS retains power. */
+	msm_dsi_phy_disable(msm_dsi->phy);
+	msm_dsi->phy_enabled = false;
+	msm_dsi->ulps_enabled = false;
+	msm_dsi->phy_clk_req = (struct msm_dsi_phy_clk_request) { 0 };
+}
+
 struct drm_dsc_config *msm_dsi_get_dsc_config(struct msm_dsi *msm_dsi)
 {
 	return msm_dsi_host_get_dsc_config(msm_dsi->host);
@@ -267,4 +288,3 @@ void msm_dsi_snapshot(struct msm_disp_state *disp_state, struct msm_dsi *msm_dsi
 	msm_dsi_host_snapshot(disp_state, msm_dsi->host);
 	msm_dsi_phy_snapshot(disp_state, msm_dsi->phy);
 }
-

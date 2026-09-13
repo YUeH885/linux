@@ -44,7 +44,7 @@ void dpu_encoder_assign_crtc(struct drm_encoder *encoder,
 void dpu_encoder_toggle_vblank_for_crtc(struct drm_encoder *encoder,
 					struct drm_crtc *crtc, bool enable);
 
-void dpu_encoder_prepare_for_kickoff(struct drm_encoder *encoder);
+int dpu_encoder_prepare_for_kickoff(struct drm_encoder *encoder);
 
 void dpu_encoder_trigger_kickoff_pending(struct drm_encoder *encoder);
 

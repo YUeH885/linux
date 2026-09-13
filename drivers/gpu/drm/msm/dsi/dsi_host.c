@@ -35,6 +35,8 @@
 #define DSI_RESET_TOGGLE_DELAY_MS 20
 
 static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc);
+static int dsi_host_leave_idle(struct msm_dsi_host *msm_host);
+static int dsi_host_enter_idle(struct msm_dsi_host *msm_host);
 
 static int dsi_get_version(const void __iomem *base, u32 *major, u32 *minor)
 {
@@ -173,6 +175,7 @@ struct msm_dsi_host {
 	unsigned int lanes;
 	enum mipi_dsi_pixel_format format;
 	unsigned long mode_flags;
+	unsigned long hs_rate;
 
 	/* lane data parsed via DT */
 	int dlane_swap;
@@ -186,6 +189,10 @@ struct msm_dsi_host {
 	bool registered;
 	bool power_on;
 	bool enabled;
+	/* Protected by dev_mutex, including the complete DCS transfer. */
+	bool idle_requested;
+	bool link_idle;
+	struct msm_dsi_phy *phy;
 	int irq;
 };
 
@@ -612,15 +619,16 @@ dsi_adjust_pclk_for_compression(const struct drm_display_mode *mode,
 	return mult_frac(mode->clock * 1000u, new_htotal, mode->htotal);
 }
 
-static unsigned long dsi_get_pclk_rate(const struct drm_display_mode *mode,
-		const struct drm_dsc_config *dsc, bool is_bonded_dsi)
+static unsigned long dsi_get_required_pclk_rate(struct msm_dsi_host *msm_host,
+		const struct drm_display_mode *mode, bool is_bonded_dsi)
 {
 	unsigned long pclk_rate;
 
 	pclk_rate = mode->clock * 1000u;
 
-	if (dsc)
-		pclk_rate = dsi_adjust_pclk_for_compression(mode, dsc, is_bonded_dsi);
+	if (msm_host->dsc)
+		pclk_rate = dsi_adjust_pclk_for_compression(mode, msm_host->dsc,
+							  is_bonded_dsi);
 
 	/*
 	 * For bonded DSI mode, the current DRM mode has the complete width of the
@@ -634,14 +642,23 @@ static unsigned long dsi_get_pclk_rate(const struct drm_display_mode *mode,
 	return pclk_rate;
 }
 
-unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_dsi,
-				    const struct drm_display_mode *mode)
+static unsigned long dsi_get_pclk_rate(struct msm_dsi_host *msm_host,
+		const struct drm_display_mode *mode, bool is_bonded_dsi)
 {
-	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
+
+	/* hs_rate is per lane, including when two hosts drive a bonded panel. */
+	if (msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE)
+		return mult_frac(msm_host->hs_rate, msm_host->lanes, bpp);
+
+	return dsi_get_required_pclk_rate(msm_host, mode, is_bonded_dsi);
+}
+
+static unsigned long dsi_byte_clk_from_pclk(struct msm_dsi_host *msm_host,
+					     unsigned long pclk_rate)
+{
 	u8 lanes = msm_host->lanes;
 	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
-	unsigned long pclk_rate = dsi_get_pclk_rate(mode, msm_host->dsc, is_bonded_dsi);
-	unsigned long pclk_bpp;
 
 	if (lanes == 0) {
 		pr_err("%s: forcing mdss_dsi lanes to 1\n", __func__);
@@ -650,21 +667,51 @@ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_d
 
 	/* CPHY "byte_clk" is in units of 16 bits */
 	if (msm_host->cphy_mode)
-		pclk_bpp = mult_frac(pclk_rate, bpp, 16 * lanes);
-	else
-		pclk_bpp = mult_frac(pclk_rate, bpp, 8 * lanes);
+		return mult_frac(pclk_rate, bpp, 16 * lanes);
 
-	return pclk_bpp;
+	return mult_frac(pclk_rate, bpp, 8 * lanes);
+}
+
+unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_dsi,
+				    const struct drm_display_mode *mode)
+{
+	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	unsigned long pclk_rate;
+
+	if (msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE)
+		return msm_host->hs_rate / 8;
+
+	pclk_rate = dsi_get_required_pclk_rate(msm_host, mode, is_bonded_dsi);
+
+	return dsi_byte_clk_from_pclk(msm_host, pclk_rate);
 }
 
 static void dsi_calc_pclk(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 {
-	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host->mode, msm_host->dsc, is_bonded_dsi);
+	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host, msm_host->mode,
+						     is_bonded_dsi);
 	msm_host->byte_clk_rate = dsi_byte_clk_get_rate(&msm_host->base, is_bonded_dsi,
 							msm_host->mode);
 
 	DBG("pclk=%lu, bclk=%lu", msm_host->pixel_clk_rate,
 				msm_host->byte_clk_rate);
+}
+
+static long dsi_round_byte_clk_rate(struct msm_dsi_host *msm_host,
+				    unsigned long rate)
+{
+	struct clk *clk = msm_host->byte_clk;
+
+	/*
+	 * Hosts with explicit PLL handles reparent the byte RCG after PHY enable.
+	 * Other hosts, including SM8150, use DT-assigned parents, so rounding the
+	 * byte clock already follows the target PLL parent chain.
+	 */
+	if ((msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    msm_host->dsi_pll_byte_clk)
+		clk = msm_host->dsi_pll_byte_clk;
+
+	return clk_round_rate(clk, rate);
 }
 
 int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
@@ -678,12 +725,18 @@ int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 
 	dsi_calc_pclk(msm_host, is_bonded_dsi);
 
-	rounded_byte_clk_rate = clk_round_rate(msm_host->byte_clk,
-					       msm_host->byte_clk_rate);
+	rounded_byte_clk_rate = dsi_round_byte_clk_rate(msm_host,
+						msm_host->byte_clk_rate);
 	if (rounded_byte_clk_rate < 0) {
 		pr_err("%s: failed to round byte clock rate, %ld\n",
 		       __func__, rounded_byte_clk_rate);
 		return rounded_byte_clk_rate;
+	}
+	if ((msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    rounded_byte_clk_rate != msm_host->byte_clk_rate) {
+		pr_err("%s: target HS rate %lu is not supported\n",
+		       __func__, msm_host->hs_rate);
+		return -EINVAL;
 	}
 
 	msm_host->byte_clk_rate = rounded_byte_clk_rate;
@@ -1567,16 +1620,40 @@ static void dsi_err_worker(struct work_struct *work)
 	struct msm_dsi_host *msm_host =
 		container_of(work, struct msm_dsi_host, err_work);
 	u32 status = msm_host->err_work_state;
+	int ret;
 
 	pr_err_ratelimited("%s: status=%x\n", __func__, status);
-	if (status & DSI_ERR_STATE_MDP_FIFO_UNDERFLOW)
+	mutex_lock(&msm_host->dev_mutex);
+	if (!msm_host->power_on)
+		goto unlock;
+
+	if (status & DSI_ERR_STATE_MDP_FIFO_UNDERFLOW) {
+		ret = dsi_host_leave_idle(msm_host);
+		if (ret) {
+			dev_err(&msm_host->pdev->dev,
+				"Failed to resume link for error recovery: %d\n", ret);
+			goto enable_irq;
+		}
 		dsi_sw_reset(msm_host);
+		if (msm_host->idle_requested) {
+			ret = dsi_host_enter_idle(msm_host);
+			if (ret)
+				dev_err(&msm_host->pdev->dev,
+					"Failed to idle link after error recovery: %d\n", ret);
+		}
+	}
 
-	/* It is safe to clear here because error irq is disabled. */
+enable_irq:
+	/* Clear before unmasking so the next interrupt cannot lose its status. */
 	msm_host->err_work_state = 0;
-
 	/* enable dsi error interrupt */
 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 1);
+	mutex_unlock(&msm_host->dev_mutex);
+	return;
+unlock:
+	/* It is safe to clear here because error irq is disabled. */
+	msm_host->err_work_state = 0;
+	mutex_unlock(&msm_host->dev_mutex);
 }
 
 static void dsi_ack_err_status(struct msm_dsi_host *msm_host)
@@ -1709,15 +1786,31 @@ static int dsi_host_attach(struct mipi_dsi_host *host,
 					struct mipi_dsi_device *dsi)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	int bpp = mipi_dsi_pixel_format_to_bpp(dsi->format);
 	int ret;
 
 	if (dsi->lanes > msm_host->num_data_lanes)
+		return -EINVAL;
+	if ((dsi->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    (!dsi->lanes || !dsi->hs_rate))
+		return -EINVAL;
+	if ((dsi->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    (msm_host->cfg_hnd->major != MSM_DSI_VER_MAJOR_6G ||
+	     msm_host->cphy_mode || (dsi->mode_flags & MIPI_DSI_MODE_VIDEO))) {
+		dev_err(&dsi->dev,
+			"fixed HS rate requires a 6G D-PHY command-mode host\n");
+		return -EOPNOTSUPP;
+	}
+	if ((dsi->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) &&
+	    (bpp < 0 || dsi->hs_rate % 8 ||
+	     (u64)dsi->hs_rate * dsi->lanes % bpp))
 		return -EINVAL;
 
 	msm_host->channel = dsi->channel;
 	msm_host->lanes = dsi->lanes;
 	msm_host->format = dsi->format;
 	msm_host->mode_flags = dsi->mode_flags;
+	msm_host->hs_rate = dsi->hs_rate;
 	if (dsi->dsc) {
 		msm_host->dsc = dsi->dsc;
 		if (dsi->mode_flags & MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT)
@@ -1904,8 +1997,8 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
 	drm_dsc_set_const_params(dsc);
 	drm_dsc_set_rc_buf_thresh(dsc);
 
-	/* DPU supports only pre-SCR panels */
-	ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_1_PRE_SCR);
+	ret = drm_dsc_setup_rc_params(dsc, dsc->scr_rev == 1 ?
+				      DRM_DSC_1_1_SCR : DRM_DSC_1_1_PRE_SCR);
 	if (ret) {
 		DRM_DEV_ERROR(&msm_host->pdev->dev, "could not find DSC RC parameters\n");
 		return ret;
@@ -2158,11 +2251,98 @@ void msm_dsi_host_unregister(struct mipi_dsi_host *host)
 	}
 }
 
+static int dsi_host_leave_idle(struct msm_dsi_host *msm_host)
+{
+	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+	int ret;
+
+	lockdep_assert_held(&msm_host->dev_mutex);
+	if (!msm_host->link_idle)
+		return 0;
+
+	ret = cfg_hnd->ops->link_clk_set_rate(msm_host);
+	if (ret)
+		goto drop_opp;
+	ret = cfg_hnd->ops->link_clk_enable(msm_host);
+	if (ret)
+		goto drop_opp;
+
+	ret = msm_dsi_phy_set_ulps(msm_host->phy, false);
+	if (ret) {
+		cfg_hnd->ops->link_clk_disable(msm_host);
+		goto drop_opp;
+	}
+
+	msm_host->link_idle = false;
+	dev_dbg(&msm_host->pdev->dev, "DSI link resumed from idle ULPS\n");
+	return 0;
+
+drop_opp:
+	dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
+	return ret;
+}
+
+static int dsi_host_enter_idle(struct msm_dsi_host *msm_host)
+{
+	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+	u32 status;
+	int ret;
+
+	lockdep_assert_held(&msm_host->dev_mutex);
+	if (msm_host->link_idle)
+		return 0;
+
+	/* DPU has completed its frame; a timed-out DCS transfer may still be busy. */
+	status = dsi_read(msm_host, REG_DSI_STATUS0);
+	if (status & (DSI_STATUS0_CMD_MODE_DMA_BUSY | DSI_STATUS0_CMD_MODE_MDP_BUSY))
+		return -EBUSY;
+
+	ret = msm_dsi_phy_set_ulps(msm_host->phy, true);
+	if (ret)
+		return ret;
+
+	cfg_hnd->ops->link_clk_disable(msm_host);
+	msm_host->link_idle = true;
+	ret = dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
+	dev_dbg(&msm_host->pdev->dev, "DSI link entered idle ULPS, OPP release: %d\n", ret);
+	return ret;
+}
+
+int msm_dsi_host_set_idle(struct mipi_dsi_host *host, bool idle)
+{
+	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	int ret = 0;
+
+	mutex_lock(&msm_host->dev_mutex);
+	if (!msm_host->power_on || !msm_host->enabled)
+		goto unlock;
+	if (msm_host->cfg_hnd->major != MSM_DSI_VER_MAJOR_6G)
+		goto unlock;
+
+	msm_host->idle_requested = idle;
+	ret = idle ? dsi_host_enter_idle(msm_host) : dsi_host_leave_idle(msm_host);
+unlock:
+	mutex_unlock(&msm_host->dev_mutex);
+	return ret;
+}
+
 int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
 				const struct mipi_dsi_msg *msg)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+	int ret;
+
+	/* Bonded transfers acquire host 0 before host 1. */
+	mutex_lock_nested(&msm_host->dev_mutex, msm_host->id);
+	if (!msm_host->power_on) {
+		ret = -EIO;
+		goto unlock;
+	}
+
+	ret = dsi_host_leave_idle(msm_host);
+	if (ret)
+		goto unlock;
 
 	/* TODO: make sure dsi_cmd_mdp is idle.
 	 * Since DSI6G v1.2.0, we can set DSI_TRIG_CTRL.BLOCK_DMA_WITHIN_FRAME
@@ -2174,9 +2354,14 @@ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
 	 * mdss interrupt is generated in mdp core clock domain
 	 * mdp clock need to be enabled to receive dsi interrupt
 	 */
-	pm_runtime_get_sync(&msm_host->pdev->dev);
-	cfg_hnd->ops->link_clk_set_rate(msm_host);
-	cfg_hnd->ops->link_clk_enable(msm_host);
+	ret = pm_runtime_resume_and_get(&msm_host->pdev->dev);
+	if (ret < 0)
+		goto restore_idle;
+	ret = cfg_hnd->ops->link_clk_enable(msm_host);
+	if (ret) {
+		pm_runtime_put(&msm_host->pdev->dev);
+		goto restore_idle;
+	}
 
 	/* TODO: vote for bus bandwidth */
 
@@ -2191,6 +2376,19 @@ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_CMD_DMA_DONE, 1);
 
 	return 0;
+
+restore_idle:
+	if (msm_host->idle_requested) {
+		int idle_ret = dsi_host_enter_idle(msm_host);
+
+		if (idle_ret)
+			dev_err(&msm_host->pdev->dev,
+				"Failed to restore idle after transfer setup failure: %d\n",
+				idle_ret);
+	}
+unlock:
+	mutex_unlock(&msm_host->dev_mutex);
+	return ret;
 }
 
 void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
@@ -2198,6 +2396,7 @@ void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+	int ret;
 
 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_CMD_DMA_DONE, 0);
 	dsi_write(msm_host, REG_DSI_CTRL, msm_host->dma_cmd_ctrl_restore);
@@ -2209,6 +2408,13 @@ void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
 
 	cfg_hnd->ops->link_clk_disable(msm_host);
 	pm_runtime_put(&msm_host->pdev->dev);
+	if (msm_host->idle_requested) {
+		ret = dsi_host_enter_idle(msm_host);
+		if (ret)
+			dev_err_ratelimited(&msm_host->pdev->dev,
+					    "Failed to restore idle ULPS: %d\n", ret);
+	}
+	mutex_unlock(&msm_host->dev_mutex);
 }
 
 int msm_dsi_host_cmd_tx(struct mipi_dsi_host *host,
@@ -2391,9 +2597,9 @@ void msm_dsi_host_reset_phy(struct mipi_dsi_host *host)
 	udelay(100);
 }
 
-void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
-			struct msm_dsi_phy_clk_request *clk_req,
-			bool is_bonded_dsi)
+int msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
+				 struct msm_dsi_phy_clk_request *clk_req,
+				 bool is_bonded_dsi)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
@@ -2402,7 +2608,7 @@ void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
 	ret = cfg_hnd->ops->calc_clk_rate(msm_host, is_bonded_dsi);
 	if (ret) {
 		pr_err("%s: unable to calc clk rate, %d\n", __func__, ret);
-		return;
+		return ret;
 	}
 
 	/* CPHY transmits 16 bits over 7 clock cycles
@@ -2414,6 +2620,8 @@ void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
 	else
 		clk_req->bitclk_rate = msm_host->byte_clk_rate * 8;
 	clk_req->escclk_rate = msm_host->esc_clk_rate;
+
+	return 0;
 }
 
 void msm_dsi_host_enable_irq(struct mipi_dsi_host *host)
@@ -2434,27 +2642,27 @@ int msm_dsi_host_enable(struct mipi_dsi_host *host)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 
+	mutex_lock(&msm_host->dev_mutex);
 	dsi_op_mode_config(msm_host,
 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), true);
 
-	/* TODO: clock should be turned off for command mode,
-	 * and only turned on before MDP START.
-	 * This part of code should be enabled once mdp driver support it.
-	 */
-	/* if (msm_panel->mode == MSM_DSI_CMD_MODE) {
-	 *	dsi_link_clk_disable(msm_host);
-	 *	pm_runtime_put(&msm_host->pdev->dev);
-	 * }
-	 */
 	msm_host->enabled = true;
+	mutex_unlock(&msm_host->dev_mutex);
 	return 0;
 }
 
 int msm_dsi_host_disable(struct mipi_dsi_host *host)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+	int ret;
 
+	mutex_lock(&msm_host->dev_mutex);
+	msm_host->idle_requested = false;
 	msm_host->enabled = false;
+	ret = dsi_host_leave_idle(msm_host);
+	if (ret)
+		goto unlock;
+
 	dsi_op_mode_config(msm_host,
 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), false);
 
@@ -2464,7 +2672,9 @@ int msm_dsi_host_disable(struct mipi_dsi_host *host)
 	 */
 	dsi_sw_reset(msm_host);
 
-	return 0;
+unlock:
+	mutex_unlock(&msm_host->dev_mutex);
+	return ret;
 }
 
 static void msm_dsi_sfpb_config(struct msm_dsi_host *msm_host, bool enable)
@@ -2483,7 +2693,7 @@ static void msm_dsi_sfpb_config(struct msm_dsi_host *msm_host, bool enable)
 
 int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
-			bool is_bonded_dsi, struct msm_dsi_phy *phy)
+			bool is_bonded_dsi, struct msm_dsi_phy *phy, bool ulps_enabled)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
@@ -2506,17 +2716,20 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 	if (ret) {
 		pr_err("%s:Failed to enable vregs.ret=%d\n",
 			__func__, ret);
-		goto unlock_ret;
+		goto fail_disable_sfpb;
 	}
 
-	pm_runtime_get_sync(&msm_host->pdev->dev);
+	ret = pm_runtime_resume_and_get(&msm_host->pdev->dev);
+	if (ret < 0)
+		goto fail_disable_reg;
+
 	ret = cfg_hnd->ops->link_clk_set_rate(msm_host);
 	if (!ret)
 		ret = cfg_hnd->ops->link_clk_enable(msm_host);
 	if (ret) {
 		pr_err("%s: failed to enable link clocks. ret=%d\n",
 		       __func__, ret);
-		goto fail_disable_reg;
+		goto fail_put_pm;
 	}
 
 	ret = pinctrl_pm_select_default_state(&msm_host->pdev->dev);
@@ -2530,6 +2743,19 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 	dsi_sw_reset(msm_host);
 	dsi_ctrl_enable(msm_host, phy_shared_timings, phy);
 
+	/* ULPS exit must clear the PHY HS request set by controller setup. */
+	if (ulps_enabled) {
+		ret = msm_dsi_phy_set_ulps(phy, false);
+		if (ret) {
+			pr_err("%s: failed to exit ULPS, %d\n", __func__, ret);
+			dsi_ctrl_disable(msm_host);
+			goto fail_disable_clk;
+		}
+	}
+
+	msm_host->phy = phy;
+	msm_host->idle_requested = false;
+	msm_host->link_idle = false;
 	msm_host->power_on = true;
 	mutex_unlock(&msm_host->dev_mutex);
 
@@ -2537,10 +2763,15 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 
 fail_disable_clk:
 	cfg_hnd->ops->link_clk_disable(msm_host);
+fail_put_pm:
+	if (cfg_hnd->major == MSM_DSI_VER_MAJOR_6G)
+		dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
 	pm_runtime_put(&msm_host->pdev->dev);
 fail_disable_reg:
 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
 			       msm_host->supplies);
+fail_disable_sfpb:
+	msm_dsi_sfpb_config(msm_host, false);
 unlock_ret:
 	mutex_unlock(&msm_host->dev_mutex);
 	return ret;
@@ -2561,7 +2792,11 @@ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
 
 	pinctrl_pm_select_sleep_state(&msm_host->pdev->dev);
 
-	cfg_hnd->ops->link_clk_disable(msm_host);
+	if (!msm_host->link_idle)
+		cfg_hnd->ops->link_clk_disable(msm_host);
+	/* DCS transfers release clock references, not the active display vote. */
+	if (cfg_hnd->major == MSM_DSI_VER_MAJOR_6G)
+		dev_pm_opp_set_rate(&msm_host->pdev->dev, 0);
 	pm_runtime_put(&msm_host->pdev->dev);
 
 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
@@ -2572,6 +2807,8 @@ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
 	DBG("-");
 
 	msm_host->power_on = false;
+	msm_host->idle_requested = false;
+	msm_host->link_idle = false;
 
 unlock_ret:
 	mutex_unlock(&msm_host->dev_mutex);
@@ -2597,13 +2834,31 @@ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
 	return 0;
 }
 
-enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,
-					    const struct drm_display_mode *mode)
+enum drm_mode_status msm_dsi_host_check_mode(struct mipi_dsi_host *host,
+					     bool is_bonded_dsi,
+					     const struct drm_display_mode *mode)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	struct drm_dsc_config *dsc = msm_host->dsc;
+	unsigned long byte_clk_rate, required_byte_clk_rate;
+	long rounded_byte_clk_rate;
 	int pic_width = mode->hdisplay;
 	int pic_height = mode->vdisplay;
+
+	if (msm_host->mode_flags & MIPI_DSI_MODE_FIXED_HS_RATE) {
+		byte_clk_rate = dsi_byte_clk_get_rate(host, is_bonded_dsi, mode);
+		required_byte_clk_rate = dsi_byte_clk_from_pclk(msm_host,
+				dsi_get_required_pclk_rate(msm_host, mode,
+							   is_bonded_dsi));
+		if (byte_clk_rate < required_byte_clk_rate)
+			return MODE_CLOCK_LOW;
+
+		rounded_byte_clk_rate = dsi_round_byte_clk_rate(msm_host,
+							byte_clk_rate);
+		if (rounded_byte_clk_rate < 0 ||
+		    rounded_byte_clk_rate != byte_clk_rate)
+			return MODE_CLOCK_RANGE;
+	}
 
 	if (!msm_host->dsc)
 		return MODE_OK;

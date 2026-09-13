@@ -219,7 +219,7 @@ adreno_iommu_create_vm(struct msm_gpu *gpu,
 	size = geometry->aperture_end - start + 1;
 
 	vm = msm_gem_vm_create(gpu->dev, mmu, "gpu", start & GENMASK_ULL(48, 0),
-			       size, true);
+			       size, PAGE_SIZE, true);
 
 	if (IS_ERR(vm) && !IS_ERR(mmu))
 		mmu->funcs->destroy(mmu);

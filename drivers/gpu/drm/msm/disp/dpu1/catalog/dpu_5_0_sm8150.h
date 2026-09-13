@@ -186,19 +186,19 @@ static const struct dpu_dspp_cfg sm8150_dspp[] = {
 	{
 		.name = "dspp_0", .id = DSPP_0,
 		.base = 0x54000, .len = 0x1800,
-		.sblk = &sdm845_dspp_sblk,
+		.sblk = &sm8150_dspp_sblk,
 	}, {
 		.name = "dspp_1", .id = DSPP_1,
 		.base = 0x56000, .len = 0x1800,
-		.sblk = &sdm845_dspp_sblk,
+		.sblk = &sm8150_dspp_sblk,
 	}, {
 		.name = "dspp_2", .id = DSPP_2,
 		.base = 0x58000, .len = 0x1800,
-		.sblk = &sdm845_dspp_sblk,
+		.sblk = &sm8150_dspp_sblk,
 	}, {
 		.name = "dspp_3", .id = DSPP_3,
 		.base = 0x5a000, .len = 0x1800,
-		.sblk = &sdm845_dspp_sblk,
+		.sblk = &sm8150_dspp_sblk,
 	},
 };
 
@@ -330,6 +330,7 @@ static const struct dpu_perf_cfg sm8150_perf_data = {
 	.min_llcc_ib = 800000,
 	.min_dram_ib = 800000,
 	.min_prefill_lines = 24,
+	.cpu_dma_latency_us = 44,
 	.danger_lut_tbl = {0xf, 0xffff, 0x0},
 	.safe_lut_tbl = {0xfff8, 0xf000, 0xffff},
 	.qos_lut_tbl = {
@@ -370,6 +371,7 @@ const struct dpu_mdss_cfg dpu_sm8150_cfg = {
 	.mixer = sm8150_lm,
 	.dspp_count = ARRAY_SIZE(sm8150_dspp),
 	.dspp = sm8150_dspp,
+	.dspp_top = 0x300,
 	.dsc_count = ARRAY_SIZE(sm8150_dsc),
 	.dsc = sm8150_dsc,
 	.pingpong_count = ARRAY_SIZE(sm8150_pp),
