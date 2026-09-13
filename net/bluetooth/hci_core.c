@@ -2394,7 +2394,7 @@ static int hci_suspend_notifier(struct notifier_block *nb, unsigned long action,
 			   action, ret);
 
 	hci_dev_put(hdev);
-	return NOTIFY_DONE;
+	return notifier_from_errno(ret);
 }
 
 /* Alloc HCI device */
@@ -2814,6 +2814,8 @@ int hci_suspend_dev(struct hci_dev *hdev)
 	hci_req_sync_lock(hdev);
 	ret = hci_suspend_sync(hdev);
 	hci_req_sync_unlock(hdev);
+	if (ret)
+		return ret;
 
 	hci_clear_wake_reason(hdev);
 	mgmt_suspending(hdev, hdev->suspend_state);

@@ -2010,6 +2010,10 @@ int hci_enable_advertising_sync(struct hci_dev *hdev)
 
 static int enable_advertising_sync(struct hci_dev *hdev, void *data)
 {
+	/* A disconnect may queue this after suspend has paused advertising. */
+	if (hdev->suspended || hdev->advertising_paused)
+		return 0;
+
 	return hci_enable_advertising_sync(hdev);
 }
 
@@ -2633,8 +2637,12 @@ static int hci_pause_advertising_sync(struct hci_dev *hdev)
 	int err;
 	int old_state;
 
-	/* If controller is not advertising we are done. */
-	if (!hci_dev_test_flag(hdev, HCI_LE_ADV))
+	/* A peripheral connection may have stopped advertising on the
+	 * controller. Preserve the configured instances for resume too.
+	 */
+	if (!hci_dev_test_flag(hdev, HCI_LE_ADV) &&
+	    !hci_dev_test_flag(hdev, HCI_ADVERTISING) &&
+	    list_empty(&hdev->adv_instances))
 		return 0;
 
 	/* If already been paused there is nothing to do. */
@@ -2679,10 +2687,10 @@ static int hci_pause_advertising_sync(struct hci_dev *hdev)
 static int hci_resume_advertising_sync(struct hci_dev *hdev)
 {
 	struct adv_info *adv, *tmp;
-	int err;
+	int err = 0;
 
-	/* If advertising has not been paused there is nothing  to do. */
-	if (!hdev->advertising_paused)
+	/* Scan updates during suspend must not resume advertising. */
+	if (!hdev->advertising_paused || hdev->suspended)
 		return 0;
 
 	/* Resume directed advertising */
@@ -2710,8 +2718,11 @@ static int hci_resume_advertising_sync(struct hci_dev *hdev)
 		/* If current advertising instance is set to instance 0x00
 		 * then we need to re-enable it.
 		 */
-		if (hci_dev_test_and_clear_flag(hdev, HCI_LE_ADV_0))
+		if (hci_dev_test_and_clear_flag(hdev, HCI_LE_ADV_0) ||
+		    hci_dev_test_flag(hdev, HCI_ADVERTISING))
 			err = hci_enable_ext_advertising_sync(hdev, 0x00);
+	} else if (hci_dev_test_flag(hdev, HCI_ADVERTISING)) {
+		err = hci_enable_advertising_sync(hdev);
 	} else {
 		/* Schedule for most recent instance to be restarted and begin
 		 * the software rotation loop
@@ -5813,12 +5824,12 @@ static int hci_disconnect_sync(struct hci_dev *hdev, struct hci_conn *conn,
 	cp.handle = cpu_to_le16(conn->handle);
 	cp.reason = reason;
 
-	/* Wait for HCI_EV_DISCONN_COMPLETE, not HCI_EV_CMD_STATUS, when the
-	 * reason is anything but HCI_ERROR_REMOTE_POWER_OFF. This reason is
-	 * used when suspending or powering off, where we don't want to wait
-	 * for the peer's response.
+	/* Wait for disconnection completion when suspending: the controller
+	 * remains powered and a late completion can trigger a transport wakeup
+	 * even when the event is masked. Only actual power-off may skip this
+	 * wait for the peer's response.
 	 */
-	if (reason != HCI_ERROR_REMOTE_POWER_OFF)
+	if (reason != HCI_ERROR_REMOTE_POWER_OFF || hdev->suspended)
 		return __hci_cmd_sync_status_sk(hdev, HCI_OP_DISCONNECT,
 						sizeof(cp), &cp,
 						HCI_EV_DISCONN_COMPLETE,
@@ -5829,13 +5840,11 @@ static int hci_disconnect_sync(struct hci_dev *hdev, struct hci_conn *conn,
 }
 
 static int hci_le_connect_cancel_sync(struct hci_dev *hdev,
-				      struct hci_conn *conn, u8 reason)
+				      struct hci_conn *conn)
 {
-	/* Return reason if scanning since the connection shall probably be
-	 * cleanup directly.
-	 */
+	/* Scanning has not created a controller connection to cancel. */
 	if (test_bit(HCI_CONN_SCANNING, &conn->flags))
-		return reason;
+		return 0;
 
 	if (conn->role == HCI_ROLE_SLAVE ||
 	    test_and_set_bit(HCI_CONN_CANCEL, &conn->flags))
@@ -5849,7 +5858,7 @@ static int hci_connect_cancel_sync(struct hci_dev *hdev, struct hci_conn *conn,
 				   u8 reason)
 {
 	if (conn->type == LE_LINK)
-		return hci_le_connect_cancel_sync(hdev, conn, reason);
+		return hci_le_connect_cancel_sync(hdev, conn);
 
 	if (conn->type == CIS_LINK) {
 		/* BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E
@@ -5864,7 +5873,7 @@ static int hci_connect_cancel_sync(struct hci_dev *hdev, struct hci_conn *conn,
 			return hci_disconnect_sync(hdev, conn, reason);
 
 		/* CIS with no Create CIS sent have nothing to cancel */
-		return HCI_ERROR_LOCAL_HOST_TERM;
+		return 0;
 	}
 
 	if (conn->type == BIS_LINK || conn->type == PA_LINK) {
@@ -5974,12 +5983,16 @@ int hci_abort_conn_sync(struct hci_dev *hdev, struct hci_conn *conn, u8 reason)
 
 	hci_dev_lock(hdev);
 
-	/* Check if the connection has been cleaned up concurrently */
+	/* Concurrent cleanup does not turn a failed command into success. */
 	c = hci_conn_hash_lookup_handle(hdev, handle);
-	if (!c || c != conn) {
-		err = 0;
+	if (!c || c != conn)
 		goto unlock;
-	}
+
+	/* Keep an unresolved connection so a later suspend cannot mistake
+	 * software cleanup for a completed controller disconnect.
+	 */
+	if (err && hdev->suspended)
+		goto unlock;
 
 	/* Cleanup hci_conn object if it cannot be cancelled as it
 	 * likely means the controller and host stack are out of sync
@@ -6003,19 +6016,20 @@ static int hci_disconnect_all_sync(struct hci_dev *hdev, u8 reason)
 {
 	struct list_head *head = &hdev->conn_hash.list;
 	struct hci_conn *conn;
+	int err;
 
 	rcu_read_lock();
 	while ((conn = list_first_or_null_rcu(head, struct hci_conn, list))) {
 		/* Make sure the connection is not freed while unlocking */
 		conn = hci_conn_get(conn);
 		rcu_read_unlock();
-		/* Disregard possible errors since hci_conn_del shall have been
-		 * called even in case of errors had occurred since it would
-		 * then cause hci_conn_failed to be called which calls
-		 * hci_conn_del internally.
-		 */
-		hci_abort_conn_sync(hdev, conn, reason);
+		err = hci_abort_conn_sync(hdev, conn, reason);
 		hci_conn_put(conn);
+		/* Power-off can finish by closing the controller. Suspend must
+		 * leave it running and cannot ignore an incomplete disconnect.
+		 */
+		if (err && hdev->suspended)
+			return err > 0 ? -bt_to_errno(err) : err;
 		rcu_read_lock();
 	}
 	rcu_read_unlock();
@@ -6203,6 +6217,10 @@ int hci_inquiry_sync(struct hci_dev *hdev, u8 length, u8 num_rsp)
 
 	bt_dev_dbg(hdev, "");
 
+	/* Interleaved inquiry can already be queued when suspend starts. */
+	if (hdev->suspended || hdev->discovery_paused)
+		return -EBUSY;
+
 	if (test_bit(HCI_INQUIRY, &hdev->flags))
 		return 0;
 
@@ -6315,6 +6333,10 @@ int hci_start_discovery_sync(struct hci_dev *hdev)
 
 	bt_dev_dbg(hdev, "type %u", hdev->discovery.type);
 
+	/* Recheck after taking req_lock, including requests queued earlier. */
+	if (hdev->suspended || hdev->discovery_paused)
+		return -EBUSY;
+
 	switch (hdev->discovery.type) {
 	case DISCOV_TYPE_BREDR:
 		return hci_inquiry_sync(hdev, DISCOV_BREDR_INQUIRY_LEN, 0);
@@ -6380,12 +6402,17 @@ static int hci_pause_discovery_sync(struct hci_dev *hdev)
 	    hdev->discovery_paused)
 		return 0;
 
+	/* Inquiry Cancel reports STOPPED before the synchronous wait returns.
+	 * Block new requests before that notification reaches userspace.
+	 */
+	hci_dev_lock(hdev);
+	hdev->discovery_paused = true;
 	hci_discovery_set_state(hdev, DISCOVERY_STOPPING);
+	hci_dev_unlock(hdev);
 	err = hci_stop_discovery_sync(hdev);
 	if (err)
 		return err;
 
-	hdev->discovery_paused = true;
 	hci_discovery_set_state(hdev, DISCOVERY_STOPPED);
 
 	return 0;
@@ -6500,14 +6527,20 @@ int hci_suspend_sync(struct hci_dev *hdev)
 	if (hdev->suspended)
 		return 0;
 
-	/* Mark device as suspended */
+	/* Serialize with management requests before changing discovery. */
+	hci_dev_lock(hdev);
 	hdev->suspended = true;
+	hci_dev_unlock(hdev);
 
 	/* Pause discovery if not already stopped */
-	hci_pause_discovery_sync(hdev);
+	err = hci_pause_discovery_sync(hdev);
+	if (err)
+		goto failed;
 
 	/* Pause other advertisements */
-	hci_pause_advertising_sync(hdev);
+	err = hci_pause_advertising_sync(hdev);
+	if (err)
+		goto failed;
 
 	/* Suspend monitor filters */
 	hci_suspend_monitor_sync(hdev);
@@ -6518,12 +6551,8 @@ int hci_suspend_sync(struct hci_dev *hdev)
 	if (hci_conn_count(hdev)) {
 		/* Soft disconnect everything (power off) */
 		err = hci_disconnect_all_sync(hdev, HCI_ERROR_REMOTE_POWER_OFF);
-		if (err) {
-			/* Set state to BT_RUNNING so resume doesn't notify */
-			hdev->suspend_state = BT_RUNNING;
-			hci_resume_sync(hdev);
-			return err;
-		}
+		if (err)
+			goto failed;
 
 		/* Update event mask so only the allowed event can wakeup the
 		 * host.
@@ -6554,6 +6583,11 @@ int hci_suspend_sync(struct hci_dev *hdev)
 	hdev->suspend_state = BT_SUSPEND_CONFIGURE_WAKE;
 
 	return 0;
+
+failed:
+	hdev->suspend_state = BT_RUNNING;
+	hci_resume_sync(hdev);
+	return err > 0 ? -bt_to_errno(err) : err;
 }
 
 /* This function resumes discovery */
@@ -6618,7 +6652,9 @@ int hci_resume_sync(struct hci_dev *hdev)
 	if (!hdev->suspended)
 		return 0;
 
+	hci_dev_lock(hdev);
 	hdev->suspended = false;
+	hci_dev_unlock(hdev);
 
 	/* Restore event mask */
 	hci_set_event_mask_sync(hdev);
@@ -6956,7 +6992,7 @@ done:
 	clear_bit(HCI_CONN_CREATE, &conn->flags);
 
 	if (err == -ETIMEDOUT)
-		hci_le_connect_cancel_sync(hdev, conn, 0x00);
+		hci_le_connect_cancel_sync(hdev, conn);
 
 	/* Re-enable advertising after the connection attempt is finished. */
 	hci_resume_advertising_sync(hdev);
