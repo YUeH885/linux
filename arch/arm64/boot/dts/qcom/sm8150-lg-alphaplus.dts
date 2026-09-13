@@ -22,6 +22,10 @@
 	qcom,board-id = <0 0>;
 	chassis-type = "handset";
 
+	aliases {
+		serial0 = &uart13;
+	};
+
 	chosen {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -467,6 +471,29 @@
 	 */
 	gpio-reserved-ranges = <93 3>, <97 55>, <153 22>;
 
+	bluetooth_uart_default: bluetooth-uart-default-state {
+		cts-rx-pins {
+			pins = "gpio43", "gpio46";
+			function = "qup13";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		rts-pins {
+			pins = "gpio44";
+			function = "qup13";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		tx-pins {
+			pins = "gpio45";
+			function = "qup13";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+
 	panel_reset_active: panel-reset-active-state {
 		pins = "gpio6";
 		function = "gpio";
@@ -745,6 +772,26 @@
 
 &qupv3_id_2 {
 	status = "okay";
+};
+
+&uart13 {
+	/delete-property/ interrupts;
+	interrupts-extended = <&intc GIC_SPI 585 IRQ_TYPE_LEVEL_HIGH>,
+			      <&tlmm 46 IRQ_TYPE_EDGE_FALLING>;
+	pinctrl-0 = <&bluetooth_uart_default>;
+	pinctrl-1 = <&bluetooth_uart_default>;
+	pinctrl-names = "default", "sleep";
+	status = "okay";
+
+	bluetooth {
+		compatible = "qcom,wcn3998-bt";
+		max-speed = <3200000>;
+		firmware-name = "lmg820n-crnv21.bin", "lmg820n-crbtfw21.tlv";
+		vddio-supply = <&vreg_s4a_1p8>;
+		vddxo-supply = <&vreg_l7a_1p8>;
+		vddrf-supply = <&vreg_l2c_1p3>;
+		vddch0-supply = <&vreg_l11c_3p3>;
+	};
 };
 
 &i2c17 {
