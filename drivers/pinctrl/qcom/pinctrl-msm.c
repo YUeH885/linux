@@ -1320,10 +1320,10 @@ static int msm_gpio_irq_set_irqchip_state(struct irq_data *d,
 	struct msm_pinctrl *pctrl = gpiochip_get_data(gc);
 	const struct msm_pingroup *g = &pctrl->soc->groups[d->hwirq];
 
-	if (which != IRQCHIP_STATE_PENDING)
-		return -EINVAL;
+	if (d->parent_data && test_bit(d->hwirq, pctrl->skip_wake_irqs))
+		return irq_chip_set_parent_state(d, which, val);
 
-	if (test_bit(d->hwirq, pctrl->skip_wake_irqs))
+	if (which != IRQCHIP_STATE_PENDING)
 		return -EINVAL;
 
 	msm_writel_intr_status(val, pctrl, g);
@@ -1338,10 +1338,10 @@ static int msm_gpio_irq_get_irqchip_state(struct irq_data *d,
 	struct msm_pinctrl *pctrl = gpiochip_get_data(gc);
 	const struct msm_pingroup *g = &pctrl->soc->groups[d->hwirq];
 
-	if (which != IRQCHIP_STATE_PENDING)
-		return -EINVAL;
+	if (d->parent_data && test_bit(d->hwirq, pctrl->skip_wake_irqs))
+		return irq_chip_get_parent_state(d, which, val);
 
-	if (test_bit(d->hwirq, pctrl->skip_wake_irqs))
+	if (which != IRQCHIP_STATE_PENDING)
 		return -EINVAL;
 
 	g = &pctrl->soc->groups[d->hwirq];
