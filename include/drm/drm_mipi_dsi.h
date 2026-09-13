@@ -140,6 +140,8 @@ struct mipi_dsi_host *of_find_mipi_dsi_host_by_node(struct device_node *node);
 #define MIPI_DSI_HS_PKT_END_ALIGNED	BIT(12)
 /* pack all DSC slices for a line into a single packet */
 #define MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT	BIT(13)
+/* use hs_rate as the target D-PHY lane bit rate */
+#define MIPI_DSI_MODE_FIXED_HS_RATE	BIT(14)
 
 enum mipi_dsi_pixel_format {
 	MIPI_DSI_FMT_RGB888,
@@ -176,9 +178,9 @@ struct mipi_dsi_device_info {
  * @format: pixel format for video mode
  * @lanes: number of active data lanes
  * @mode_flags: DSI operation mode related flags
- * @hs_rate: maximum lane frequency for high speed mode in hertz, this should
- * be set to the real limits of the hardware, zero is only accepted for
- * legacy drivers
+ * @hs_rate: maximum lane frequency for high speed mode in hertz, or the target
+ * lane bit rate when MIPI_DSI_MODE_FIXED_HS_RATE is set; zero is only accepted
+ * for legacy drivers
  * @lp_rate: maximum lane frequency for low power mode in hertz, this should
  * be set to the real limits of the hardware, zero is only accepted for
  * legacy drivers

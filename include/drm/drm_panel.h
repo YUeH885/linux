@@ -90,6 +90,19 @@ struct drm_panel_funcs {
 	int (*enable)(struct drm_panel *panel);
 
 	/**
+	 * @first_frame:
+	 *
+	 * Called in process context after the first complete frame has reached
+	 * the panel following enable(). Command-mode panels may defer backlight
+	 * restoration until this callback. Requires explicit display-controller
+	 * support; neither a TE edge nor the start of transmission is sufficient.
+	 * The callback may sleep and send commands to the panel.
+	 *
+	 * This function is optional.
+	 */
+	int (*first_frame)(struct drm_panel *panel);
+
+	/**
 	 * @disable:
 	 *
 	 * Disable panel (turn off back light, etc.).
