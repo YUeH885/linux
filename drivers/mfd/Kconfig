@@ -2400,6 +2400,18 @@ config MFD_QCOM_PM8008
 	  under it in the device tree. Additional drivers must be enabled in
 	  order to use the functionality of the device.
 
+config MFD_QCOM_I2C_PMIC
+	tristate "Qualcomm I2C PMIC core"
+	depends on I2C && OF
+	select IRQ_DOMAIN
+	select REGMAP_I2C
+	help
+	  Support Qualcomm PMICs accessed over I2C. The driver provides a
+	  shared regmap, demultiplexes the PMIC summary interrupt, and creates
+	  platform devices for the PMIC peripherals described in device tree.
+	  Select this when an I2C-attached Qualcomm PMIC provides child devices
+	  that use its SPMI-style register and interrupt layout.
+
 menu "Multimedia Capabilities Port drivers"
 	depends on ARCH_SA1100
 
