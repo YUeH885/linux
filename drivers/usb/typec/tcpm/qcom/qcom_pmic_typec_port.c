@@ -5,6 +5,7 @@
 
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -173,12 +174,15 @@ struct pmic_typec_port {
 	struct pmic_typec_port_irq_data	*irq_data;
 
 	struct regulator		*vdd_vbus;
+	struct gpio_desc		*vconn_boost;
 	bool				vbus_enabled;
 	struct mutex			vbus_lock;		/* VBUS state serialization */
 
 	int				cc;
 	bool				debouncing_cc;
 	struct delayed_work		cc_debounce_dwork;
+	bool				early_usb_attach;
+	bool				started;
 
 	spinlock_t			lock;	/* Register atomicity */
 };
@@ -223,19 +227,25 @@ static void qcom_pmic_typec_port_cc_debounce(struct work_struct *work)
 {
 	struct pmic_typec_port *pmic_typec_port =
 		container_of(work, struct pmic_typec_port, cc_debounce_dwork.work);
+	struct tcpm_port *tcpm_port = NULL;
 	unsigned long flags;
 
 	spin_lock_irqsave(&pmic_typec_port->lock, flags);
 	pmic_typec_port->debouncing_cc = false;
+	tcpm_port = pmic_typec_port->started ?
+		pmic_typec_port->tcpm_port : NULL;
 	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 
 	dev_dbg(pmic_typec_port->dev, "Debounce cc complete\n");
+	if (tcpm_port)
+		tcpm_cc_change(tcpm_port);
 }
 
 static irqreturn_t pmic_typec_port_isr(int irq, void *dev_id)
 {
 	struct pmic_typec_port_irq_data *irq_data = dev_id;
 	struct pmic_typec_port *pmic_typec_port = irq_data->pmic_typec_port;
+	struct tcpm_port *tcpm_port = NULL;
 	u32 misc_stat;
 	bool vbus_change = false;
 	bool cc_change = false;
@@ -254,21 +264,32 @@ static irqreturn_t pmic_typec_port_isr(int irq, void *dev_id)
 	case PMIC_TYPEC_VBUS_IRQ:
 		vbus_change = true;
 		break;
-	case PMIC_TYPEC_CC_STATE_IRQ:
 	case PMIC_TYPEC_ATTACH_DETACH_IRQ:
+		ret = regmap_read(pmic_typec_port->regmap,
+				  pmic_typec_port->base + TYPEC_STATE_MACHINE_STATUS_REG,
+				  &misc_stat);
+		if (ret)
+			goto done;
+		if (!(misc_stat & TYPEC_ATTACH_DETACH_STATE))
+			pmic_typec_port->early_usb_attach = false;
+		fallthrough;
+	case PMIC_TYPEC_CC_STATE_IRQ:
 		if (!pmic_typec_port->debouncing_cc)
 			cc_change = true;
 		break;
 	}
 
+	tcpm_port = pmic_typec_port->started ?
+		pmic_typec_port->tcpm_port : NULL;
+
 done:
 	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 
-	if (vbus_change)
-		tcpm_vbus_change(pmic_typec_port->tcpm_port);
+	if (vbus_change && tcpm_port)
+		tcpm_vbus_change(tcpm_port);
 
-	if (cc_change)
-		tcpm_cc_change(pmic_typec_port->tcpm_port);
+	if (cc_change && tcpm_port)
+		tcpm_cc_change(tcpm_port);
 
 	return IRQ_HANDLED;
 }
@@ -334,6 +355,51 @@ static int qcom_pmic_typec_port_get_vbus(struct tcpc_dev *tcpc)
 	return ret;
 }
 
+static bool qcom_pmic_typec_port_avoid_snk_hard_reset(struct tcpc_dev *tcpc)
+{
+	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	unsigned int misc, status;
+	unsigned long flags;
+	bool avoid;
+	int ret;
+
+	spin_lock_irqsave(&pmic_typec_port->lock, flags);
+	avoid = pmic_typec_port->early_usb_attach;
+
+	ret = regmap_read(pmic_typec_port->regmap,
+			  pmic_typec_port->base + TYPEC_MISC_STATUS_REG, &misc);
+	if (ret) {
+		dev_warn_ratelimited(pmic_typec_port->dev,
+				     "Failed to read Type-C misc status: %d\n", ret);
+		goto done;
+	}
+
+	if (!(misc & CC_ATTACHED))
+		goto done;
+
+	if (!avoid) {
+		ret = regmap_read(pmic_typec_port->regmap,
+				  pmic_typec_port->base + LEGACY_CABLE_STATUS_REG,
+				  &status);
+		if (ret) {
+			dev_warn_ratelimited(pmic_typec_port->dev,
+					     "Failed to read legacy cable status: %d\n",
+					     ret);
+			goto done;
+		}
+
+		avoid = status & TYPEC_LEGACY_CABLE_STATUS;
+	}
+
+	dev_dbg(pmic_typec_port->dev, "avoid sink hard reset %d, early attach %d\n",
+		avoid, pmic_typec_port->early_usb_attach);
+done:
+	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
+
+	return avoid;
+}
+
 static int qcom_pmic_typec_port_set_vbus(struct tcpc_dev *tcpc, bool on, bool sink)
 {
 	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
@@ -394,6 +460,8 @@ static int qcom_pmic_typec_port_get_cc(struct tcpc_dev *tcpc,
 		if (ret)
 			goto done;
 		switch (val & DETECTED_SRC_TYPE_MASK) {
+		case 0:
+			goto done;
 		case AUDIO_ACCESS_RA_RA:
 			val = TYPEC_CC_RA;
 			*cc1 = TYPEC_CC_RA;
@@ -419,6 +487,8 @@ static int qcom_pmic_typec_port_get_cc(struct tcpc_dev *tcpc,
 		if (ret)
 			goto done;
 		switch (val & DETECTED_SNK_TYPE_MASK) {
+		case 0:
+			goto done;
 		case SNK_RP_STD:
 			val = TYPEC_CC_RP_DEF;
 			break;
@@ -539,6 +609,9 @@ static int qcom_pmic_typec_port_set_vconn(struct tcpc_dev *tcpc, bool on)
 	unsigned long flags;
 	int ret;
 
+	if (on && pmic_typec_port->vconn_boost)
+		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 1);
+
 	spin_lock_irqsave(&pmic_typec_port->lock, flags);
 
 	ret = regmap_read(pmic_typec_port->regmap,
@@ -561,6 +634,10 @@ static int qcom_pmic_typec_port_set_vconn(struct tcpc_dev *tcpc, bool on)
 				 mask, value);
 done:
 	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
+	if (!on && pmic_typec_port->vconn_boost)
+		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 0);
+	else if (ret && on && pmic_typec_port->vconn_boost)
+		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 0);
 
 	dev_dbg(dev, "set_vconn: orientation %d control 0x%08x state %s cc %s vconn %s\n",
 		orientation, value, str_on_off(on), misc_to_vconn(misc),
@@ -639,6 +716,7 @@ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
 				      struct tcpm_port *tcpm_port)
 {
 	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	unsigned long flags;
 	int i;
 	int mask;
 	int ret;
@@ -677,7 +755,9 @@ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
 	if (ret)
 		goto done;
 
+	spin_lock_irqsave(&pmic_typec_port->lock, flags);
 	pmic_typec_port->tcpm_port = tcpm_port;
+	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 
 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
 		enable_irq(pmic_typec_port->irq_data[i].irq);
@@ -689,15 +769,37 @@ done:
 	return ret;
 }
 
+void qcom_pmic_typec_port_sync(struct pmic_typec *tcpm)
+{
+	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	struct tcpm_port *tcpm_port;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pmic_typec_port->lock, flags);
+	pmic_typec_port->started = true;
+	tcpm_port = pmic_typec_port->tcpm_port;
+	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
+
+	tcpm_vbus_change(tcpm_port);
+	tcpm_cc_change(tcpm_port);
+}
+
 static void qcom_pmic_typec_port_stop(struct pmic_typec *tcpm)
 {
 	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
+	unsigned long flags;
 	int i;
 
 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
 		disable_irq(pmic_typec_port->irq_data[i].irq);
 
+	spin_lock_irqsave(&pmic_typec_port->lock, flags);
+	pmic_typec_port->started = false;
+	pmic_typec_port->tcpm_port = NULL;
+	spin_unlock_irqrestore(&pmic_typec_port->lock, flags);
 	disable_delayed_work_sync(&pmic_typec_port->cc_debounce_dwork);
+	if (pmic_typec_port->vconn_boost)
+		gpiod_set_value_cansleep(pmic_typec_port->vconn_boost, 0);
 }
 
 int qcom_pmic_typec_port_probe(struct platform_device *pdev,
@@ -738,6 +840,11 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 	if (IS_ERR(pmic_typec_port->vdd_vbus))
 		return PTR_ERR(pmic_typec_port->vdd_vbus);
 
+	pmic_typec_port->vconn_boost = devm_gpiod_get_optional(dev, "vconn-boost",
+								       GPIOD_OUT_LOW);
+	if (IS_ERR(pmic_typec_port->vconn_boost))
+		return PTR_ERR(pmic_typec_port->vconn_boost);
+
 	pmic_typec_port->dev = dev;
 	pmic_typec_port->base = base;
 	pmic_typec_port->regmap = regmap;
@@ -746,6 +853,9 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 	spin_lock_init(&pmic_typec_port->lock);
 	INIT_DELAYED_WORK(&pmic_typec_port->cc_debounce_dwork,
 			  qcom_pmic_typec_port_cc_debounce);
+	/* VBUS before CC attach can make a standard Type-C cable look legacy. */
+	pmic_typec_port->early_usb_attach =
+		qcom_pmic_typec_port_vbus_detect(pmic_typec_port);
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
@@ -776,6 +886,8 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 	tcpm->tcpc.get_cc = qcom_pmic_typec_port_get_cc;
 	tcpm->tcpc.set_polarity = qcom_pmic_typec_port_set_polarity;
 	tcpm->tcpc.set_vconn = qcom_pmic_typec_port_set_vconn;
+	tcpm->tcpc.avoid_snk_hard_reset =
+		qcom_pmic_typec_port_avoid_snk_hard_reset;
 	tcpm->tcpc.start_toggling = qcom_pmic_typec_port_start_toggling;
 
 	tcpm->port_start = qcom_pmic_typec_port_start;

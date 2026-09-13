@@ -110,6 +110,8 @@ static int qcom_pmic_typec_probe(struct platform_device *pdev)
 	if (ret)
 		goto pdphy_stop;
 
+	qcom_pmic_typec_port_sync(tcpm);
+
 	return 0;
 
 pdphy_stop:
