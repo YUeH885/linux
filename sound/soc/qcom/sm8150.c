@@ -367,6 +367,23 @@ static int sm8150_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	return 0;
 }
 
+static int sm8150_slim_tx_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
+				struct snd_pcm_hw_params *params)
+{
+	struct snd_interval *rate = hw_param_interval(params,
+					SNDRV_PCM_HW_PARAM_RATE);
+	struct snd_interval *channels = hw_param_interval(params,
+					SNDRV_PCM_HW_PARAM_CHANNELS);
+	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+
+	rate->min = rate->max = DEFAULT_SAMPLE_RATE_48K;
+	channels->min = channels->max = 1;
+	snd_mask_none(fmt);
+	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
+
+	return 0;
+}
+
 static int sm8150_mi2s_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					 struct snd_pcm_hw_params *params)
 {
@@ -402,6 +419,7 @@ static const struct snd_kcontrol_new sm8150_snd_controls[] = {
 	SOC_DAPM_PIN_SWITCH("WCD Headphone Jack"),
 	SOC_DAPM_PIN_SWITCH("ES9218P Headphone Jack"),
 	SOC_DAPM_PIN_SWITCH("Headset Mic"),
+	SOC_DAPM_PIN_SWITCH("Handset Mic"),
 };
 
 static void sm8150_add_ops(struct snd_soc_card *card)
@@ -415,7 +433,12 @@ static void sm8150_add_ops(struct snd_soc_card *card)
 			link->be_hw_params_fixup = sm8150_mi2s_be_hw_params_fixup;
 		} else if (link->no_pcm == 1) {
 			link->ops = &sm8150_be_ops;
-			link->be_hw_params_fixup = sm8150_be_hw_params_fixup;
+			if (link->id == SLIMBUS_0_TX)
+				link->be_hw_params_fixup =
+					sm8150_slim_tx_be_hw_params_fixup;
+			else
+				link->be_hw_params_fixup =
+					sm8150_be_hw_params_fixup;
 		}
 		link->init = sm8150_dai_init;
 		link->exit = sm8150_dai_exit;
