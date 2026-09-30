@@ -28,8 +28,6 @@
 #define SLIM_MAX_TX_PORTS 16
 #define SLIM_MAX_RX_PORTS 13
 #define WCD934X_DEFAULT_MCLK_RATE	9600000
-#define TERT_MI2S_BCLK_RATE		1536000
-
 struct sm8150_snd_data {
 	struct snd_soc_jack jack;
 	struct snd_soc_component *wcd_component;
@@ -153,11 +151,12 @@ static int sm8150_tert_mi2s_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
-	int width = params_width(params);
+	unsigned int width = params_width(params);
+	unsigned int rate = params_rate(params);
+	unsigned int bclk_rate;
 	int ret;
 
-	if (params_rate(params) != DEFAULT_SAMPLE_RATE_48K ||
-	    params_channels(params) != 2 || width != 16)
+	if (params_channels(params) != 2 || (width != 16 && width != 32))
 		return -EINVAL;
 
 	ret = snd_soc_dai_set_fmt(cpu_dai,
@@ -167,10 +166,17 @@ static int sm8150_tert_mi2s_hw_params(struct snd_pcm_substream *substream,
 	if (ret)
 		return ret;
 
-	return snd_soc_dai_set_fmt(codec_dai,
-				   SND_SOC_DAIFMT_BC_FC |
-				   SND_SOC_DAIFMT_NB_NF |
-				   SND_SOC_DAIFMT_I2S);
+	ret = snd_soc_dai_set_fmt(codec_dai,
+				  SND_SOC_DAIFMT_BC_FC |
+				  SND_SOC_DAIFMT_NB_NF |
+				  SND_SOC_DAIFMT_I2S);
+	if (ret)
+		return ret;
+
+	bclk_rate = rate * params_channels(params) * width;
+	return snd_soc_dai_set_sysclk(cpu_dai,
+				      Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
+				      bclk_rate, SNDRV_PCM_STREAM_PLAYBACK);
 }
 
 static int sm8150_tert_mi2s_startup(struct snd_pcm_substream *substream)
@@ -178,30 +184,12 @@ static int sm8150_tert_mi2s_startup(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_card *card = rtd->card;
 	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(card);
-	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	int ret = 0;
-	bool first = data->tert_mi2s_clk_count == 0;
 
 	if (data->tert_mi2s_active) {
 		ret = pinctrl_select_state(data->pinctrl, data->tert_mi2s_active);
 		if (ret)
 			return ret;
-	}
-	if (first)
-		ret = snd_soc_dai_set_sysclk(cpu_dai,
-					     Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
-					     TERT_MI2S_BCLK_RATE,
-					     SNDRV_PCM_STREAM_PLAYBACK);
-	if (ret < 0) {
-		if (first) {
-			snd_soc_dai_set_sysclk(cpu_dai,
-					      Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT, 0,
-					      SNDRV_PCM_STREAM_PLAYBACK);
-			if (data->tert_mi2s_sleep)
-				pinctrl_select_state(data->pinctrl,
-						     data->tert_mi2s_sleep);
-		}
-		return ret;
 	}
 	data->tert_mi2s_clk_count++;
 
@@ -387,6 +375,10 @@ static int sm8150_slim_tx_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 static int sm8150_mi2s_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					 struct snd_pcm_hw_params *params)
 {
+	static const unsigned int tert_mi2s_rates[] = {
+		8000, 11025, 16000, 22050, 32000, 48000,
+		96000, 176400, 192000,
+	};
 	struct snd_interval *rate = hw_param_interval(params,
 						      SNDRV_PCM_HW_PARAM_RATE);
 	struct snd_interval *channels = hw_param_interval(params,
@@ -394,10 +386,16 @@ static int sm8150_mi2s_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	struct snd_mask *format = hw_param_mask(params,
 						SNDRV_PCM_HW_PARAM_FORMAT);
 
-	rate->min = rate->max = DEFAULT_SAMPLE_RATE_48K;
+	int ret;
+
+	ret = snd_interval_list(rate, ARRAY_SIZE(tert_mi2s_rates),
+				tert_mi2s_rates, 0);
+	if (ret < 0)
+		return ret;
 	channels->min = channels->max = 2;
 	snd_mask_none(format);
 	snd_mask_set_format(format, SNDRV_PCM_FORMAT_S16_LE);
+	snd_mask_set_format(format, SNDRV_PCM_FORMAT_S32_LE);
 
 	return 0;
 }
