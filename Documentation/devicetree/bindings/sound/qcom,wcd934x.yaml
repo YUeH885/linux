@@ -97,6 +97,13 @@ properties:
     minimum: 0
     maximum: 2850000
 
+  qcom,report-mechanical-before-impedance:
+    description:
+      Report mechanical insertion through the ASoC jack before MBHC measures
+      headphone impedance. Use when the board must enable an external analog
+      bypass path before the measurement.
+    type: boolean
+
   qcom,mbhc-buttons-vthreshold-microvolt:
     description:
       Array of 8 Voltage threshold values corresponding to headset

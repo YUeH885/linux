@@ -69,6 +69,8 @@ struct wcd_mbhc {
 	bool extn_cable_hph_rem;
 	bool force_linein;
 	bool impedance_detect;
+	bool micbias_enabled;
+	bool started;
 	unsigned long event_state;
 	unsigned long jiffies_atreport;
 	/* impedance of hphl and hphr */
@@ -273,12 +275,28 @@ static int wcd_cancel_btn_work(struct wcd_mbhc *mbhc)
 	return cancel_delayed_work_sync(&mbhc->mbhc_btn_dwork);
 }
 
+static int wcd_mbhc_request_micbias(struct wcd_mbhc *mbhc, bool enable)
+{
+	int ret;
+
+	if (!mbhc->mbhc_cb->mbhc_micbias_control ||
+	    mbhc->micbias_enabled == enable)
+		return 0;
+
+	ret = mbhc->mbhc_cb->mbhc_micbias_control(mbhc->component,
+						MIC_BIAS_2,
+						enable ? MICB_ENABLE : MICB_DISABLE);
+	if (!ret)
+		mbhc->micbias_enabled = enable;
+
+	return ret;
+}
+
 static void wcd_micbias_disable(struct wcd_mbhc *mbhc)
 {
 	struct snd_soc_component *component = mbhc->component;
 
-	if (mbhc->mbhc_cb->mbhc_micbias_control)
-		mbhc->mbhc_cb->mbhc_micbias_control(component, MIC_BIAS_2, MICB_DISABLE);
+	wcd_mbhc_request_micbias(mbhc, false);
 
 	if (mbhc->mbhc_cb->mbhc_micb_ctrl_thr_mic)
 		mbhc->mbhc_cb->mbhc_micb_ctrl_thr_mic(component, MIC_BIAS_2, false);
@@ -332,6 +350,11 @@ static void wcd_mbhc_report_plug_insertion(struct wcd_mbhc *mbhc,
 					   enum snd_jack_types jack_type)
 {
 	bool is_pa_on;
+
+	if (mbhc->cfg->report_mechanical_before_impedance)
+		snd_soc_jack_report(mbhc->jack, SND_JACK_MECHANICAL,
+				    SND_JACK_MECHANICAL);
+
 	/*
 	 * Report removal of current jack type.
 	 * Headphone to headset shouldn't report headphone
@@ -398,7 +421,8 @@ static void wcd_mbhc_report_plug_insertion(struct wcd_mbhc *mbhc,
 	if (jack_type == SND_JACK_HEADPHONE && mbhc->mbhc_cb->mbhc_micb_ramp_control)
 		mbhc->mbhc_cb->mbhc_micb_ramp_control(mbhc->component, false);
 
-	snd_soc_jack_report(mbhc->jack, (mbhc->hph_status | SND_JACK_MECHANICAL),
+	snd_soc_jack_report(mbhc->jack,
+			    mbhc->hph_status | SND_JACK_MECHANICAL,
 			    WCD_MBHC_JACK_MASK);
 }
 
@@ -504,8 +528,8 @@ static void wcd_mbhc_adc_detect_plug_type(struct wcd_mbhc *mbhc)
 	wcd_mbhc_write_field(mbhc, WCD_MBHC_DETECTION_DONE, 0);
 
 	if (mbhc->mbhc_cb->mbhc_micbias_control) {
-		mbhc->mbhc_cb->mbhc_micbias_control(component, MIC_BIAS_2,
-						    MICB_ENABLE);
+		if (wcd_mbhc_request_micbias(mbhc, true))
+			return;
 		wcd_schedule_hs_detect_plug(mbhc, &mbhc->correct_plug_swch);
 	}
 }
@@ -518,6 +542,11 @@ static void mbhc_plug_detect_fn(struct work_struct *work)
 	bool detection_type;
 
 	mutex_lock(&mbhc->lock);
+
+	if (!mbhc->started) {
+		mutex_unlock(&mbhc->lock);
+		return;
+	}
 
 	mbhc->in_swch_irq_handler = true;
 
@@ -585,7 +614,7 @@ static irqreturn_t wcd_mbhc_mech_plug_detect_irq(int irq, void *data)
 {
 	struct wcd_mbhc *mbhc = data;
 
-	if (!mbhc->cfg->typec_analog_mux)
+	if (READ_ONCE(mbhc->started) && !mbhc->cfg->typec_analog_mux)
 		schedule_work(&mbhc->mbhc_plug_detect_work);
 
 	return IRQ_HANDLED;
@@ -674,6 +703,10 @@ static irqreturn_t wcd_mbhc_btn_press_handler(int irq, void *data)
 	unsigned long msec_val;
 
 	mutex_lock(&mbhc->lock);
+	if (!mbhc->started) {
+		mutex_unlock(&mbhc->lock);
+		return IRQ_HANDLED;
+	}
 	wcd_cancel_btn_work(mbhc);
 	mbhc->is_btn_press = true;
 	msec_val = jiffies_to_msecs(jiffies - mbhc->jiffies_atreport);
@@ -705,6 +738,10 @@ static irqreturn_t wcd_mbhc_btn_release_handler(int irq, void *data)
 	int ret;
 
 	mutex_lock(&mbhc->lock);
+	if (!mbhc->started) {
+		mutex_unlock(&mbhc->lock);
+		return IRQ_HANDLED;
+	}
 	if (mbhc->is_btn_press)
 		mbhc->is_btn_press = false;
 	else /* fake btn press */
@@ -1297,8 +1334,7 @@ correct_plug_type:
 		wcd_mbhc_adc_update_fsm_source(mbhc, plug_type);
 
 exit:
-	if (mbhc->mbhc_cb->mbhc_micbias_control/* &&  !mbhc->micbias_enable*/)
-		mbhc->mbhc_cb->mbhc_micbias_control(component, MIC_BIAS_2, MICB_DISABLE);
+	wcd_mbhc_request_micbias(mbhc, false);
 
 	/*
 	 * If plug type is corrected from special headset to headphone,
@@ -1328,6 +1364,10 @@ static irqreturn_t wcd_mbhc_adc_hs_rem_irq(int irq, void *data)
 	int adc_threshold, output_mv, retry = 0;
 
 	mutex_lock(&mbhc->lock);
+	if (!mbhc->started) {
+		mutex_unlock(&mbhc->lock);
+		return IRQ_HANDLED;
+	}
 	timeout = jiffies + msecs_to_jiffies(WCD_FAKE_REMOVAL_MIN_PERIOD_MS);
 	adc_threshold = wcd_mbhc_adc_get_hs_thres(mbhc);
 
@@ -1369,6 +1409,9 @@ static irqreturn_t wcd_mbhc_adc_hs_ins_irq(int irq, void *data)
 	struct wcd_mbhc *mbhc = data;
 	u8 clamp_state;
 	u8 clamp_retry = WCD_MBHC_FAKE_INS_RETRY;
+
+	if (!READ_ONCE(mbhc->started))
+		return IRQ_HANDLED;
 
 	/*
 	 * ADC COMPLETE and ELEC_REM interrupts are both enabled for HEADPHONE,
@@ -1430,25 +1473,145 @@ int wcd_mbhc_get_hph_type(struct wcd_mbhc *mbhc)
 }
 EXPORT_SYMBOL(wcd_mbhc_get_hph_type);
 
+static int wcd_mbhc_request_irqs(struct wcd_mbhc *mbhc)
+{
+	int ret;
+
+	ret = request_threaded_irq(mbhc->intr_ids->mbhc_sw_intr, NULL,
+					wcd_mbhc_mech_plug_detect_irq,
+					IRQF_ONESHOT | IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+					"mbhc sw intr", mbhc);
+	if (ret)
+		goto err_free_mbhc;
+
+	ret = request_threaded_irq(mbhc->intr_ids->mbhc_btn_press_intr, NULL,
+					wcd_mbhc_btn_press_handler,
+					IRQF_ONESHOT | IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+					"Button Press detect", mbhc);
+	if (ret)
+		goto err_free_sw_intr;
+
+	ret = request_threaded_irq(mbhc->intr_ids->mbhc_btn_release_intr, NULL,
+					wcd_mbhc_btn_release_handler,
+					IRQF_ONESHOT | IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+					"Button Release detect", mbhc);
+	if (ret)
+		goto err_free_btn_press_intr;
+
+	ret = request_threaded_irq(mbhc->intr_ids->mbhc_hs_ins_intr, NULL,
+					wcd_mbhc_adc_hs_ins_irq,
+					IRQF_ONESHOT | IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+					"Elect Insert", mbhc);
+	if (ret)
+		goto err_free_btn_release_intr;
+
+	ret = request_threaded_irq(mbhc->intr_ids->mbhc_hs_rem_intr, NULL,
+					wcd_mbhc_adc_hs_rem_irq,
+					IRQF_ONESHOT | IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+					"Elect Remove", mbhc);
+	if (ret)
+		goto err_free_hs_ins_intr;
+
+	ret = request_threaded_irq(mbhc->intr_ids->hph_left_ocp, NULL,
+					wcd_mbhc_hphl_ocp_irq,
+					IRQF_ONESHOT | IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+					"HPH_L OCP detect", mbhc);
+	if (ret)
+		goto err_free_hs_rem_intr;
+
+	ret = request_threaded_irq(mbhc->intr_ids->hph_right_ocp, NULL,
+					wcd_mbhc_hphr_ocp_irq,
+					IRQF_ONESHOT | IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+					"HPH_R OCP detect", mbhc);
+	if (ret)
+		goto err_free_hph_left_ocp;
+
+	return 0;
+
+err_free_hph_left_ocp:
+	free_irq(mbhc->intr_ids->hph_left_ocp, mbhc);
+err_free_hs_rem_intr:
+	free_irq(mbhc->intr_ids->mbhc_hs_rem_intr, mbhc);
+err_free_hs_ins_intr:
+	free_irq(mbhc->intr_ids->mbhc_hs_ins_intr, mbhc);
+err_free_btn_release_intr:
+	free_irq(mbhc->intr_ids->mbhc_btn_release_intr, mbhc);
+err_free_btn_press_intr:
+	free_irq(mbhc->intr_ids->mbhc_btn_press_intr, mbhc);
+err_free_sw_intr:
+	free_irq(mbhc->intr_ids->mbhc_sw_intr, mbhc);
+err_free_mbhc:
+
+	dev_err(mbhc->dev, "Failed to request mbhc interrupts %d\n", ret);
+
+	return ret;
+}
+
 int wcd_mbhc_start(struct wcd_mbhc *mbhc, struct wcd_mbhc_config *cfg,
 		   struct snd_soc_jack *jack)
 {
+	int ret;
+
 	if (!mbhc || !cfg || !jack)
 		return -EINVAL;
 
 	mbhc->cfg = cfg;
 	mbhc->jack = jack;
 
-	return wcd_mbhc_initialise(mbhc);
+	ret = wcd_mbhc_request_irqs(mbhc);
+	if (ret)
+		return ret;
+	WRITE_ONCE(mbhc->started, true);
+	ret = wcd_mbhc_initialise(mbhc);
+	if (ret) {
+		wcd_mbhc_stop(mbhc);
+		return ret;
+	}
+	enable_irq(mbhc->intr_ids->mbhc_sw_intr);
+	enable_irq(mbhc->intr_ids->mbhc_btn_press_intr);
+	enable_irq(mbhc->intr_ids->mbhc_btn_release_intr);
+	enable_irq(mbhc->intr_ids->hph_left_ocp);
+	enable_irq(mbhc->intr_ids->hph_right_ocp);
+
+	return 0;
 }
 EXPORT_SYMBOL(wcd_mbhc_start);
 
 void wcd_mbhc_stop(struct wcd_mbhc *mbhc)
 {
+	if (!mbhc->started)
+		return;
+
+	WRITE_ONCE(mbhc->started, false);
+	/* Drain IRQ handlers before cancelling work that can access the jack. */
+	disable_irq(mbhc->intr_ids->mbhc_sw_intr);
+	disable_irq(mbhc->intr_ids->mbhc_btn_press_intr);
+	disable_irq(mbhc->intr_ids->mbhc_btn_release_intr);
+	disable_irq(mbhc->intr_ids->mbhc_hs_ins_intr);
+	disable_irq(mbhc->intr_ids->mbhc_hs_rem_intr);
+	disable_irq(mbhc->intr_ids->hph_left_ocp);
+	disable_irq(mbhc->intr_ids->hph_right_ocp);
+
+	cancel_work_sync(&mbhc->mbhc_plug_detect_work);
+	mutex_lock(&mbhc->lock);
+	wcd_mbhc_cancel_pending_work(mbhc);
+	wcd_micbias_disable(mbhc);
+	wcd_mbhc_write_field(mbhc, WCD_MBHC_L_DET_EN, 0);
+	wcd_mbhc_write_field(mbhc, WCD_MBHC_FSM_EN, 0);
 	mbhc->current_plug = MBHC_PLUG_TYPE_NONE;
 	mbhc->hph_status = 0;
-	disable_irq_nosync(mbhc->intr_ids->hph_left_ocp);
-	disable_irq_nosync(mbhc->intr_ids->hph_right_ocp);
+	mbhc->buttons_pressed = 0;
+	mbhc->zl = mbhc->zr = 0;
+	mbhc->jack = NULL;
+	mutex_unlock(&mbhc->lock);
+
+	free_irq(mbhc->intr_ids->hph_right_ocp, mbhc);
+	free_irq(mbhc->intr_ids->hph_left_ocp, mbhc);
+	free_irq(mbhc->intr_ids->mbhc_hs_rem_intr, mbhc);
+	free_irq(mbhc->intr_ids->mbhc_hs_ins_intr, mbhc);
+	free_irq(mbhc->intr_ids->mbhc_btn_release_intr, mbhc);
+	free_irq(mbhc->intr_ids->mbhc_btn_press_intr, mbhc);
+	free_irq(mbhc->intr_ids->mbhc_sw_intr, mbhc);
 }
 EXPORT_SYMBOL(wcd_mbhc_stop);
 
@@ -1508,7 +1671,6 @@ struct wcd_mbhc *wcd_mbhc_init(struct snd_soc_component *component,
 {
 	struct device *dev = component->dev;
 	struct wcd_mbhc *mbhc;
-	int ret;
 
 	if (!intr_ids || !fields || !mbhc_cb || !mbhc_cb->mbhc_bias || !mbhc_cb->set_btn_thr) {
 		dev_err(dev, "%s: Insufficient mbhc configuration\n", __func__);
@@ -1536,97 +1698,13 @@ struct wcd_mbhc *wcd_mbhc_init(struct snd_soc_component *component,
 	INIT_WORK(&mbhc->correct_plug_swch, wcd_correct_swch_plug);
 	INIT_WORK(&mbhc->mbhc_plug_detect_work, mbhc_plug_detect_fn);
 
-	ret = request_threaded_irq(mbhc->intr_ids->mbhc_sw_intr, NULL,
-					wcd_mbhc_mech_plug_detect_irq,
-					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
-					"mbhc sw intr", mbhc);
-	if (ret)
-		goto err_free_mbhc;
-
-	ret = request_threaded_irq(mbhc->intr_ids->mbhc_btn_press_intr, NULL,
-					wcd_mbhc_btn_press_handler,
-					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
-					"Button Press detect", mbhc);
-	if (ret)
-		goto err_free_sw_intr;
-
-	ret = request_threaded_irq(mbhc->intr_ids->mbhc_btn_release_intr, NULL,
-					wcd_mbhc_btn_release_handler,
-					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
-					"Button Release detect", mbhc);
-	if (ret)
-		goto err_free_btn_press_intr;
-
-	ret = request_threaded_irq(mbhc->intr_ids->mbhc_hs_ins_intr, NULL,
-					wcd_mbhc_adc_hs_ins_irq,
-					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
-					"Elect Insert", mbhc);
-	if (ret)
-		goto err_free_btn_release_intr;
-
-	disable_irq_nosync(mbhc->intr_ids->mbhc_hs_ins_intr);
-
-	ret = request_threaded_irq(mbhc->intr_ids->mbhc_hs_rem_intr, NULL,
-					wcd_mbhc_adc_hs_rem_irq,
-					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
-					"Elect Remove", mbhc);
-	if (ret)
-		goto err_free_hs_ins_intr;
-
-	disable_irq_nosync(mbhc->intr_ids->mbhc_hs_rem_intr);
-
-	ret = request_threaded_irq(mbhc->intr_ids->hph_left_ocp, NULL,
-					wcd_mbhc_hphl_ocp_irq,
-					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
-					"HPH_L OCP detect", mbhc);
-	if (ret)
-		goto err_free_hs_rem_intr;
-
-	ret = request_threaded_irq(mbhc->intr_ids->hph_right_ocp, NULL,
-					wcd_mbhc_hphr_ocp_irq,
-					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
-					"HPH_R OCP detect", mbhc);
-	if (ret)
-		goto err_free_hph_left_ocp;
-
 	return mbhc;
-
-err_free_hph_left_ocp:
-	free_irq(mbhc->intr_ids->hph_left_ocp, mbhc);
-err_free_hs_rem_intr:
-	free_irq(mbhc->intr_ids->mbhc_hs_rem_intr, mbhc);
-err_free_hs_ins_intr:
-	free_irq(mbhc->intr_ids->mbhc_hs_ins_intr, mbhc);
-err_free_btn_release_intr:
-	free_irq(mbhc->intr_ids->mbhc_btn_release_intr, mbhc);
-err_free_btn_press_intr:
-	free_irq(mbhc->intr_ids->mbhc_btn_press_intr, mbhc);
-err_free_sw_intr:
-	free_irq(mbhc->intr_ids->mbhc_sw_intr, mbhc);
-err_free_mbhc:
-	kfree(mbhc);
-
-	dev_err(dev, "Failed to request mbhc interrupts %d\n", ret);
-
-	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL(wcd_mbhc_init);
 
 void wcd_mbhc_deinit(struct wcd_mbhc *mbhc)
 {
-	free_irq(mbhc->intr_ids->hph_right_ocp, mbhc);
-	free_irq(mbhc->intr_ids->hph_left_ocp, mbhc);
-	free_irq(mbhc->intr_ids->mbhc_hs_rem_intr, mbhc);
-	free_irq(mbhc->intr_ids->mbhc_hs_ins_intr, mbhc);
-	free_irq(mbhc->intr_ids->mbhc_btn_release_intr, mbhc);
-	free_irq(mbhc->intr_ids->mbhc_btn_press_intr, mbhc);
-	free_irq(mbhc->intr_ids->mbhc_sw_intr, mbhc);
-
-	mutex_lock(&mbhc->lock);
-	wcd_cancel_hs_detect_plug(mbhc,	&mbhc->correct_plug_swch);
-	cancel_work_sync(&mbhc->mbhc_plug_detect_work);
-	mutex_unlock(&mbhc->lock);
-
+	wcd_mbhc_stop(mbhc);
 	kfree(mbhc);
 }
 EXPORT_SYMBOL(wcd_mbhc_deinit);

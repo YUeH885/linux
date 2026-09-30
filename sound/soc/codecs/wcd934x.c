@@ -23,6 +23,7 @@
 #include "wcd-clsh-v2.h"
 #include "wcd-common.h"
 #include "wcd-mbhc-v2.h"
+#include "wcd934x.h"
 
 #include <dt-bindings/sound/qcom,wcd934x.h>
 
@@ -2450,12 +2451,15 @@ static int wcd934x_mbhc_request_micbias(struct snd_soc_component *component,
 	struct wcd934x_codec *wcd = dev_get_drvdata(component->dev);
 	int ret;
 
-	if (req == MICB_ENABLE)
-		__wcd934x_cdc_mclk_enable(wcd, true);
+	if (req == MICB_ENABLE) {
+		ret = __wcd934x_cdc_mclk_enable(wcd, true);
+		if (ret)
+			return ret;
+	}
 
 	ret = wcd934x_micbias_control(component, micb_num, req, false);
 
-	if (req == MICB_DISABLE)
+	if (req == MICB_DISABLE || (req == MICB_ENABLE && ret))
 		__wcd934x_cdc_mclk_enable(wcd, false);
 
 	return ret;
@@ -5761,14 +5765,30 @@ static int wcd934x_codec_set_jack(struct snd_soc_component *comp,
 
 	if (jack && !wcd->mbhc_started) {
 		ret = wcd_mbhc_start(wcd->mbhc, &wcd->mbhc_cfg, jack);
-		wcd->mbhc_started = true;
-	} else if (wcd->mbhc_started) {
+		if (!ret)
+			wcd->mbhc_started = true;
+	} else if (!jack && wcd->mbhc_started) {
 		wcd_mbhc_stop(wcd->mbhc);
 		wcd->mbhc_started = false;
 	}
-
 	return ret;
 }
+
+int wcd934x_get_impedance(struct snd_soc_component *component, u32 *left,
+			  u32 *right)
+{
+	struct wcd934x_codec *wcd;
+
+	if (!component || !left || !right)
+		return -EINVAL;
+
+	wcd = dev_get_drvdata(component->dev);
+	if (!wcd || !wcd->mbhc)
+		return -ENODEV;
+
+	return wcd_mbhc_get_impedance(wcd->mbhc, left, right);
+}
+EXPORT_SYMBOL_GPL(wcd934x_get_impedance);
 
 static const struct snd_soc_component_driver wcd934x_component_drv = {
 	.probe = wcd934x_comp_probe,
@@ -5826,6 +5846,9 @@ static int wcd934x_codec_parse_data(struct wcd934x_codec *wcd)
 	cfg->linein_th = 5000;
 	cfg->hs_thr = 1700;
 	cfg->hph_thr = 50;
+	cfg->report_mechanical_before_impedance =
+		of_property_read_bool(dev->of_node,
+				      "qcom,report-mechanical-before-impedance");
 
 	wcd_dt_parse_mbhc_data(dev, cfg);
 
