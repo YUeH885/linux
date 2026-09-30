@@ -9713,6 +9713,13 @@ L:	linux-can@vger.kernel.org
 S:	Maintained
 F:	drivers/net/can/usb/esd_usb.c
 
+ESS ES9218P AUDIO CODEC
+M:	Yuzu <yuzu23234@gmail.com>
+L:	linux-sound@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/sound/ess,es9218p.yaml
+F:	sound/soc/codecs/es9218p.*
+
 ESWIN DEVICETREES
 M:	Min Lin <linmin@eswincomputing.com>
 M:	Pinkesh Vaghela <pinkesh.vaghela@einfochips.com>
