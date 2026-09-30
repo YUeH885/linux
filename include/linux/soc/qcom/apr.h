@@ -143,6 +143,7 @@ struct apr_device {
 	char name[APR_NAME_SIZE];
 	const char *service_path;
 	struct pkt_router_svc svc;
+	struct apr_driver *driver;
 	struct list_head node;
 };
 
