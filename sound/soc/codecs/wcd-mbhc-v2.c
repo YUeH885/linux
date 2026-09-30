@@ -1557,17 +1557,20 @@ int wcd_mbhc_start(struct wcd_mbhc *mbhc, struct wcd_mbhc_config *cfg,
 
 	mbhc->cfg = cfg;
 	mbhc->jack = jack;
+	WRITE_ONCE(mbhc->started, true);
 
 	ret = wcd_mbhc_request_irqs(mbhc);
-	if (ret)
+	if (ret) {
+		WRITE_ONCE(mbhc->started, false);
 		return ret;
-	WRITE_ONCE(mbhc->started, true);
+	}
+	/* Match the codec IRQ setup: arm mechanical detection before enabling it. */
+	enable_irq(mbhc->intr_ids->mbhc_sw_intr);
 	ret = wcd_mbhc_initialise(mbhc);
 	if (ret) {
 		wcd_mbhc_stop(mbhc);
 		return ret;
 	}
-	enable_irq(mbhc->intr_ids->mbhc_sw_intr);
 	enable_irq(mbhc->intr_ids->mbhc_btn_press_intr);
 	enable_irq(mbhc->intr_ids->mbhc_btn_release_intr);
 	enable_irq(mbhc->intr_ids->hph_left_ocp);
