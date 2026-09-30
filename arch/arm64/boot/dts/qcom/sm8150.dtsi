@@ -19,6 +19,9 @@
 #include <dt-bindings/interconnect/qcom,osm-l3.h>
 #include <dt-bindings/interconnect/qcom,sm8150.h>
 #include <dt-bindings/clock/qcom,sm8150-camcc.h>
+#include <dt-bindings/soc/qcom,apr.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
 #include <dt-bindings/thermal/thermal.h>
 
 / {
@@ -2400,6 +2403,38 @@
 			#interrupt-cells = <2>;
 			wakeup-parent = <&pdc>;
 
+			tert_mi2s_active: tert-mi2s-active-state {
+				pins = "gpio133", "gpio134";
+				function = "ter_mi2s";
+				drive-strength = <8>;
+				bias-disable;
+				output-high;
+			};
+
+			tert_mi2s_dout_active: tert-mi2s-dout-active-state {
+				pins = "gpio131";
+				function = "ter_mi2s";
+				drive-strength = <8>;
+				bias-disable;
+				output-high;
+			};
+
+			tert_mi2s_sleep: tert-mi2s-sleep-state {
+				pins = "gpio133", "gpio134";
+				function = "gpio";
+				drive-strength = <2>;
+				bias-pull-down;
+				input-enable;
+			};
+
+			tert_mi2s_dout_sleep: tert-mi2s-dout-sleep-state {
+				pins = "gpio131";
+				function = "gpio";
+				drive-strength = <2>;
+				bias-pull-down;
+				input-enable;
+			};
+
 			qup_i2c0_default: qup-i2c0-default-state {
 				pins = "gpio0", "gpio1";
 				function = "qup0";
@@ -4357,6 +4392,83 @@
 				qcom,remote-pid = <2>;
 				mboxes = <&apss_shared 8>;
 
+				apr: apr {
+					compatible = "qcom,apr-v2";
+					qcom,glink-channels = "apr_audio_svc";
+					qcom,domain = <APR_DOMAIN_ADSP>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+					qcom,intents = <512 20>;
+
+					q6core: service@3 {
+						compatible = "qcom,q6core";
+						reg = <APR_SVC_ADSP_CORE>;
+						qcom,protection-domain = "avs/audio",
+								 "msm/adsp/audio_pd";
+					};
+
+					q6afe: service@4 {
+						compatible = "qcom,q6afe";
+						reg = <APR_SVC_AFE>;
+						qcom,protection-domain = "avs/audio",
+								 "msm/adsp/audio_pd";
+
+						q6afedai: dais {
+							compatible = "qcom,q6afe-dais";
+							#address-cells = <1>;
+							#size-cells = <0>;
+							#sound-dai-cells = <1>;
+
+							dai@14 {
+								reg = <TERTIARY_MI2S_RX>;
+								qcom,sd-lines = <1>;
+							};
+						};
+					};
+
+					q6asm: service@7 {
+						compatible = "qcom,q6asm";
+						reg = <APR_SVC_ASM>;
+						qcom,protection-domain = "avs/audio",
+								 "msm/adsp/audio_pd";
+
+					q6asmdai: dais {
+						compatible = "qcom,q6asm-dais";
+						#address-cells = <1>;
+						#size-cells = <0>;
+						#sound-dai-cells = <1>;
+						iommus = <&apps_smmu 0x1b21 0x0>;
+
+						dai@0 {
+							reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
+							direction = <Q6ASM_DAI_TX_RX>;
+						};
+
+						dai@1 {
+							reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
+							direction = <Q6ASM_DAI_TX_RX>;
+						};
+
+						dai@2 {
+							reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
+							direction = <Q6ASM_DAI_TX_RX>;
+						};
+					};
+					};
+
+					q6adm: service@8 {
+						compatible = "qcom,q6adm";
+						reg = <APR_SVC_ADM>;
+						qcom,protection-domain = "avs/audio",
+								 "msm/adsp/audio_pd";
+
+						q6routing: routing {
+							compatible = "qcom,q6adm-routing";
+							#sound-dai-cells = <0>;
+						};
+					};
+				};
+
 				fastrpc {
 					compatible = "qcom,fastrpc";
 					qcom,glink-channels = "fastrpcglink-apps-dsp";
@@ -4386,6 +4498,23 @@
 			};
 		};
 
+		slim: slim-ngd@171c0000 {
+			compatible = "qcom,slim-ngd-v2.1.0";
+			reg = <0 0x171c0000 0 0x2c000>;
+			interrupts = <GIC_SPI 163 IRQ_TYPE_LEVEL_HIGH>;
+
+			dmas = <&slimbam 3>, <&slimbam 4>;
+			dma-names = "rx", "tx";
+
+			/* Preserve downstream stream IDs and stream-match masks. */
+			iommus = <&apps_smmu 0x1b46 0x8>,
+				 <&apps_smmu 0x1b4d 0x2>,
+				 <&apps_smmu 0x1b50 0x1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
 		intc: interrupt-controller@17a00000 {
 			compatible = "arm,gic-v3";
 			interrupt-controller;
@@ -4394,6 +4523,20 @@
 			reg = <0x0 0x17a00000 0x0 0x10000>,	/* GICD */
 			      <0x0 0x17a60000 0x0 0x100000>;	/* GICR * 8 */
 			interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
+		slimbam: dma-controller@17184000 {
+			compatible = "qcom,bam-v1.7.4", "qcom,bam-v1.7.0";
+			qcom,controlled-remotely;
+			reg = <0 0x17184000 0 0x2a000>;
+			num-channels = <23>;
+			interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>;
+			#dma-cells = <1>;
+			qcom,ee = <1>;
+			qcom,num-ees = <4>;
+			iommus = <&apps_smmu 0x1b46 0x8>,
+				 <&apps_smmu 0x1b4d 0x2>,
+				 <&apps_smmu 0x1b50 0x1>;
 		};
 
 		apss_shared: mailbox@17c00000 {

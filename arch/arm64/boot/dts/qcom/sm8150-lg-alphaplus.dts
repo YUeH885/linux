@@ -8,6 +8,9 @@
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include <dt-bindings/usb/pd.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
+#include <dt-bindings/sound/qcom,wcd934x.h>
 #include "sm8150.dtsi"
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
@@ -125,6 +128,96 @@
 		regulator-always-on;
 		regulator-boot-on;
 		vin-supply = <&vph_pwr>;
+	};
+
+	sound {
+		compatible = "qcom,sm8150-lg-alphaplus-sndcard",
+			     "qcom,sm8150-sndcard";
+		model = "LG LM-G820N";
+		hph-en0-gpios = <&wcdgpio 3 GPIO_ACTIVE_HIGH>;
+		hph-en1-gpios = <&wcdgpio 4 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "tert-mi2s-active", "tert-mi2s-sleep";
+		pinctrl-0 = <&tert_mi2s_active &tert_mi2s_dout_active>;
+		pinctrl-1 = <&tert_mi2s_sleep &tert_mi2s_dout_sleep>;
+		audio-routing =
+			"RX_BIAS", "MCLK",
+			"WCD Headphone Jack", "HPHL",
+			"WCD Headphone Jack", "HPHR",
+			"ES9218P Headphone Jack", "ES9218P OUT",
+			"AMIC1", "MIC BIAS1",
+			"AMIC1", "Handset Mic",
+			"AMIC2", "MIC BIAS2",
+			"AMIC2", "Headset Mic",
+			"AMIC3", "MIC BIAS3",
+			"AMIC3", "Handset 2nd Mic",
+			"AMIC4", "MIC BIAS4",
+			"AMIC4", "Handset 3rd Mic",
+			"DMIC0 Pin", "MIC BIAS1",
+			"DMIC0 Pin", "Digital Mic0";
+
+		mm1-dai-link {
+			link-name = "MultiMedia1";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+			};
+		};
+
+		mm2-dai-link {
+			link-name = "MultiMedia2";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+			};
+		};
+
+		mm3-dai-link {
+			link-name = "MultiMedia3";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+			};
+		};
+
+		slim-dai-link {
+			link-name = "SLIM Playback";
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_0_RX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&wcd9340 AIF1_PB>;
+			};
+		};
+
+		slimcap-dai-link {
+			link-name = "SLIM Capture";
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_0_TX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&wcd9340 AIF1_CAP>;
+			};
+		};
+
+		es9218p-dai-link {
+			link-name = "ES9218P Playback";
+			cpu {
+				sound-dai = <&q6afedai TERTIARY_MI2S_RX>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&es9218p>;
+			};
+		};
 	};
 };
 
@@ -308,9 +401,17 @@
 		vdd-rgb-supply = <&vreg_bob>;
 
 		vreg_bob: bob {
-			regulator-min-microvolt = <3008000>;
+			/*
+			 * Downstream boots BOB at 3312 mV (LG overlay
+			 * init-voltage) to feed the WCD9340 3.3 V mic-bias
+			 * comparator supply. The always-on vote holds the
+			 * aggregate at 3312 mV; consumers may still request
+			 * up to the 4000 mV ceiling.
+			 */
+			regulator-min-microvolt = <3312000>;
 			regulator-max-microvolt = <4000000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
+			regulator-always-on;
 			regulator-allow-bypass;
 		};
 
@@ -466,10 +567,13 @@
 
 &tlmm {
 	/*
-	 * Reserve the eGPIO range except GPIO96 for SD card detect and
-	 * GPIO152 for touchscreen VDD. Touch IRQ uses PDC90, not TLMM122.
+	 * Reserve the eGPIO range except GPIO96 for SD card detect,
+	 * GPIO152 for touchscreen VDD, GPIO123 for the WCD9340 interrupt,
+	 * GPIO126-135 for the secondary/tertiary MI2S interfaces and
+	 * GPIO143 for the codec reset. Touch IRQ uses PDC90, not TLMM122.
 	 */
-	gpio-reserved-ranges = <93 3>, <97 55>, <153 22>;
+	gpio-reserved-ranges = <93 3>, <97 26>, <124 2>, <136 7>, <144 8>,
+			       <153 22>;
 
 	bluetooth_uart_default: bluetooth-uart-default-state {
 		cts-rx-pins {
@@ -558,6 +662,13 @@
 	sdc2_card_det: sdc2-card-det-state {
 		pins = "gpio96";
 		function = "gpio";
+		bias-pull-down;
+	};
+
+	wcd_intr_default: wcd-intr-default-state {
+		pins = "gpio123";
+		function = "gpio";
+		drive-strength = <2>;
 		bias-pull-down;
 	};
 };
@@ -771,6 +882,21 @@
 	};
 };
 
+&i2c4 {
+	es9218p: es9218p@48 {
+		compatible = "ess,es9218p";
+		reg = <0x48>;
+		#sound-dai-cells = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&es9218_power_default &es9218_mode_default
+			     &es9218_reset_default>;
+		power-gpios = <&pm8150_gpios 10 GPIO_ACTIVE_HIGH>;
+		mode-gpios = <&pm8150_gpios 9 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&tlmm 24 GPIO_ACTIVE_HIGH>;
+		ess,use-internal-ldo;
+	};
+};
+
 &qupv3_id_1 {
 	status = "okay";
 };
@@ -853,6 +979,105 @@
 &mdss_dsi0_phy {
 	status = "okay";
 	vdds-supply = <&vreg_l5a_0p875>;
+};
+
+&pm8150_gpios {
+	es9218_power_default: es9218-power-default-state {
+		pins = "gpio10";
+		function = "normal";
+		output-low;
+		bias-pull-down;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		power-source = <1>;
+	};
+
+	es9218_mode_default: es9218-mode-default-state {
+		pins = "gpio9";
+		function = "normal";
+		output-low;
+		bias-pull-down;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		power-source = <1>;
+	};
+};
+
+&tlmm {
+	es9218_reset_default: es9218-reset-default-state {
+		pins = "gpio24";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
+};
+
+&slim {
+	status = "okay";
+
+	slim@1 {
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		wcd9340_ifd: ifd@0,0 {
+			compatible = "slim217,250";
+			reg = <0 0>;
+		};
+
+		wcd9340: codec@1,0 {
+			compatible = "slim217,250";
+			reg = <1 0>;
+			slim-ifc-dev = <&wcd9340_ifd>;
+
+			#sound-dai-cells = <1>;
+
+			interrupts-extended = <&tlmm 123 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			clock-names = "extclk";
+			clocks = <&rpmhcc RPMH_LN_BB_CLK2>;
+
+			#clock-cells = <0>;
+			clock-frequency = <9600000>;
+			clock-output-names = "mclk";
+
+			reset-gpios = <&tlmm 143 GPIO_ACTIVE_HIGH>;
+
+			vdd-buck-supply = <&vreg_s4a_1p8>;
+			vdd-buck-sido-supply = <&vreg_s4a_1p8>;
+			vdd-tx-supply = <&vreg_s4a_1p8>;
+			vdd-rx-supply = <&vreg_s4a_1p8>;
+			vdd-io-supply = <&vreg_s4a_1p8>;
+
+			qcom,micbias1-microvolt = <1800000>;
+			qcom,micbias2-microvolt = <2100000>;
+			qcom,micbias3-microvolt = <1800000>;
+			qcom,micbias4-microvolt = <1800000>;
+			/* Original board config: HPHL switch NO, ground switch NC. */
+			qcom,ground-jack-type-normally-closed;
+
+			qcom,mbhc-buttons-vthreshold-microvolt =
+				<75000 150000 237000 500000 500000 500000 500000 500000>;
+			qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
+			qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
+			qcom,report-mechanical-before-impedance;
+
+			pinctrl-0 = <&wcd_intr_default>;
+			pinctrl-names = "default";
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			wcdgpio: gpio-controller@42 {
+				compatible = "qcom,wcd9340-gpio";
+				gpio-controller;
+				#gpio-cells = <2>;
+				reg = <0x42 0x2>;
+				gpio-line-names = "", "", "", "HPH_HIFI", "HPH_SWITCH";
+			};
+		};
+	};
 };
 
 &remoteproc_mpss {

@@ -22,6 +22,10 @@ properties:
   reg:
     maxItems: 1
 
+  gpio-line-names:
+    minItems: 1
+    maxItems: 5
+
   gpio-controller: true
 
   '#gpio-cells':
