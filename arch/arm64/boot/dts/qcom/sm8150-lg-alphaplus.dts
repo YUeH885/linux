@@ -141,6 +141,10 @@
 		pinctrl-1 = <&tert_mi2s_sleep &tert_mi2s_dout_sleep>;
 		audio-routing =
 			"RX_BIAS", "MCLK",
+			"MIC BIAS1", "MCLK",
+			"MIC BIAS2", "MCLK",
+			"MIC BIAS3", "MCLK",
+			"MIC BIAS4", "MCLK",
 			"WCD Headphone Jack", "HPHL",
 			"WCD Headphone Jack", "HPHR",
 			"ES9218P Headphone Jack", "ES9218P OUT",
@@ -152,7 +156,7 @@
 			"AMIC3", "Handset 2nd Mic",
 			"AMIC4", "MIC BIAS4",
 			"AMIC4", "Handset 3rd Mic",
-			"DMIC0 Pin", "MIC BIAS1",
+			"DMIC0", "MIC BIAS1",
 			"DMIC0 Pin", "Digital Mic0";
 
 		mm1-dai-link {
