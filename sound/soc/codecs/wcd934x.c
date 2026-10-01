@@ -497,6 +497,7 @@ struct wcd_slim_codec_dai_data {
 	struct list_head slim_ch_list;
 	struct slim_stream_config sconfig;
 	struct slim_stream_runtime *sruntime;
+	bool running;
 };
 
 static const struct regmap_range_cfg wcd934x_ifc_ranges[] = {
@@ -1754,6 +1755,11 @@ static int wcd934x_slim_set_hw_params(struct wcd934x_codec *wcd,
 	}
 
 	dai_data->sruntime = slim_stream_allocate(wcd->sdev, "WCD934x-SLIM");
+	if (IS_ERR(dai_data->sruntime)) {
+		ret = PTR_ERR(dai_data->sruntime);
+		dai_data->sruntime = NULL;
+		goto err;
+	}
 
 	return 0;
 
@@ -1850,6 +1856,31 @@ static int wcd934x_hw_params(struct snd_pcm_substream *substream,
 	return wcd934x_slim_set_hw_params(wcd, &wcd->dai[dai->id], substream->stream);
 }
 
+static int wcd934x_stop_slim(struct wcd_slim_codec_dai_data *dai_data)
+{
+	int ret, unprepare_ret;
+
+	if (!dai_data->running)
+		return 0;
+	ret = slim_stream_disable(dai_data->sruntime);
+	unprepare_ret = slim_stream_unprepare(dai_data->sruntime);
+	dai_data->running = false;
+	return ret ?: unprepare_ret;
+}
+
+static int wcd934x_free_slim(struct wcd_slim_codec_dai_data *dai_data)
+{
+	int ret = wcd934x_stop_slim(dai_data);
+
+	if (dai_data->sruntime) {
+		slim_stream_free(dai_data->sruntime);
+		dai_data->sruntime = NULL;
+	}
+	kfree(dai_data->sconfig.chs);
+	dai_data->sconfig.chs = NULL;
+	return ret;
+}
+
 static int wcd934x_hw_free(struct snd_pcm_substream *substream,
 			   struct snd_soc_dai *dai)
 {
@@ -1860,9 +1891,7 @@ static int wcd934x_hw_free(struct snd_pcm_substream *substream,
 
 	dai_data = &wcd->dai[dai->id];
 
-	kfree(dai_data->sconfig.chs);
-
-	return 0;
+	return wcd934x_free_slim(dai_data);
 }
 
 static int wcd934x_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -1871,6 +1900,7 @@ static int wcd934x_trigger(struct snd_pcm_substream *substream, int cmd,
 	struct wcd_slim_codec_dai_data *dai_data;
 	struct wcd934x_codec *wcd;
 	struct slim_stream_config *cfg;
+	int ret;
 
 	wcd = snd_soc_component_get_drvdata(dai->component);
 
@@ -1881,15 +1911,20 @@ static int wcd934x_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		cfg = &dai_data->sconfig;
-		slim_stream_prepare(dai_data->sruntime, cfg);
-		slim_stream_enable(dai_data->sruntime);
+		ret = slim_stream_prepare(dai_data->sruntime, cfg);
+		if (ret)
+			return ret;
+		ret = slim_stream_enable(dai_data->sruntime);
+		if (ret) {
+			slim_stream_unprepare(dai_data->sruntime);
+			return ret;
+		}
+		dai_data->running = true;
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		slim_stream_disable(dai_data->sruntime);
-		slim_stream_unprepare(dai_data->sruntime);
-		break;
+		return wcd934x_stop_slim(dai_data);
 	default:
 		break;
 	}
@@ -3004,6 +3039,9 @@ static int wcd934x_comp_probe(struct snd_soc_component *component)
 	for (i = 0; i < NUM_CODEC_DAIS; i++)
 		INIT_LIST_HEAD(&wcd->dai[i].slim_ch_list);
 
+	/* Recreated DAPM controls must rebuild the newly empty channel lists. */
+	memset(wcd->tx_port_value, 0, sizeof(wcd->tx_port_value));
+	memset(wcd->rx_port_value, 0, sizeof(wcd->rx_port_value));
 
 	ret = wcd934x_init_dmic(component);
 	if (ret) {
@@ -3020,8 +3058,14 @@ static int wcd934x_comp_probe(struct snd_soc_component *component)
 static void wcd934x_comp_remove(struct snd_soc_component *comp)
 {
 	struct wcd934x_codec *wcd = dev_get_drvdata(comp->dev);
+	int i, ret;
 
 	wcd934x_mbhc_deinit(comp);
+	for (i = 0; i < NUM_CODEC_DAIS; i++) {
+		ret = wcd934x_free_slim(&wcd->dai[i]);
+		if (ret)
+			dev_err(wcd->dev, "failed to stop SLIM stream %d: %d\n", i, ret);
+	}
 	wcd_clsh_ctrl_free(wcd->clsh_ctrl);
 }
 
