@@ -85,10 +85,12 @@ properties:
 
   pinctrl-names:
     minItems: 1
-    maxItems: 2
+    maxItems: 4
 
   pinctrl-0: true
   pinctrl-1: true
+  pinctrl-2: true
+  pinctrl-3: true
 
 patternProperties:
   ".*-dai-link$":

@@ -18,6 +18,10 @@ properties:
     enum:
       - qcom,q6core
 
+  firmware-name:
+    description: Custom topology data registered before its first use.
+    maxItems: 1
+
 required:
   - compatible
 
