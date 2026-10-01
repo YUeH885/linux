@@ -38,10 +38,109 @@ struct sm8150_snd_data {
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *tert_mi2s_active;
 	struct pinctrl_state *tert_mi2s_sleep;
+	struct pinctrl_state *sec_mi2s_active;
+	struct pinctrl_state *sec_mi2s_sleep;
 	unsigned int tert_mi2s_clk_count;
+	unsigned int sec_mi2s_clk_count;
 	bool jack_setup;
 	bool slim_port_setup;
 	bool jack_notifier_registered;
+};
+
+static int sm8150_sec_mi2s_hw_params(struct snd_pcm_substream *substream,
+				     struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *codec_dai;
+	unsigned int width = params_width(params);
+	unsigned int rate = params_rate(params);
+	unsigned int bclk_rate;
+	int ret, i;
+
+	if (params_channels(params) != 2 || (width != 16 && width != 24 &&
+					     width != 32) || rate != 48000)
+		return -EINVAL;
+
+	ret = snd_soc_dai_set_fmt(cpu_dai,
+				  SND_SOC_DAIFMT_BP_FP |
+				  SND_SOC_DAIFMT_NB_NF |
+				  SND_SOC_DAIFMT_I2S);
+	if (ret)
+		return ret;
+
+	for_each_rtd_codec_dais(rtd, i, codec_dai) {
+		ret = snd_soc_dai_set_fmt(codec_dai,
+					  SND_SOC_DAIFMT_BC_FC |
+					  SND_SOC_DAIFMT_NB_NF |
+					  SND_SOC_DAIFMT_I2S);
+		if (ret)
+			return ret;
+	}
+
+	bclk_rate = rate * params_channels(params) * 32;
+	return snd_soc_dai_set_sysclk(cpu_dai,
+				      Q6AFE_LPASS_CLK_ID_SEC_MI2S_IBIT,
+				      bclk_rate, SNDRV_PCM_STREAM_PLAYBACK);
+}
+
+static int sm8150_sec_mi2s_startup(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	int ret;
+
+	if (!data->sec_mi2s_clk_count && data->sec_mi2s_active) {
+		ret = pinctrl_select_state(data->pinctrl, data->sec_mi2s_active);
+		if (ret)
+			return ret;
+	}
+	data->sec_mi2s_clk_count++;
+	return 0;
+}
+
+static void sm8150_sec_mi2s_shutdown(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	int ret;
+
+	if (data->sec_mi2s_clk_count && --data->sec_mi2s_clk_count == 0) {
+		ret = snd_soc_dai_set_sysclk(cpu_dai,
+					     Q6AFE_LPASS_CLK_ID_SEC_MI2S_IBIT, 0,
+					     SNDRV_PCM_STREAM_PLAYBACK);
+		if (ret)
+			dev_err(rtd->dev, "failed to disable secondary MI2S clock: %d\n", ret);
+		if (data->sec_mi2s_sleep) {
+			ret = pinctrl_select_state(data->pinctrl, data->sec_mi2s_sleep);
+			if (ret)
+				dev_err(rtd->dev, "failed to restore secondary MI2S pins: %d\n",
+					ret);
+		}
+	}
+}
+
+static int sm8150_sec_mi2s_fixup(struct snd_soc_pcm_runtime *rtd,
+				 struct snd_pcm_hw_params *params)
+{
+	struct snd_interval *rate = hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+	struct snd_interval *channels = hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
+	struct snd_mask *format = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+
+	rate->min = 48000;
+	rate->max = 48000;
+	channels->min = 2;
+	channels->max = 2;
+	snd_mask_none(format);
+	snd_mask_set_format(format, SNDRV_PCM_FORMAT_S32_LE);
+	return 0;
+}
+
+static const struct snd_soc_ops sm8150_sec_mi2s_ops = {
+	.hw_params = sm8150_sec_mi2s_hw_params,
+	.startup = sm8150_sec_mi2s_startup,
+	.shutdown = sm8150_sec_mi2s_shutdown,
 };
 
 static struct snd_soc_jack_pin sm8150_jack_pins[] = {
@@ -429,6 +528,9 @@ static void sm8150_add_ops(struct snd_soc_card *card)
 		if (link->id == TERTIARY_MI2S_RX) {
 			link->ops = &sm8150_tert_mi2s_ops;
 			link->be_hw_params_fixup = sm8150_mi2s_be_hw_params_fixup;
+		} else if (link->id == SECONDARY_MI2S_RX) {
+			link->ops = &sm8150_sec_mi2s_ops;
+			link->be_hw_params_fixup = sm8150_sec_mi2s_fixup;
 		} else if (link->no_pcm == 1) {
 			link->ops = &sm8150_be_ops;
 			if (link->id == SLIMBUS_0_TX)
@@ -486,6 +588,17 @@ static int sm8150_snd_platform_probe(struct platform_device *pdev)
 		    IS_ERR(data->tert_mi2s_sleep))
 			return dev_err_probe(dev, -EINVAL,
 					     "missing tertiary MI2S pin states\n");
+		data->sec_mi2s_active = pinctrl_lookup_state(data->pinctrl,
+							     "sec-mi2s-active");
+		data->sec_mi2s_sleep = pinctrl_lookup_state(data->pinctrl,
+							    "sec-mi2s-sleep");
+		if (IS_ERR(data->sec_mi2s_active) && IS_ERR(data->sec_mi2s_sleep)) {
+			data->sec_mi2s_active = NULL;
+			data->sec_mi2s_sleep = NULL;
+		} else if (IS_ERR(data->sec_mi2s_active) || IS_ERR(data->sec_mi2s_sleep)) {
+			return dev_err_probe(dev, -EINVAL,
+					     "missing secondary MI2S pin states\n");
+		}
 	}
 
 	card->late_probe = sm8150_late_probe;

@@ -136,9 +136,12 @@
 		model = "LG LM-G820N";
 		hph-en0-gpios = <&wcdgpio 3 GPIO_ACTIVE_HIGH>;
 		hph-en1-gpios = <&wcdgpio 4 GPIO_ACTIVE_HIGH>;
-		pinctrl-names = "tert-mi2s-active", "tert-mi2s-sleep";
+		pinctrl-names = "tert-mi2s-active", "tert-mi2s-sleep",
+				"sec-mi2s-active", "sec-mi2s-sleep";
 		pinctrl-0 = <&tert_mi2s_active &tert_mi2s_dout_active>;
 		pinctrl-1 = <&tert_mi2s_sleep &tert_mi2s_dout_sleep>;
+		pinctrl-2 = <&sec_mi2s_active &sec_mi2s_sd1_active>;
+		pinctrl-3 = <&sec_mi2s_sleep &sec_mi2s_sd1_sleep>;
 		audio-routing =
 			"RX_BIAS", "MCLK",
 			"MIC BIAS1", "MCLK",
@@ -220,6 +223,19 @@
 			};
 			codec {
 				sound-dai = <&es9218p>;
+			};
+		};
+
+		speaker-dai-link {
+			link-name = "TFA9872 Speaker";
+			cpu {
+				sound-dai = <&q6afedai SECONDARY_MI2S_RX>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&tfa9872>;
 			};
 		};
 	};
@@ -849,6 +865,10 @@
 	};
 };
 
+&q6core {
+	firmware-name = "Speaker_afe_custom_topology.bin";
+};
+
 &qupv3_id_0 {
 	status = "okay";
 };
@@ -887,6 +907,14 @@
 };
 
 &i2c4 {
+	tfa9872: amplifier@34 {
+		compatible = "nxp,tfa9872";
+		reg = <0x34>;
+		#sound-dai-cells = <0>;
+		qcom,q6afe = <&q6afe>;
+		firmware-name = "Tfa9872.cnt";
+	};
+
 	es9218p: es9218p@48 {
 		compatible = "ess,es9218p";
 		reg = <0x48>;
