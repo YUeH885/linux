@@ -11,12 +11,17 @@
 #include <linux/sched.h>
 #include <linux/module.h>
 #include <linux/kref.h>
+#include <linux/notifier.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <linux/device/bus.h>
 #include <linux/spinlock.h>
 #include <linux/delay.h>
+#include <linux/workqueue.h>
 #include <linux/soc/qcom/apr.h>
 #include <sound/soc.h>
+#include <sound/qcom/q6afe-tfadsp.h>
 #include <sound/soc-dai.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -28,11 +33,19 @@
 #define AFE_PORT_CMD_DEVICE_START	0x000100E5
 #define AFE_PORT_CMD_DEVICE_STOP	0x000100E6
 #define AFE_PORT_CMD_SET_PARAM_V2	0x000100EF
+#define AFE_PORT_CMD_GET_PARAM_V2	0x000100F0
 #define AFE_SVC_CMD_SET_PARAM		0x000100f3
 #define AFE_PORT_CMDRSP_GET_PARAM_V2	0x00010106
 #define AFE_PARAM_ID_HDMI_CONFIG	0x00010210
 #define AFE_MODULE_AUDIO_DEV_INTERFACE	0x0001020C
+#define AFE_PARAM_ID_SET_TOPOLOGY	0x0001025A
 #define AFE_MODULE_TDM			0x0001028A
+#define AFE_MODULE_ID_TFADSP		0x1000B910
+#define AFE_PARAM_ID_TFADSP_SEND_MSG	0x1000B921
+#define AFE_PARAM_ID_TFADSP_READ_MSG	0x1000B922
+#define AFE_OPCODE_TFADSP_STATUS	0x00010B01
+#define AFE_API_VERSION_TOPOLOGY	1
+#define AFE_TFADSP_DATA_CHUNK		448
 
 #define AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG 0x00010235
 #define AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS    0x000102A5
@@ -396,6 +409,56 @@ struct q6afe {
 	wait_queue_head_t wait;
 	struct list_head port_list;
 	spinlock_t port_list_lock;
+	/* Keep all chunks of a TFADSP transaction together. */
+	struct mutex tfadsp_lock;
+	struct blocking_notifier_head tfadsp_notifier;
+	struct workqueue_struct *tfadsp_event_wq;
+	wait_queue_head_t tfadsp_wait;
+	int tfadsp_status;
+	int tfadsp_config_status;
+	struct kref refcount;
+	bool service_down;
+};
+
+struct afe_port_param_data_v1 {
+	u32 module_id;
+	u32 param_id;
+	u16 param_size;
+	u16 reserved;
+} __packed;
+
+struct afe_port_cmd_set_param_v2_packet {
+	struct apr_hdr hdr;
+	u16 port_id;
+	u16 payload_size;
+	u32 payload_address_lsw;
+	u32 payload_address_msw;
+	u32 mem_map_handle;
+	u8 data[];
+} __packed;
+
+struct afe_port_cmd_get_param_v2 {
+	struct apr_hdr hdr;
+	u16 port_id;
+	u16 payload_size;
+	u32 payload_address_lsw;
+	u32 payload_address_msw;
+	u32 mem_map_handle;
+	u32 module_id;
+	u32 param_id;
+	struct afe_port_param_data_v1 param;
+} __packed;
+
+struct afe_param_id_set_topology_cfg {
+	u32 minor_version;
+	u32 topology_id;
+} __packed;
+
+struct q6afe_tfadsp_event_work {
+	struct work_struct work;
+	struct q6afe *afe;
+	struct q6afe_tfadsp_event_data data;
+	enum q6afe_tfadsp_event event;
 };
 
 struct afe_port_cmd_device_start {
@@ -655,9 +718,34 @@ struct q6afe_port {
 	int id;
 	int cfg_type;
 	struct q6afe *afe;
+	struct device *afe_dev;
 	struct kref refcount;
 	struct list_head node;
+	/* Serialize reply copies with timeout buffer removal. */
+	spinlock_t tfadsp_rx_lock;
+	u8 *tfadsp_rx_buf;
+	size_t tfadsp_rx_capacity;
+	bool tfadsp;
+	size_t tfadsp_rx_size;
 };
+
+static struct q6afe_port *q6afe_port_get_from_afe(struct q6afe *afe,
+						  struct device *dev, int id);
+
+static void q6afe_free(struct kref *ref)
+{
+	struct q6afe *afe = container_of(ref, struct q6afe, refcount);
+
+	if (afe->tfadsp_event_wq)
+		destroy_workqueue(afe->tfadsp_event_wq);
+	put_device(afe->dev);
+	kfree(afe);
+}
+
+static void q6afe_put(struct q6afe *afe)
+{
+	kref_put(&afe->refcount, q6afe_free);
+}
 
 struct afe_cmd_remote_lpass_core_hw_vote_request {
 	uint32_t  hw_block_id;
@@ -985,7 +1073,20 @@ static void q6afe_port_free(struct kref *ref)
 	scoped_guard(spinlock_irqsave, &afe->port_list_lock)
 		list_del(&port->node);
 	kfree(port->scfg);
+	put_device(port->afe_dev);
 	kfree(port);
+	q6afe_put(afe);
+}
+
+static void q6afe_tfadsp_event_work(struct work_struct *work)
+{
+	struct q6afe_tfadsp_event_work *event_work =
+		container_of(work, struct q6afe_tfadsp_event_work, work);
+	struct q6afe *afe = event_work->afe;
+
+	blocking_notifier_call_chain(&afe->tfadsp_notifier, event_work->event,
+				     &event_work->data);
+	kfree(event_work);
 }
 
 static struct q6afe_port *q6afe_find_port(struct q6afe *afe, int token)
@@ -1010,25 +1111,108 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 	const struct aprv2_ibasic_rsp_result_t *res;
 	const struct apr_hdr *hdr = &data->hdr;
 	struct q6afe_port *port;
+	unsigned int event;
+	u32 event_value;
+	struct q6afe_tfadsp_event_work *event_work;
 
 	if (!data->payload_size)
 		return 0;
 
 	res = data->payload;
 	switch (hdr->opcode) {
+	case AFE_PORT_CMDRSP_GET_PARAM_V2: {
+		const u32 *payload = data->payload;
+		const struct afe_port_param_data_v1 *param;
+
+		if (!payload || data->payload_size < sizeof(*payload))
+			return -EINVAL;
+
+		port = q6afe_find_port(afe, hdr->token);
+		if (!port)
+			return -ENOENT;
+
+		scoped_guard(spinlock_irqsave, &port->tfadsp_rx_lock) {
+			port->result.opcode = AFE_PORT_CMDRSP_GET_PARAM_V2;
+			port->result.status = payload[0];
+			port->tfadsp_rx_size = 0;
+			if (data->payload_size >= sizeof(*payload) + sizeof(*param)) {
+				param = (const void *)(payload + 1);
+				if (param->module_id != AFE_MODULE_ID_TFADSP ||
+				    param->param_id != AFE_PARAM_ID_TFADSP_READ_MSG ||
+				    param->param_size > data->payload_size - sizeof(*payload) -
+							 sizeof(*param) ||
+				    param->param_size > Q6AFE_TFADSP_MAX_MESSAGE_SIZE) {
+					port->result.status = ADSP_EBADPARAM;
+				} else if (port->tfadsp_rx_buf &&
+					   param->param_size > port->tfadsp_rx_capacity) {
+					port->result.status = ADSP_EBADPARAM;
+				} else if (param->param_size && port->tfadsp_rx_buf) {
+					memcpy(port->tfadsp_rx_buf, param + 1, param->param_size);
+					port->tfadsp_rx_size = param->param_size;
+				}
+			} else if (data->payload_size == 2 * sizeof(u32)) {
+				port->result.status = payload[1];
+			} else if (data->payload_size != sizeof(*payload)) {
+				port->result.status = ADSP_EBADPARAM;
+			}
+		}
+		wake_up(&port->wait);
+		kref_put(&port->refcount, q6afe_port_free);
+		return 0;
+	}
+	case AFE_OPCODE_TFADSP_STATUS:
+		if (data->payload_size < 2 * sizeof(u32))
+			return -EINVAL;
+		event = *(u32 *)data->payload;
+		event_value = *((u32 *)data->payload + 1);
+		dev_info(afe->dev, "TFADSP event=%u value=%u\n", event,
+			 event_value);
+		switch (event) {
+		case Q6AFE_TFADSP_EVENT_INIT:
+		case Q6AFE_TFADSP_EVENT_CLOSE:
+		case Q6AFE_TFADSP_EVENT_CONFIGURED:
+		case Q6AFE_TFADSP_EVENT_RX_DISABLED:
+		case Q6AFE_TFADSP_EVENT_TX_DISABLED:
+			break;
+		default:
+			dev_dbg(afe->dev, "Unknown TFADSP event %u\n", event);
+			return 0;
+		}
+		if (event == Q6AFE_TFADSP_EVENT_INIT || event == Q6AFE_TFADSP_EVENT_CLOSE) {
+			WRITE_ONCE(afe->tfadsp_config_status, -EAGAIN);
+			WRITE_ONCE(afe->tfadsp_status, event);
+		} else if (event == Q6AFE_TFADSP_EVENT_CONFIGURED) {
+			WRITE_ONCE(afe->tfadsp_config_status, event_value);
+		}
+		wake_up(&afe->tfadsp_wait);
+
+		event_work = kzalloc_obj(*event_work, GFP_ATOMIC);
+		if (!event_work)
+			return -ENOMEM;
+		event_work->afe = afe;
+		event_work->event = event;
+		event_work->data.value = event_value;
+		INIT_WORK(&event_work->work, q6afe_tfadsp_event_work);
+		if (!queue_work(afe->tfadsp_event_wq, &event_work->work))
+			kfree(event_work);
+		return 0;
 	case APR_BASIC_RSP_RESULT: {
+		if (data->payload_size < sizeof(*res))
+			return -EINVAL;
 		if (res->status) {
 			dev_err(afe->dev, "cmd = 0x%x returned error = 0x%x\n",
 				res->opcode, res->status);
 		}
 		switch (res->opcode) {
 		case AFE_PORT_CMD_SET_PARAM_V2:
+		case AFE_PORT_CMD_GET_PARAM_V2:
 		case AFE_PORT_CMD_DEVICE_STOP:
 		case AFE_PORT_CMD_DEVICE_START:
 		case AFE_SVC_CMD_SET_PARAM:
 			port = q6afe_find_port(afe, hdr->token);
 			if (port) {
-				port->result = *res;
+				port->result.opcode = res->opcode;
+				port->result.status = res->status;
 				wake_up(&port->wait);
 				kref_put(&port->refcount, q6afe_port_free);
 			} else if (hdr->token == AFE_CLK_TOKEN) {
@@ -1071,11 +1255,14 @@ int q6afe_get_port_id(int index)
 EXPORT_SYMBOL_GPL(q6afe_get_port_id);
 
 static int afe_apr_send_pkt(struct q6afe *afe, struct apr_pkt *pkt,
-			    struct q6afe_port *port, uint32_t rsp_opcode)
+				    struct q6afe_port *port, uint32_t rsp_opcode)
 {
 	wait_queue_head_t *wait;
 	struct aprv2_ibasic_rsp_result_t *result;
 	int ret;
+
+	if (READ_ONCE(afe->service_down))
+		return -ENETRESET;
 
 	mutex_lock(&afe->lock);
 	if (port) {
@@ -1092,11 +1279,13 @@ static int afe_apr_send_pkt(struct q6afe *afe, struct apr_pkt *pkt,
 	ret = apr_send_pkt(afe->apr, pkt);
 	if (ret < 0) {
 		dev_err(afe->dev, "packet not transmitted (%d)\n", ret);
-		ret = -EINVAL;
 		goto err;
 	}
 
-	ret = wait_event_timeout(*wait, (result->opcode == rsp_opcode),
+	ret = wait_event_timeout(*wait,
+				 (result->opcode == rsp_opcode) ||
+				 (rsp_opcode == AFE_PORT_CMDRSP_GET_PARAM_V2 &&
+				  result->opcode == AFE_PORT_CMD_GET_PARAM_V2),
 				 msecs_to_jiffies(TIMEOUT_MS));
 	if (!ret) {
 		ret = -ETIMEDOUT;
@@ -1211,6 +1400,321 @@ static int q6afe_port_set_param_v2(struct q6afe_port *port, void *data,
 
 	return ret;
 }
+
+static int q6afe_set_param_v2_data(struct q6afe_port *port, u32 module_id,
+				   u32 param_id, const void *data, size_t size)
+{
+	struct afe_port_param_data_v1 *param;
+	struct afe_port_cmd_set_param_v2_packet *cmd;
+	struct apr_pkt *pkt;
+	size_t payload_size = sizeof(*param) + size;
+	size_t pkt_size = sizeof(*cmd) + payload_size;
+	int ret;
+
+	if (size > U16_MAX || payload_size > U16_MAX)
+		return -EMSGSIZE;
+
+	pkt = kzalloc(pkt_size, GFP_KERNEL);
+	if (!pkt)
+		return -ENOMEM;
+
+	cmd = (void *)pkt;
+	pkt->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+					   APR_HDR_LEN(APR_HDR_SIZE),
+					   APR_PKT_VER);
+	pkt->hdr.pkt_size = pkt_size;
+	pkt->hdr.token = port->token;
+	pkt->hdr.opcode = AFE_PORT_CMD_SET_PARAM_V2;
+	cmd->port_id = port->id;
+	cmd->payload_size = payload_size;
+	param = (void *)cmd->data;
+	param->module_id = module_id;
+	param->param_id = param_id;
+	param->param_size = size;
+	if (size)
+		memcpy(param + 1, data, size);
+
+	ret = afe_apr_send_pkt(port->afe, pkt, port,
+			       AFE_PORT_CMD_SET_PARAM_V2);
+	kfree(pkt);
+	return ret;
+}
+
+static int q6afe_tfadsp_send_inband(struct q6afe_port *port, const void *data,
+				    size_t size)
+{
+	struct q6afe *afe = port->afe;
+	size_t offset = 0;
+	u16 sequence = 1;
+	int ret;
+
+	if (!data || !size)
+		return -EINVAL;
+	if (!q6core_is_adsp_ready())
+		return -ENETRESET;
+	if (READ_ONCE(afe->tfadsp_status) != Q6AFE_TFADSP_EVENT_INIT)
+		dev_err(afe->dev, "TFADSP is not ready: status=%d\n",
+			READ_ONCE(afe->tfadsp_status));
+	if (READ_ONCE(afe->tfadsp_status) != Q6AFE_TFADSP_EVENT_INIT)
+		return -EHOSTDOWN;
+
+	while (size - offset > AFE_TFADSP_DATA_CHUNK) {
+		u8 *packet = kmalloc(AFE_TFADSP_DATA_CHUNK + 4, GFP_KERNEL);
+
+		if (!packet)
+			return -ENOMEM;
+
+		packet[0] = sequence >> 8;
+		packet[1] = sequence & 0xff;
+		packet[2] = AFE_TFADSP_DATA_CHUNK >> 8;
+		packet[3] = AFE_TFADSP_DATA_CHUNK & 0xff;
+		memcpy(packet + 4, (const u8 *)data + offset,
+		       AFE_TFADSP_DATA_CHUNK);
+
+		ret = q6afe_set_param_v2_data(port, AFE_MODULE_ID_TFADSP,
+					      AFE_PARAM_ID_TFADSP_SEND_MSG, packet,
+					      AFE_TFADSP_DATA_CHUNK + 4);
+		kfree(packet);
+		if (ret)
+			return ret;
+
+		offset += AFE_TFADSP_DATA_CHUNK;
+		sequence++;
+	}
+
+	if (size > offset) {
+		size_t chunk = size - offset;
+		u8 *packet = kmalloc(chunk + 4, GFP_KERNEL);
+
+		if (!packet)
+			return -ENOMEM;
+		packet[0] = 0xff;
+		packet[1] = 0xff;
+		packet[2] = chunk >> 8;
+		packet[3] = chunk & 0xff;
+		memcpy(packet + 4, (const u8 *)data + offset, chunk);
+		ret = q6afe_set_param_v2_data(port, AFE_MODULE_ID_TFADSP,
+					      AFE_PARAM_ID_TFADSP_SEND_MSG, packet, chunk + 4);
+		kfree(packet);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+struct q6afe_port *q6afe_tfadsp_get_port(struct device *dev, int dai_id)
+{
+	struct device_node *afe_np;
+	struct device *afe_dev;
+	struct device_link *link;
+	struct q6afe *afe;
+	struct q6afe_port *port;
+
+	if (dai_id != SECONDARY_MI2S_RX && dai_id != SECONDARY_MI2S_TX)
+		return ERR_PTR(-EINVAL);
+
+	afe_np = of_parse_phandle(dev->of_node, "qcom,q6afe", 0);
+	if (!afe_np)
+		return ERR_PTR(-EPROBE_DEFER);
+	afe_dev = bus_find_device_by_of_node(&aprbus, afe_np);
+	of_node_put(afe_np);
+	if (!afe_dev)
+		return ERR_PTR(-EPROBE_DEFER);
+	link = device_link_add(dev, afe_dev, DL_FLAG_AUTOREMOVE_CONSUMER);
+	if (!link) {
+		put_device(afe_dev);
+		return ERR_PTR(-EINVAL);
+	}
+	if (!device_is_bound(afe_dev)) {
+		put_device(afe_dev);
+		return ERR_PTR(-EPROBE_DEFER);
+	}
+	afe = dev_get_drvdata(afe_dev);
+	if (!afe) {
+		put_device(afe_dev);
+		return ERR_PTR(-EPROBE_DEFER);
+	}
+	if (READ_ONCE(afe->service_down)) {
+		put_device(afe_dev);
+		return ERR_PTR(-ENETRESET);
+	}
+
+	port = q6afe_port_get_from_afe(afe, dev, dai_id);
+	put_device(afe_dev);
+	if (IS_ERR(port))
+		return port;
+
+	port->tfadsp = true;
+	return port;
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_get_port);
+
+void q6afe_tfadsp_put_port(struct q6afe_port *port)
+{
+	if (!port)
+		return;
+
+	q6afe_port_put(port);
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_put_port);
+
+int q6afe_tfadsp_set_topology(struct q6afe_port *port, u32 topology_id)
+{
+	struct afe_param_id_set_topology_cfg topology = {
+		.minor_version = AFE_API_VERSION_TOPOLOGY,
+		.topology_id = topology_id,
+	};
+
+	if (!port || (port->id != AFE_PORT_ID_SECONDARY_MI2S_RX &&
+		      port->id != AFE_PORT_ID_SECONDARY_MI2S_TX))
+		return -EINVAL;
+
+	return q6afe_port_set_param_v2(port, &topology,
+				       AFE_PARAM_ID_SET_TOPOLOGY,
+				       AFE_MODULE_AUDIO_DEV_INTERFACE,
+				       sizeof(topology));
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_set_topology);
+
+int q6afe_tfadsp_send_msg(struct q6afe_port *port, const void *buf, size_t len)
+{
+	struct q6afe *afe;
+	int ret;
+
+	if (!port || (port->id != AFE_PORT_ID_SECONDARY_MI2S_RX &&
+		      port->id != AFE_PORT_ID_SECONDARY_MI2S_TX))
+		return -EINVAL;
+
+	afe = port->afe;
+	if (READ_ONCE(afe->service_down))
+		return -ENETRESET;
+	if (!q6core_is_adsp_ready())
+		return -ENETRESET;
+	ret = wait_event_timeout(afe->tfadsp_wait,
+				 READ_ONCE(afe->tfadsp_status) ==
+				 Q6AFE_TFADSP_EVENT_INIT,
+				 msecs_to_jiffies(TIMEOUT_MS));
+	if (!ret)
+		return -ETIMEDOUT;
+
+	mutex_lock(&afe->tfadsp_lock);
+	ret = q6afe_tfadsp_send_inband(port, buf, len);
+	mutex_unlock(&afe->tfadsp_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_send_msg);
+
+static int q6afe_tfadsp_read_inband(struct q6afe_port *port, void *buf,
+				    size_t len)
+{
+	struct afe_port_cmd_get_param_v2 cmd = {};
+	struct afe_port_param_data_v1 *param;
+	int ret;
+
+	if (!buf || !len || len > Q6AFE_TFADSP_MAX_MESSAGE_SIZE)
+		return -EINVAL;
+
+	cmd.hdr.hdr_field = APR_SEQ_CMD_HDR_FIELD;
+	cmd.hdr.pkt_size = sizeof(cmd);
+	cmd.hdr.token = port->token;
+	cmd.hdr.opcode = AFE_PORT_CMD_GET_PARAM_V2;
+	cmd.port_id = port->id;
+	cmd.payload_size = sizeof(*param) + len;
+	cmd.module_id = AFE_MODULE_ID_TFADSP;
+	cmd.param_id = AFE_PARAM_ID_TFADSP_READ_MSG;
+	param = &cmd.param;
+	param->module_id = AFE_MODULE_ID_TFADSP;
+	param->param_id = AFE_PARAM_ID_TFADSP_READ_MSG;
+	param->param_size = len;
+
+	scoped_guard(spinlock_irqsave, &port->tfadsp_rx_lock) {
+		port->tfadsp_rx_buf = buf;
+		port->tfadsp_rx_capacity = len;
+		port->tfadsp_rx_size = 0;
+	}
+	ret = afe_apr_send_pkt(port->afe, (struct apr_pkt *)&cmd, port,
+			       AFE_PORT_CMDRSP_GET_PARAM_V2);
+	scoped_guard(spinlock_irqsave, &port->tfadsp_rx_lock) {
+		port->tfadsp_rx_buf = NULL;
+		port->tfadsp_rx_capacity = 0;
+		if (!ret && port->tfadsp_rx_size < len)
+			ret = -EMSGSIZE;
+	}
+	return ret;
+}
+
+int q6afe_tfadsp_read_msg(struct q6afe_port *port, void *buf, size_t len)
+{
+	int ret;
+
+	if (!port || (port->id != AFE_PORT_ID_SECONDARY_MI2S_RX &&
+		      port->id != AFE_PORT_ID_SECONDARY_MI2S_TX))
+		return -EINVAL;
+	if (READ_ONCE(port->afe->service_down))
+		return -ENETRESET;
+	if (!q6core_is_adsp_ready())
+		return -ENETRESET;
+
+	mutex_lock(&port->afe->tfadsp_lock);
+	ret = q6afe_tfadsp_read_inband(port, buf, len);
+	mutex_unlock(&port->afe->tfadsp_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_read_msg);
+
+bool q6afe_tfadsp_is_ready(struct q6afe_port *port)
+{
+	return port && q6core_is_adsp_ready() &&
+		READ_ONCE(port->afe->tfadsp_status) ==
+		Q6AFE_TFADSP_EVENT_INIT;
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_is_ready);
+
+int q6afe_tfadsp_wait_configured(struct q6afe_port *port)
+{
+	struct q6afe *afe = port->afe;
+	int status, ret;
+
+	ret = wait_event_timeout(afe->tfadsp_wait,
+				 READ_ONCE(afe->service_down) ||
+				 READ_ONCE(afe->tfadsp_status) == Q6AFE_TFADSP_EVENT_CLOSE ||
+				 READ_ONCE(afe->tfadsp_config_status) != -EAGAIN,
+				 msecs_to_jiffies(TIMEOUT_MS));
+	if (READ_ONCE(afe->service_down) ||
+	    READ_ONCE(afe->tfadsp_status) == Q6AFE_TFADSP_EVENT_CLOSE)
+		return -ENETRESET;
+	if (!ret)
+		return -ETIMEDOUT;
+	status = READ_ONCE(afe->tfadsp_config_status);
+	if (status != 0 && status != 6) {
+		dev_err(afe->dev, "TFADSP configuration status=%d\n", status);
+		return -EIO;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_wait_configured);
+
+int q6afe_tfadsp_register_notifier(struct q6afe_port *port,
+				   struct notifier_block *nb)
+{
+	if (!port || !nb)
+		return -EINVAL;
+
+	return blocking_notifier_chain_register(&port->afe->tfadsp_notifier, nb);
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_register_notifier);
+
+int q6afe_tfadsp_unregister_notifier(struct q6afe_port *port,
+				     struct notifier_block *nb)
+{
+	if (!port || !nb)
+		return -EINVAL;
+
+	return blocking_notifier_chain_unregister(&port->afe->tfadsp_notifier,
+						  nb);
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_unregister_notifier);
 
 static int q6afe_port_set_lpass_clock(struct q6afe_port *port,
 				 struct afe_clk_cfg *cfg)
@@ -1715,6 +2219,18 @@ int q6afe_port_start(struct q6afe_port *port)
 	struct apr_pkt *pkt;
 	int pkt_size;
 
+	if (port->tfadsp) {
+		u32 topology_id = port->id == AFE_PORT_ID_SECONDARY_MI2S_RX ?
+			Q6AFE_TFADSP_RX_TOPOLOGY : Q6AFE_TFADSP_TX_TOPOLOGY;
+
+		ret = q6core_register_topology(topology_id);
+		if (ret)
+			return ret;
+		ret = q6afe_tfadsp_set_topology(port, topology_id);
+		if (ret)
+			return ret;
+	}
+
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
 				       AFE_MODULE_AUDIO_DEV_INTERFACE,
 				       sizeof(port->port_cfg));
@@ -1772,10 +2288,10 @@ EXPORT_SYMBOL_GPL(q6afe_port_start);
  * Return: Will be an error pointer on error or a valid afe port
  * on success.
  */
-struct q6afe_port *q6afe_port_get_from_id(struct device *dev, int id)
+static struct q6afe_port *q6afe_port_get_from_afe(struct q6afe *afe,
+						  struct device *dev, int id)
 {
 	int port_id;
-	struct q6afe *afe = dev_get_drvdata(dev->parent);
 	struct q6afe_port *port;
 	int cfg_type;
 
@@ -1860,12 +2376,20 @@ struct q6afe_port *q6afe_port_get_from_id(struct device *dev, int id)
 	port = kzalloc_obj(*port, GFP_KERNEL);
 	if (!port)
 		return ERR_PTR(-ENOMEM);
+	kref_get(&afe->refcount);
 
 	init_waitqueue_head(&port->wait);
+	spin_lock_init(&port->tfadsp_rx_lock);
 
 	port->token = id;
 	port->id = port_id;
 	port->afe = afe;
+	port->afe_dev = get_device(afe->dev);
+	if (!port->afe_dev) {
+		q6afe_put(afe);
+		kfree(port);
+		return ERR_PTR(-ENODEV);
+	}
 	port->cfg_type = cfg_type;
 	kref_init(&port->refcount);
 
@@ -1874,6 +2398,16 @@ struct q6afe_port *q6afe_port_get_from_id(struct device *dev, int id)
 
 	return port;
 
+}
+
+struct q6afe_port *q6afe_port_get_from_id(struct device *dev, int id)
+{
+	struct q6afe *afe = dev_get_drvdata(dev->parent);
+
+	if (!afe)
+		return ERR_PTR(-EPROBE_DEFER);
+
+	return q6afe_port_get_from_afe(afe, dev, id);
 }
 EXPORT_SYMBOL_GPL(q6afe_port_get_from_id);
 
@@ -1964,22 +2498,61 @@ static int q6afe_probe(struct apr_device *adev)
 {
 	struct q6afe *afe;
 	struct device *dev = &adev->dev;
+	int ret;
 
-	afe = devm_kzalloc(dev, sizeof(*afe), GFP_KERNEL);
+	afe = kzalloc_obj(*afe, GFP_KERNEL);
 	if (!afe)
 		return -ENOMEM;
+	afe->dev = get_device(dev);
+	if (!afe->dev) {
+		kfree(afe);
+		return -ENODEV;
+	}
+	kref_init(&afe->refcount);
 
 	q6core_get_svc_api_info(adev->svc_id, &afe->ainfo);
 	afe->apr = adev;
 	mutex_init(&afe->lock);
 	init_waitqueue_head(&afe->wait);
-	afe->dev = dev;
+	init_waitqueue_head(&afe->tfadsp_wait);
 	INIT_LIST_HEAD(&afe->port_list);
 	spin_lock_init(&afe->port_list_lock);
+	mutex_init(&afe->tfadsp_lock);
+	BLOCKING_INIT_NOTIFIER_HEAD(&afe->tfadsp_notifier);
+	afe->tfadsp_status = Q6AFE_TFADSP_EVENT_CLOSE;
+	afe->tfadsp_config_status = -EAGAIN;
+	afe->tfadsp_event_wq = alloc_ordered_workqueue("q6afe-tfadsp",
+						       WQ_MEM_RECLAIM);
+	if (!afe->tfadsp_event_wq) {
+		q6afe_put(afe);
+		return -ENOMEM;
+	}
 
 	dev_set_drvdata(dev, afe);
+	ret = devm_of_platform_populate(dev);
+	if (ret) {
+		dev_set_drvdata(dev, NULL);
+		destroy_workqueue(afe->tfadsp_event_wq);
+		afe->tfadsp_event_wq = NULL;
+		q6afe_put(afe);
+	}
+	return ret;
+}
 
-	return devm_of_platform_populate(dev);
+static void q6afe_remove(struct apr_device *adev)
+{
+	struct q6afe *afe = dev_get_drvdata(&adev->dev);
+
+	WRITE_ONCE(afe->service_down, true);
+	flush_workqueue(afe->tfadsp_event_wq);
+	WRITE_ONCE(afe->tfadsp_status, Q6AFE_TFADSP_EVENT_CLOSE);
+	wake_up(&afe->tfadsp_wait);
+	blocking_notifier_call_chain(&afe->tfadsp_notifier,
+				     Q6AFE_TFADSP_EVENT_CLOSE, NULL);
+	dev_set_drvdata(&adev->dev, NULL);
+	destroy_workqueue(afe->tfadsp_event_wq);
+	afe->tfadsp_event_wq = NULL;
+	q6afe_put(afe);
 }
 
 #ifdef CONFIG_OF
@@ -1992,6 +2565,7 @@ MODULE_DEVICE_TABLE(of, q6afe_device_id);
 
 static struct apr_driver qcom_q6afe_driver = {
 	.probe = q6afe_probe,
+	.remove = q6afe_remove,
 	.callback = q6afe_callback,
 	.driver = {
 		.name = "qcom-q6afe",
