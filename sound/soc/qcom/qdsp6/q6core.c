@@ -6,6 +6,9 @@
 #include <linux/wait.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/firmware.h>
+#include <linux/unaligned.h>
+#include <linux/xarray.h>
 #include <linux/sched.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -22,6 +25,17 @@
 #define AVCS_GET_VERSIONS_RSP   0x00012906
 #define AVCS_CMD_GET_FWK_VERSION	0x001292c
 #define AVCS_CMDRSP_GET_FWK_VERSION	0x001292d
+#define AVCS_CMD_REGISTER_TOPOLOGIES	0x00012923
+#define Q6CORE_TOPOLOGY_TIMEOUT_MS 1000
+
+struct q6core_register_topologies {
+	struct apr_hdr hdr;
+	u32 payload_addr_lsw;
+	u32 payload_addr_msw;
+	u32 mem_map_handle;
+	u32 payload_size;
+	u8 data[];
+} __packed;
 
 struct avcs_svc_info {
 	uint32_t service_id;
@@ -63,9 +77,15 @@ struct q6core {
 	bool get_state_supported;
 	bool get_version_supported;
 	bool is_version_requested;
+	struct xarray topologies;
+	u32 topology_token;
+	u32 topology_response_token;
+	u32 topology_status;
+	const char *topology_name;
 };
 
 static struct q6core *g_core;
+static DEFINE_MUTEX(g_core_lock);
 
 static int q6core_callback(struct apr_device *adev, const struct apr_resp_pkt *data)
 {
@@ -77,7 +97,17 @@ static int q6core_callback(struct apr_device *adev, const struct apr_resp_pkt *d
 	switch (hdr->opcode) {
 	case APR_BASIC_RSP_RESULT:{
 		result = data->payload;
+		if (!result || data->payload_size < sizeof(*result))
+			return -EINVAL;
 		switch (result->opcode) {
+		case AVCS_CMD_REGISTER_TOPOLOGIES:
+			if (hdr->token != READ_ONCE(core->topology_token))
+				return 0;
+			core->topology_status = result->status;
+			/* Publish the DSP status before waking the request waiter. */
+			smp_store_release(&core->topology_response_token, hdr->token);
+			wake_up(&core->wait);
+			return 0;
 		case AVCS_GET_VERSIONS:
 			if (result->status == ADSP_EUNSUPPORTED)
 				core->get_version_supported = false;
@@ -151,7 +181,7 @@ static int q6core_callback(struct apr_device *adev, const struct apr_resp_pkt *d
 static int q6core_get_fwk_versions(struct q6core *core)
 {
 	struct apr_device *adev = core->adev;
-	struct apr_pkt pkt;
+	struct apr_pkt pkt = {};
 	int rc;
 
 	pkt.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
@@ -181,7 +211,7 @@ static int q6core_get_fwk_versions(struct q6core *core)
 static int q6core_get_svc_versions(struct q6core *core)
 {
 	struct apr_device *adev = core->adev;
-	struct apr_pkt pkt;
+	struct apr_pkt pkt = {};
 	int rc;
 
 	pkt.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
@@ -206,7 +236,7 @@ static int q6core_get_svc_versions(struct q6core *core)
 static bool __q6core_is_adsp_ready(struct q6core *core)
 {
 	struct apr_device *adev = core->adev;
-	struct apr_pkt pkt;
+	struct apr_pkt pkt = {};
 	int rc;
 
 	core->get_state_supported = false;
@@ -249,6 +279,7 @@ int q6core_get_svc_api_info(int svc_id, struct q6core_svc_api_info *ainfo)
 	int i;
 	int ret = -ENOTSUPP;
 
+	guard(mutex)(&g_core_lock);
 	if (!g_core || !ainfo)
 		return 0;
 
@@ -303,6 +334,7 @@ bool q6core_is_adsp_ready(void)
 	unsigned long  timeout;
 	bool ret = false;
 
+	guard(mutex)(&g_core_lock);
 	if (!g_core)
 		return false;
 
@@ -325,17 +357,134 @@ bool q6core_is_adsp_ready(void)
 }
 EXPORT_SYMBOL_GPL(q6core_is_adsp_ready);
 
+static const u8 *q6core_find_topology(const struct firmware *fw, u32 topology_id,
+				      size_t *size)
+{
+	const u8 *data = fw->data;
+	size_t offset = sizeof(u32);
+	u32 i, count, modules;
+
+	if (fw->size < sizeof(u32))
+		return ERR_PTR(-EINVAL);
+	count = get_unaligned_le32(data);
+	for (i = 0; i < count; i++) {
+		/* Version 2: four header words, then 8 bytes per module. */
+		if (offset > fw->size || fw->size - offset < 4 * sizeof(u32))
+			return ERR_PTR(-EINVAL);
+		if (get_unaligned_le32(data + offset) != 2)
+			return ERR_PTR(-EOPNOTSUPP);
+		modules = get_unaligned_le32(data + offset + 12);
+		if (modules > (fw->size - offset - 16) / 8)
+			return ERR_PTR(-EINVAL);
+		*size = 16 + (size_t)modules * 8;
+		if (get_unaligned_le32(data + offset + 4) == topology_id)
+			return data + offset;
+		offset += *size;
+	}
+	return ERR_PTR(-ENOENT);
+}
+
+int q6core_register_topology(u32 topology_id)
+{
+	const struct firmware *fw;
+	const u8 *topology;
+	struct q6core_register_topologies *packet;
+	struct q6core *core;
+	size_t packet_size, topology_size;
+	int ret;
+
+	guard(mutex)(&g_core_lock);
+	core = g_core;
+	if (!core)
+		return -ENODEV;
+	guard(mutex)(&core->lock);
+	if (xa_load(&core->topologies, topology_id))
+		return 0;
+	if (!core->topology_name)
+		return -ENOENT;
+
+	ret = request_firmware(&fw, core->topology_name, &core->adev->dev);
+	if (ret)
+		return ret;
+	topology = q6core_find_topology(fw, topology_id, &topology_size);
+	if (IS_ERR(topology)) {
+		ret = PTR_ERR(topology);
+		goto release;
+	}
+	packet_size = sizeof(*packet) + sizeof(u32) + topology_size;
+	if (packet_size > 512) {
+		ret = -E2BIG;
+		goto release;
+	}
+	ret = xa_reserve(&core->topologies, topology_id, GFP_KERNEL);
+	if (ret)
+		goto release;
+	packet = kzalloc(packet_size, GFP_KERNEL);
+	if (!packet) {
+		ret = -ENOMEM;
+		goto unreserve;
+	}
+
+	/* A zero memory handle selects the protocol's in-band payload. */
+	packet->hdr.hdr_field = APR_SEQ_CMD_HDR_FIELD;
+	packet->hdr.pkt_size = packet_size;
+	packet->hdr.opcode = AVCS_CMD_REGISTER_TOPOLOGIES;
+	if (!++core->topology_token)
+		core->topology_token++;
+	packet->hdr.token = core->topology_token;
+	packet->payload_size = sizeof(u32) + topology_size;
+	put_unaligned_le32(1, packet->data);
+	memcpy(packet->data + sizeof(u32), topology, topology_size);
+	WRITE_ONCE(core->topology_response_token, 0);
+	ret = apr_send_pkt(core->adev, (struct apr_pkt *)packet);
+	if (ret < 0)
+		goto free;
+	/* Pair with the callback to observe the status for this token. */
+	ret = wait_event_timeout(core->wait,
+				 smp_load_acquire(&core->topology_response_token) ==
+				 core->topology_token,
+				 msecs_to_jiffies(Q6CORE_TOPOLOGY_TIMEOUT_MS));
+	if (!ret) {
+		ret = -ETIMEDOUT;
+	} else if (core->topology_status) {
+		dev_err(&core->adev->dev, "topology %#x DSP status=%#x\n",
+			topology_id, core->topology_status);
+		ret = -EIO;
+	} else {
+		ret = xa_err(xa_store(&core->topologies, topology_id,
+				      xa_mk_value(1), GFP_KERNEL));
+		if (!ret)
+			dev_info(&core->adev->dev,
+				 "registered custom topology %#x (%zu bytes, in-band)\n",
+				 topology_id, topology_size);
+	}
+free:
+	kfree(packet);
+unreserve:
+	if (ret)
+		xa_release(&core->topologies, topology_id);
+release:
+	release_firmware(fw);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q6core_register_topology);
+
 static int q6core_probe(struct apr_device *adev)
 {
-	g_core = kzalloc_obj(*g_core);
-	if (!g_core)
+	struct q6core *core;
+
+	core = kzalloc_obj(*core);
+	if (!core)
 		return -ENOMEM;
-
-	dev_set_drvdata(&adev->dev, g_core);
-
-	mutex_init(&g_core->lock);
-	g_core->adev = adev;
-	init_waitqueue_head(&g_core->wait);
+	mutex_init(&core->lock);
+	xa_init(&core->topologies);
+	core->adev = adev;
+	init_waitqueue_head(&core->wait);
+	of_property_read_string(adev->dev.of_node, "firmware-name",
+				&core->topology_name);
+	dev_set_drvdata(&adev->dev, core);
+	guard(mutex)(&g_core_lock);
+	g_core = core;
 	return 0;
 }
 
@@ -343,12 +492,12 @@ static void q6core_exit(struct apr_device *adev)
 {
 	struct q6core *core = dev_get_drvdata(&adev->dev);
 
-	if (core->fwk_version_supported)
-		kfree(core->fwk_version);
-	if (core->get_version_supported)
-		kfree(core->svc_version);
-
+	guard(mutex)(&g_core_lock);
 	g_core = NULL;
+	dev_set_drvdata(&adev->dev, NULL);
+	kfree(core->fwk_version);
+	kfree(core->svc_version);
+	xa_destroy(&core->topologies);
 	kfree(core);
 }
 
