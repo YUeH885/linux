@@ -5,48 +5,38 @@
 #include <linux/firmware.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/crc32.h>
-#include <linux/unaligned.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
-#include <linux/sizes.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/qcom/q6afe-tfadsp.h>
 
+#include "tfa9872.h"
+
 #define TFA9872_REVISION		0x03
 #define TFA9872_SYS_CONTROL0		0x00
-#define TFA9872_SAMPLE_RATE		0x02
 
 #define TFA9872_PWDN			BIT(0)
 #define TFA9872_AMPE			BIT(3)
 #define TFA9872_DCA			BIT(4)
-#define TFA9872_TDMFS_MASK		GENMASK(3, 0)
 
-#define TFA9872_RATE_8000		0
-#define TFA9872_RATE_16000		3
-#define TFA9872_RATE_32000		6
-#define TFA9872_RATE_44100		7
-#define TFA9872_RATE_48000		8
-#define TFA9872_RATE_96000		11
-#define TFA9872_RATE_192000		13
-#define TFA9872_CONTAINER_HEADER	46
-#define TFA9872_DESC_PROFILE		1
-#define TFA9872_DESC_FILE		4
-#define TFA9872_FILE_MESSAGE		0x474d
+#define TFA9872_SYS_CONTROL1		0x01
+#define TFA9872_AUDIO_CONTROL		0x51
+#define TFA9872_MTP			0xf0
+#define TFA9872_RE25			0xf5
+#define TFA9872_I2CR			BIT(1)
+#define TFA9872_MANSCONF		BIT(2)
+#define TFA9872_MANAOOSC		BIT(4)
+#define TFA9872_INTSMUTE		BIT(1)
+#define TFA9872_MTPEX			BIT(1)
 
 struct tfa9872_priv {
 	struct device *dev;
 	struct regmap *regmap;
 	struct q6afe_port *afe_port;
 	const char *firmware_name;
-	const struct firmware *firmware;
-	unsigned int revision;
+	struct tfa9872_config *config;
 	unsigned int rate;
-	u32 device_offset;
-	u32 profile_offset;
-	bool firmware_ready;
-	bool stream_active;
 	struct notifier_block tfadsp_nb;
 	/* Serialize DAI transitions with asynchronous DSP close events. */
 	struct mutex lock;
@@ -59,162 +49,103 @@ static const struct regmap_config tfa9872_regmap_config = {
 	.cache_type = REGCACHE_NONE,
 };
 
-static int tfa9872_rate_code(unsigned int rate)
-{
-	switch (rate) {
-	case 8000:
-		return TFA9872_RATE_8000;
-	case 16000:
-		return TFA9872_RATE_16000;
-	case 32000:
-		return TFA9872_RATE_32000;
-	case 44100:
-		return TFA9872_RATE_44100;
-	case 48000:
-		return TFA9872_RATE_48000;
-	case 96000:
-		return TFA9872_RATE_96000;
-	case 192000:
-		return TFA9872_RATE_192000;
-	default:
-		return -EINVAL;
-	}
-}
-
-static int tfa9872_convert_message(const u8 *src, size_t src_len, u8 *dst)
-{
-	size_t i;
-
-	if (!src_len || src_len % 3)
-		return -EINVAL;
-
-	for (i = 0; i < src_len; i += 3) {
-		s32 value = (src[i] << 16) | (src[i + 1] << 8) | src[i + 2];
-
-		if (value & BIT(23))
-			value |= ~GENMASK(23, 0);
-		put_unaligned_le32(value, dst + (i / 3) * 4);
-	}
-
-	return (src_len / 3) * 4;
-}
-
-static int tfa9872_append_blob_message(const u8 *raw, size_t raw_len,
-				       u8 *blob, size_t *blob_len)
-{
-	int converted;
-	size_t converted_len;
-
-	if (!raw_len || raw_len % 3)
-		return -EINVAL;
-	converted_len = raw_len / 3 * 4;
-	if (*blob_len + converted_len + 2 > 64 * 1024)
-		return -E2BIG;
-
-	put_unaligned_be16(converted_len, blob + *blob_len);
-	*blob_len += 2;
-	converted = tfa9872_convert_message(raw, raw_len, blob + *blob_len);
-	if (converted < 0)
-		return converted;
-	*blob_len += converted;
-	return 0;
-}
-
-static bool tfa9872_container_range(const struct firmware *fw, u32 offset,
-				    size_t size)
-{
-	return offset <= fw->size && size <= fw->size - offset;
-}
-
-static int tfa9872_find_profile(struct tfa9872_priv *tfa)
-{
-	const struct firmware *fw = tfa->firmware;
-	const u8 *data = fw->data;
-	u32 entry, offset, name;
-	unsigned int i, count = data[tfa->device_offset];
-
-	if (!tfa9872_container_range(fw, tfa->device_offset + 12, count * 4))
-		return -EINVAL;
-	for (i = 0; i < count; i++) {
-		entry = get_unaligned_le32(data + tfa->device_offset + 12 + i * 4);
-		if ((entry >> 24) != TFA9872_DESC_PROFILE)
-			continue;
-		offset = entry & GENMASK(23, 0);
-		if (!tfa9872_container_range(fw, offset, 8) || !data[offset])
-			return -EINVAL;
-		if (!tfa9872_container_range(fw, offset + 8, (data[offset] - 1) * 4))
-			return -EINVAL;
-		entry = get_unaligned_le32(data + offset + 4);
-		name = entry & GENMASK(23, 0);
-		if ((entry >> 24) != 3 || !tfa9872_container_range(fw, name, 1) ||
-		    !memchr(data + name, 0, fw->size - name))
-			return -EINVAL;
-		if (!strcmp(data + name, "stereo")) {
-			tfa->profile_offset = offset;
-			return 0;
-		}
-	}
-	return -ENOENT;
-}
-
-static int tfa9872_send_profile_messages(struct tfa9872_priv *tfa)
-{
-	const struct firmware *fw = tfa->firmware;
-	const u8 *data = fw->data;
-	u32 entry, offset, length, file_size;
-	unsigned int i, count = data[tfa->profile_offset] - 1;
-
-	u8 *blob __free(kfree) = kmalloc(SZ_64K, GFP_KERNEL);
-	size_t blob_len = 4;
-	int ret;
-
-	if (!blob)
-		return -ENOMEM;
-	blob[0] = 'm';
-	blob[1] = 'm';
-	for (i = 0; i < count; i++) {
-		entry = get_unaligned_le32(data + tfa->profile_offset + 8 + i * 4);
-		offset = entry & GENMASK(23, 0);
-		if ((entry >> 24) == 17)
-			break;
-		if ((entry >> 24) == 21) {
-			if (!tfa9872_container_range(fw, offset, 2))
-				return -EINVAL;
-			length = get_unaligned_le16(data + offset);
-			if (!tfa9872_container_range(fw, offset + 2, length))
-				return -EINVAL;
-			ret = tfa9872_append_blob_message(data + offset + 2, length,
-							  blob, &blob_len);
-			if (ret)
-				return ret;
-		} else if ((entry >> 24) == TFA9872_DESC_FILE) {
-			if (!tfa9872_container_range(fw, offset, 8 + 36))
-				return -EINVAL;
-			file_size = get_unaligned_le32(data + offset + 4);
-			length = get_unaligned_le16(data + offset + 14);
-			if (length < 36 || length > file_size ||
-			    !tfa9872_container_range(fw, offset + 8, file_size))
-				return -EINVAL;
-			if (get_unaligned_le16(data + offset + 8) != TFA9872_FILE_MESSAGE)
-				continue;
-			ret = tfa9872_append_blob_message(data + offset + 44,
-							  length - 36, blob, &blob_len);
-			if (ret)
-				return ret;
-		}
-	}
-	if (blob_len == 4)
-		return -ENOENT;
-	put_unaligned_be16(blob_len - 4, blob + 2);
-	return q6afe_tfadsp_send_msg(tfa->afe_port, blob, blob_len);
-}
-
-static void tfa9872_release_firmware(void *data)
+static void tfa9872_release_config(void *data)
 {
 	struct tfa9872_priv *tfa = data;
 
-	if (tfa->firmware)
-		release_firmware(tfa->firmware);
+	tfa9872_config_free(tfa->config);
+}
+
+static int tfa9872_load_config(struct tfa9872_priv *tfa)
+{
+	const struct firmware *fw;
+	unsigned int mtp, resistance;
+	int ret;
+
+	if (tfa->config)
+		return 0;
+	ret = regmap_read(tfa->regmap, TFA9872_MTP, &mtp);
+	if (ret)
+		return ret;
+	if (!(mtp & TFA9872_MTPEX))
+		return -ENODATA;
+	ret = regmap_read(tfa->regmap, TFA9872_RE25, &resistance);
+	if (ret)
+		return ret;
+	ret = request_firmware(&fw, tfa->firmware_name, tfa->dev);
+	if (ret)
+		return ret;
+	ret = tfa9872_container_parse(fw, to_i2c_client(tfa->dev)->addr,
+				      tfa->rate, "stereo", 0, resistance, &tfa->config);
+	release_firmware(fw);
+	if (!ret)
+		dev_info(tfa->dev, "stereo configuration ready, calibration %u mOhm\n",
+			 resistance);
+	return ret;
+}
+
+static int tfa9872_init(struct tfa9872_priv *tfa)
+{
+	/* NXP tfa_init.c: TFA9872 N1B2 register map, version 21. */
+	static const struct reg_sequence settings[] = {
+		{ 0x02, 0x2dc8 }, { 0x20, 0x0890 }, { 0x22, 0x043c },
+		{ 0x23, 0x0001 }, { 0x51, 0x0000 }, { 0x52, 0x5a1c },
+		{ 0x61, 0x0198 }, { 0x63, 0x0a9a }, { 0x65, 0x0a82 },
+		{ 0x6f, 0x01e3 }, { 0x70, 0x06fd }, { 0x71, 0x307e },
+		{ 0x74, 0xcc84 }, { 0x75, 0x1132 }, { 0x82, 0x01ed },
+		{ 0x83, 0x001a },
+	};
+	unsigned int key;
+	int ret;
+
+	ret = regmap_write(tfa->regmap, TFA9872_SYS_CONTROL0,
+			   TFA9872_PWDN | TFA9872_I2CR);
+	if (ret)
+		return ret;
+	ret = regmap_write(tfa->regmap, 0x0f, 0x5a6b);
+	if (ret)
+		return ret;
+	ret = regmap_read(tfa->regmap, 0xfb, &key);
+	if (ret)
+		return ret;
+	ret = regmap_write(tfa->regmap, 0xa0, key ^ 0x005a);
+	if (ret)
+		return ret;
+	ret = regmap_multi_reg_write(tfa->regmap, settings, ARRAY_SIZE(settings));
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL1,
+				 TFA9872_MANAOOSC, TFA9872_MANAOOSC);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(tfa->regmap, 0xb0, BIT(3), BIT(3));
+	if (ret)
+		return ret;
+	return regmap_update_bits(tfa->regmap, TFA9872_AUDIO_CONTROL,
+				  TFA9872_INTSMUTE, TFA9872_INTSMUTE);
+}
+
+static int tfa9872_apply_config(struct tfa9872_priv *tfa)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < tfa->config->num_regs; i++) {
+		const struct tfa9872_reg_setting *setting = &tfa->config->regs[i];
+		u16 mask = setting->mask;
+
+		/* Power and mute follow the stream state, after DSP configuration. */
+		if (setting->reg == TFA9872_SYS_CONTROL0)
+			mask &= ~(TFA9872_PWDN | TFA9872_AMPE | TFA9872_DCA);
+		if (setting->reg == TFA9872_AUDIO_CONTROL)
+			mask &= ~TFA9872_INTSMUTE;
+		if (!mask)
+			continue;
+		ret = regmap_update_bits(tfa->regmap, setting->reg, mask, setting->value);
+		if (ret)
+			return ret;
+	}
+	return 0;
 }
 
 static int tfa9872_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
@@ -232,10 +163,9 @@ static int tfa9872_hw_params(struct snd_pcm_substream *substream,
 			     struct snd_soc_dai *dai)
 {
 	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(dai->component);
-	int rate = tfa9872_rate_code(params_rate(params));
 	int ret;
 
-	if (params_channels(params) != 2 || rate < 0)
+	if (params_channels(params) != 2 || params_rate(params) != 48000)
 		return -EINVAL;
 	if (params_width(params) != 16 && params_width(params) != 24 &&
 	    params_width(params) != 32)
@@ -243,8 +173,7 @@ static int tfa9872_hw_params(struct snd_pcm_substream *substream,
 
 	mutex_lock(&tfa->lock);
 	tfa->rate = params_rate(params);
-	ret = regmap_update_bits(tfa->regmap, TFA9872_SAMPLE_RATE,
-				 TFA9872_TDMFS_MASK, rate);
+	ret = tfa9872_load_config(tfa);
 	mutex_unlock(&tfa->lock);
 
 	return ret;
@@ -254,10 +183,25 @@ static int tfa9872_start(struct tfa9872_priv *tfa)
 {
 	int ret;
 
-	if (!tfa->firmware_ready || !tfa->afe_port)
+	if (!tfa->config || !tfa->afe_port)
 		return -EAGAIN;
 
-	ret = tfa9872_send_profile_messages(tfa);
+	ret = tfa9872_init(tfa);
+	if (ret)
+		return ret;
+	ret = tfa9872_apply_config(tfa);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
+				 TFA9872_PWDN, 0);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL1,
+				 TFA9872_MANSCONF, TFA9872_MANSCONF);
+	if (ret)
+		return ret;
+	ret = q6afe_tfadsp_send_msg(tfa->afe_port, tfa->config->messages,
+				    tfa->config->message_size);
 	if (ret) {
 		dev_err(tfa->dev, "TFADSP profile messages failed: %d\n", ret);
 		return ret;
@@ -271,21 +215,24 @@ static int tfa9872_start(struct tfa9872_priv *tfa)
 	ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
 				 TFA9872_PWDN | TFA9872_DCA | TFA9872_AMPE,
 				 TFA9872_DCA | TFA9872_AMPE);
-	if (!ret)
-		tfa->stream_active = true;
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(tfa->regmap, TFA9872_AUDIO_CONTROL,
+				 TFA9872_INTSMUTE, 0);
 
 	return ret;
 }
 
 static int tfa9872_stop(struct tfa9872_priv *tfa)
 {
-	int ret;
+	int ret, mute_ret;
 
+	mute_ret = regmap_update_bits(tfa->regmap, TFA9872_AUDIO_CONTROL,
+				      TFA9872_INTSMUTE, TFA9872_INTSMUTE);
 	ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
 				 TFA9872_AMPE | TFA9872_DCA | TFA9872_PWDN,
 				 TFA9872_PWDN);
-	tfa->stream_active = false;
-	return ret;
+	return mute_ret ?: ret;
 }
 
 static int tfa9872_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
@@ -334,10 +281,7 @@ static struct snd_soc_dai_driver tfa9872_dai = {
 		.stream_name = "Playback",
 		.channels_min = 2,
 		.channels_max = 2,
-		.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |
-			 SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_44100 |
-			 SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000 |
-			 SNDRV_PCM_RATE_192000,
+		.rates = SNDRV_PCM_RATE_48000,
 		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE |
 			   SNDRV_PCM_FMTBIT_S32_LE,
 	},
@@ -352,84 +296,6 @@ static const struct snd_soc_component_driver tfa9872_component = {
 	.use_pmdown_time = 1,
 };
 
-static int tfa9872_container_validate(const struct firmware *fw)
-{
-	const u8 *data = fw->data;
-	u32 size, crc, calculated;
-
-	if (fw->size < 50 || fw->size > 256 * 1024 || data[0] != 'P' ||
-	    data[1] != 'M')
-		return -EINVAL;
-
-	size = get_unaligned_le32(data + 6);
-	crc = get_unaligned_le32(data + 10);
-	if (size < 46 || size != fw->size)
-		return -EINVAL;
-
-	calculated = ~crc32_le(~0U, data + 14, size - 14);
-	if (calculated != crc)
-		return -EBADMSG;
-
-	return 0;
-}
-
-static int tfa9872_container_find_device(struct tfa9872_priv *tfa,
-					 const struct firmware *fw, u8 address)
-{
-	const u8 *data = fw->data;
-	u32 count, index, offset, type;
-	u16 devices;
-	u32 i;
-
-	devices = get_unaligned_le16(data + 40);
-	count = get_unaligned_le16(data + 40) +
-		get_unaligned_le16(data + 42) +
-		get_unaligned_le16(data + 44);
-	if (devices > 4 || count > 4 + 16 * 4 || 46 + count * 4 > fw->size)
-		return -EINVAL;
-
-	for (i = 0; i < devices; i++) {
-		index = get_unaligned_le32(data + 46 + i * sizeof(u32));
-		offset = index & GENMASK(23, 0);
-		type = index >> 24;
-		if (type || offset > fw->size - 12)
-			return -EINVAL;
-		if (!tfa9872_container_range(fw, offset + 12, data[offset] * 4))
-			return -EINVAL;
-		if (data[offset + 2] == address) {
-			tfa->device_offset = offset;
-			return 0;
-		}
-	}
-
-	return -ENODEV;
-}
-
-static int tfa9872_load_firmware(struct tfa9872_priv *tfa)
-{
-	const struct firmware *fw;
-	int ret;
-
-	ret = request_firmware(&fw, tfa->firmware_name, tfa->dev);
-	if (ret)
-		return ret;
-
-	ret = tfa9872_container_validate(fw);
-	if (!ret)
-		ret = tfa9872_container_find_device(tfa, fw, to_i2c_client(tfa->dev)->addr);
-	if (!ret) {
-		tfa->firmware = fw;
-		ret = tfa9872_find_profile(tfa);
-		if (!ret) {
-			tfa->firmware_ready = true;
-			return 0;
-		}
-		tfa->firmware = NULL;
-	}
-	release_firmware(fw);
-	return ret;
-}
-
 static int tfa9872_tfadsp_event(struct notifier_block *nb,
 				unsigned long event, void *data)
 {
@@ -439,7 +305,8 @@ static int tfa9872_tfadsp_event(struct notifier_block *nb,
 	mutex_lock(&tfa->lock);
 	switch (event) {
 	case Q6AFE_TFADSP_EVENT_CLOSE:
-		tfa9872_stop(tfa);
+		if (tfa9872_stop(tfa))
+			dev_err(tfa->dev, "failed to power down after DSP close\n");
 		break;
 	default:
 		break;
@@ -473,9 +340,8 @@ static int tfa9872_probe(struct i2c_client *client)
 	ret = regmap_read(tfa->regmap, TFA9872_REVISION, &revision);
 	if (ret)
 		return ret;
-	if ((revision & 0xff) != 0x72)
+	if (revision != 0x1b72 && revision != 0x2b72 && revision != 0x3b72)
 		return -ENODEV;
-	tfa->revision = revision;
 
 	tfa->afe_port = q6afe_tfadsp_get_port(&client->dev, SECONDARY_MI2S_RX);
 	if (IS_ERR(tfa->afe_port))
@@ -491,12 +357,11 @@ static int tfa9872_probe(struct i2c_client *client)
 	ret = devm_add_action_or_reset(&client->dev, tfa9872_release_afe, tfa);
 	if (ret)
 		return ret;
-	ret = tfa9872_load_firmware(tfa);
+	ret = tfa9872_stop(tfa);
 	if (ret)
-		return dev_err_probe(&client->dev, ret,
-				     "failed to load %s\n", tfa->firmware_name);
-	dev_info(&client->dev, "revision %#x, stereo profile ready\n", revision);
-	ret = devm_add_action_or_reset(&client->dev, tfa9872_release_firmware, tfa);
+		return ret;
+	dev_info(&client->dev, "revision %#x\n", revision);
+	ret = devm_add_action_or_reset(&client->dev, tfa9872_release_config, tfa);
 	if (ret)
 		return ret;
 	return devm_snd_soc_register_component(&client->dev, &tfa9872_component,
@@ -506,9 +371,12 @@ static int tfa9872_probe(struct i2c_client *client)
 static void tfa9872_shutdown(struct i2c_client *client)
 {
 	struct tfa9872_priv *tfa = i2c_get_clientdata(client);
+	int ret;
 
 	guard(mutex)(&tfa->lock);
-	tfa9872_stop(tfa);
+	ret = tfa9872_stop(tfa);
+	if (ret)
+		dev_err(tfa->dev, "failed to power down amplifier: %d\n", ret);
 }
 
 static void tfa9872_release_afe(void *data)

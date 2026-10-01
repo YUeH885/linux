@@ -2313,12 +2313,23 @@ config SND_SOC_TFA9879
 config SND_SOC_TFA9872
 	tristate "NXP Semiconductors TFA9872 smart amplifier"
 	depends on I2C && SND_SOC_QDSP6_AFE
+	select CRC32
 	select REGMAP_I2C
 	help
 	  Enable support for the NXP TFA9872 smart amplifier with
 	  Qualcomm ADSP TFADSP processing. The driver loads the speaker
 	  parameter container and configures the secondary MI2S playback
 	  interface before enabling the amplifier.
+
+config SND_SOC_TFA9872_KUNIT_TEST
+	bool "KUnit tests for the TFA9872 container parser" if !KUNIT_ALL_TESTS
+	depends on KUNIT && SND_SOC_TFA9872
+	default KUNIT_ALL_TESTS
+	help
+	  Test container bounds, nested CRCs, profile and volume-step selection,
+	  DSP message encoding and calibration data without amplifier hardware.
+	  The tests use synthetic parameter containers and run when the codec
+	  module is loaded in a kernel with KUnit enabled.
 
 config SND_SOC_TFA989X
 	tristate "NXP/Goodix TFA989X (TFA1) amplifiers"
