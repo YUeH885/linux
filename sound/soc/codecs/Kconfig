@@ -2310,6 +2310,16 @@ config SND_SOC_TFA9879
 	tristate "NXP Semiconductors TFA9879 amplifier"
 	depends on I2C
 
+config SND_SOC_TFA9872
+	tristate "NXP Semiconductors TFA9872 smart amplifier"
+	depends on I2C && SND_SOC_QDSP6_AFE
+	select REGMAP_I2C
+	help
+	  Enable support for the NXP TFA9872 smart amplifier with
+	  Qualcomm ADSP TFADSP processing. The driver loads the speaker
+	  parameter container and configures the secondary MI2S playback
+	  interface before enabling the amplifier.
+
 config SND_SOC_TFA989X
 	tristate "NXP/Goodix TFA989X (TFA1) amplifiers"
 	depends on I2C

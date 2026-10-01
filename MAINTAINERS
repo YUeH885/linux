@@ -19818,6 +19818,13 @@ F:	drivers/gpu/drm/bridge/tda998x_drv.c
 F:	include/dt-bindings/display/tda998x.h
 K:	"nxp,tda998x"
 
+NXP TFA9872 DRIVER
+M:	Yuzu <yuzu23234@gmail.com>
+L:	linux-sound@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/sound/nxp,tfa9872.yaml
+F:	sound/soc/codecs/tfa9872.c
+
 NXP TFA9879 DRIVER
 M:	Peter Rosin <peda@lysator.liu.se>
 L:	linux-sound@vger.kernel.org
