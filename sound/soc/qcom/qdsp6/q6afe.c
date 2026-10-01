@@ -46,6 +46,8 @@
 #define AFE_OPCODE_TFADSP_STATUS	0x00010B01
 #define AFE_API_VERSION_TOPOLOGY	1
 #define AFE_TFADSP_DATA_CHUNK		448
+#define AFE_MODULE_FEEDBACK		0x00010257
+#define AFE_PARAM_ID_FEEDBACK_PATH_CFG	0x0001022C
 
 #define AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG 0x00010235
 #define AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS    0x000102A5
@@ -446,12 +448,18 @@ struct afe_port_cmd_get_param_v2 {
 	u32 mem_map_handle;
 	u32 module_id;
 	u32 param_id;
-	struct afe_port_param_data_v1 param;
 } __packed;
 
 struct afe_param_id_set_topology_cfg {
 	u32 minor_version;
 	u32 topology_id;
+} __packed;
+
+struct afe_feedback_path_cfg {
+	u32 minor_version;
+	u32 dst_port_id;
+	u32 num_channels;
+	u32 channel_info[4];
 } __packed;
 
 struct q6afe_tfadsp_event_work {
@@ -727,6 +735,8 @@ struct q6afe_port {
 	size_t tfadsp_rx_capacity;
 	bool tfadsp;
 	size_t tfadsp_rx_size;
+	struct q6afe_port *feedback;
+	bool feedback_started;
 };
 
 static struct q6afe_port *q6afe_port_get_from_afe(struct q6afe *afe,
@@ -1072,6 +1082,8 @@ static void q6afe_port_free(struct kref *ref)
 	afe = port->afe;
 	scoped_guard(spinlock_irqsave, &afe->port_list_lock)
 		list_del(&port->node);
+	if (port->feedback)
+		q6afe_port_put(port->feedback);
 	kfree(port->scfg);
 	put_device(port->afe_dev);
 	kfree(port);
@@ -1521,14 +1533,15 @@ struct q6afe_port *q6afe_tfadsp_get_port(struct device *dev, int dai_id)
 	of_node_put(afe_np);
 	if (!afe_dev)
 		return ERR_PTR(-EPROBE_DEFER);
+	/* Supplier registration may still be probing when it becomes visible. */
+	if (!device_is_bound(afe_dev)) {
+		put_device(afe_dev);
+		return ERR_PTR(-EPROBE_DEFER);
+	}
 	link = device_link_add(dev, afe_dev, DL_FLAG_AUTOREMOVE_CONSUMER);
 	if (!link) {
 		put_device(afe_dev);
 		return ERR_PTR(-EINVAL);
-	}
-	if (!device_is_bound(afe_dev)) {
-		put_device(afe_dev);
-		return ERR_PTR(-EPROBE_DEFER);
 	}
 	afe = dev_get_drvdata(afe_dev);
 	if (!afe) {
@@ -1558,6 +1571,22 @@ void q6afe_tfadsp_put_port(struct q6afe_port *port)
 	q6afe_port_put(port);
 }
 EXPORT_SYMBOL_GPL(q6afe_tfadsp_put_port);
+
+int q6afe_tfadsp_set_feedback(struct q6afe_port *rx, struct q6afe_port *tx)
+{
+	if (!rx || rx->id != AFE_PORT_ID_SECONDARY_MI2S_RX ||
+	    (tx && (tx->id != AFE_PORT_ID_SECONDARY_MI2S_TX || tx->afe != rx->afe)))
+		return -EINVAL;
+	if (rx->feedback_started || (tx && rx->feedback))
+		return -EBUSY;
+	if (tx)
+		kref_get(&tx->refcount);
+	if (rx->feedback)
+		q6afe_port_put(rx->feedback);
+	rx->feedback = tx;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(q6afe_tfadsp_set_feedback);
 
 int q6afe_tfadsp_set_topology(struct q6afe_port *port, u32 topology_id)
 {
@@ -1609,7 +1638,6 @@ static int q6afe_tfadsp_read_inband(struct q6afe_port *port, void *buf,
 				    size_t len)
 {
 	struct afe_port_cmd_get_param_v2 cmd = {};
-	struct afe_port_param_data_v1 *param;
 	int ret;
 
 	if (!buf || !len || len > Q6AFE_TFADSP_MAX_MESSAGE_SIZE)
@@ -1620,13 +1648,9 @@ static int q6afe_tfadsp_read_inband(struct q6afe_port *port, void *buf,
 	cmd.hdr.token = port->token;
 	cmd.hdr.opcode = AFE_PORT_CMD_GET_PARAM_V2;
 	cmd.port_id = port->id;
-	cmd.payload_size = sizeof(*param) + len;
+	cmd.payload_size = len;
 	cmd.module_id = AFE_MODULE_ID_TFADSP;
 	cmd.param_id = AFE_PARAM_ID_TFADSP_READ_MSG;
-	param = &cmd.param;
-	param->module_id = AFE_MODULE_ID_TFADSP;
-	param->param_id = AFE_PARAM_ID_TFADSP_READ_MSG;
-	param->param_size = len;
 
 	scoped_guard(spinlock_irqsave, &port->tfadsp_rx_lock) {
 		port->tfadsp_rx_buf = buf;
@@ -1644,7 +1668,8 @@ static int q6afe_tfadsp_read_inband(struct q6afe_port *port, void *buf,
 	return ret;
 }
 
-int q6afe_tfadsp_read_msg(struct q6afe_port *port, void *buf, size_t len)
+int q6afe_tfadsp_read_msg(struct q6afe_port *port, const void *command,
+			  size_t command_size, void *buf, size_t len)
 {
 	int ret;
 
@@ -1655,9 +1680,17 @@ int q6afe_tfadsp_read_msg(struct q6afe_port *port, void *buf, size_t len)
 		return -ENETRESET;
 	if (!q6core_is_adsp_ready())
 		return -ENETRESET;
+	if (!buf || !len || len > Q6AFE_TFADSP_MAX_MESSAGE_SIZE)
+		return -EINVAL;
 
 	mutex_lock(&port->afe->tfadsp_lock);
-	ret = q6afe_tfadsp_read_inband(port, buf, len);
+	/* The reply belongs to the preceding command on the shared DSP mailbox. */
+	if (READ_ONCE(port->afe->tfadsp_status) != Q6AFE_TFADSP_EVENT_INIT)
+		ret = -EHOSTDOWN;
+	else
+		ret = q6afe_tfadsp_send_inband(port, command, command_size);
+	if (!ret)
+		ret = q6afe_tfadsp_read_inband(port, buf, len);
 	mutex_unlock(&port->afe->tfadsp_lock);
 	return ret;
 }
@@ -1665,7 +1698,7 @@ EXPORT_SYMBOL_GPL(q6afe_tfadsp_read_msg);
 
 bool q6afe_tfadsp_is_ready(struct q6afe_port *port)
 {
-	return port && q6core_is_adsp_ready() &&
+	return port && !READ_ONCE(port->afe->service_down) && q6core_is_adsp_ready() &&
 		READ_ONCE(port->afe->tfadsp_status) ==
 		Q6AFE_TFADSP_EVENT_INIT;
 }
@@ -1690,6 +1723,13 @@ int q6afe_tfadsp_wait_configured(struct q6afe_port *port)
 	if (status != 0 && status != 6) {
 		dev_err(afe->dev, "TFADSP configuration status=%d\n", status);
 		return -EIO;
+	}
+	if (port->feedback && !port->feedback_started) {
+		/* Establish feedback before the configured stream can unmute. */
+		ret = q6afe_port_start(port->feedback);
+		if (ret)
+			return ret;
+		port->feedback_started = true;
 	}
 	return 0;
 }
@@ -1827,13 +1867,18 @@ int q6afe_port_stop(struct q6afe_port *port)
 	struct q6afe *afe = port->afe;
 	struct apr_pkt *pkt;
 	int port_id = port->id;
-	int ret = 0;
+	int ret = 0, feedback_ret = 0;
 	int index, pkt_size;
 
 	index = port->token;
 	if (index < 0 || index >= AFE_PORT_MAX) {
 		dev_err(afe->dev, "AFE port index[%d] invalid!\n", index);
 		return -EINVAL;
+	}
+
+	if (port->feedback_started) {
+		port->feedback_started = false;
+		feedback_ret = q6afe_port_stop(port->feedback);
 	}
 
 	pkt_size = APR_HDR_SIZE + sizeof(*stop);
@@ -1859,7 +1904,7 @@ int q6afe_port_stop(struct q6afe_port *port)
 	if (ret)
 		dev_err(afe->dev, "AFE close failed %d\n", ret);
 
-	return ret;
+	return ret ?: feedback_ret;
 }
 EXPORT_SYMBOL_GPL(q6afe_port_stop);
 
@@ -2229,6 +2274,21 @@ int q6afe_port_start(struct q6afe_port *port)
 		ret = q6afe_tfadsp_set_topology(port, topology_id);
 		if (ret)
 			return ret;
+		if (port->id == AFE_PORT_ID_SECONDARY_MI2S_TX) {
+			/* Stock PRI_MI2S_RX_VI_FB_MUX connects the mono amp's two slots. */
+			struct afe_feedback_path_cfg feedback = {
+				.minor_version = 1,
+				.dst_port_id = AFE_PORT_ID_SECONDARY_MI2S_RX,
+				.num_channels = 2,
+				.channel_info = { 1, 2 },
+			};
+
+			ret = q6afe_port_set_param_v2(port, &feedback,
+						       AFE_PARAM_ID_FEEDBACK_PATH_CFG,
+						       AFE_MODULE_FEEDBACK, sizeof(feedback));
+			if (ret)
+				return ret;
+		}
 	}
 
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
@@ -2302,10 +2362,8 @@ static struct q6afe_port *q6afe_port_get_from_afe(struct q6afe *afe,
 
 	/* if port is multiple times bind/unbind before callback finishes */
 	port = q6afe_find_port(afe, id);
-	if (port) {
-		dev_err(dev, "AFE Port already open\n");
+	if (port)
 		return port;
-	}
 
 	port_id = port_maps[id].port_id;
 

@@ -19,6 +19,7 @@
 #include <sound/jack.h>
 #include <sound/soc.h>
 #include <sound/soc-card.h>
+#include <sound/qcom/q6afe-tfadsp.h>
 #include <uapi/linux/input-event-codes.h>
 #include "common.h"
 #include "qdsp6/q6afe.h"
@@ -42,6 +43,8 @@ struct sm8150_snd_data {
 	struct pinctrl_state *sec_mi2s_sleep;
 	unsigned int tert_mi2s_clk_count;
 	unsigned int sec_mi2s_clk_count;
+	struct q6afe_port *speaker_rx;
+	struct q6afe_port *speaker_feedback;
 	bool jack_setup;
 	bool slim_port_setup;
 	bool jack_notifier_registered;
@@ -133,14 +136,32 @@ static int sm8150_sec_mi2s_fixup(struct snd_soc_pcm_runtime *rtd,
 	channels->min = 2;
 	channels->max = 2;
 	snd_mask_none(format);
-	snd_mask_set_format(format, SNDRV_PCM_FORMAT_S32_LE);
+	/* Stock SEC RX/TX use 24-bit samples in two 32-bit wire slots. */
+	snd_mask_set_format(format, SNDRV_PCM_FORMAT_S24_LE);
 	return 0;
+}
+
+static int sm8150_speaker_prepare(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	struct q6afe_i2s_cfg config = {
+		.sample_rate = 48000,
+		.bit_width = 24,
+		.num_channels = 2,
+		.sd_line_mask = BIT(0),
+		.fmt = SND_SOC_DAIFMT_BP_FP | SND_SOC_DAIFMT_NB_NF |
+		       SND_SOC_DAIFMT_I2S,
+	};
+	/* TX consumes the amplifier's current/voltage slots without a host PCM. */
+	return q6afe_i2s_port_prepare(data->speaker_feedback, &config);
 }
 
 static const struct snd_soc_ops sm8150_sec_mi2s_ops = {
 	.hw_params = sm8150_sec_mi2s_hw_params,
 	.startup = sm8150_sec_mi2s_startup,
 	.shutdown = sm8150_sec_mi2s_shutdown,
+	.prepare = sm8150_speaker_prepare,
 };
 
 static struct snd_soc_jack_pin sm8150_jack_pins[] = {
@@ -179,12 +200,31 @@ static int sm8150_late_probe(struct snd_soc_card *card)
 {
 	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(card);
 	struct snd_soc_dai *es_dai;
+	struct snd_kcontrol *control;
+	struct snd_ctl_elem_value value = {};
 	int ret;
 
 	if (!data->wcd_component)
 		return -ENODEV;
 
 	es_dai = snd_soc_card_get_codec_dai(card, "es9218-hifi");
+	if (data->speaker_feedback) {
+		/* Make the shared playback PCM usable before desktop port probing. */
+		ret = snd_soc_dapm_new_widgets(card);
+		if (ret)
+			return ret;
+		/* The external DAC allows probing independently of speaker firmware. */
+		control = snd_soc_card_get_kcontrol(card, es_dai ?
+						 "TERT_MI2S_RX Audio Mixer MultiMedia1" :
+						 "SEC_MI2S_RX Audio Mixer MultiMedia1");
+		if (!control)
+			return -ENOENT;
+		value.value.integer.value[0] = 1;
+		ret = control->put(control, &value);
+		if (ret < 0)
+			return ret;
+	}
+
 	if (es_dai) {
 		data->es_component = es_dai->component;
 		ret = snd_soc_component_set_jack(data->es_component, &data->jack,
@@ -205,6 +245,16 @@ static void sm8150_dai_exit(struct snd_soc_pcm_runtime *rtd)
 {
 	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 
+	if (rtd->dai_link->id == SECONDARY_MI2S_RX) {
+		int ret = q6afe_tfadsp_set_feedback(data->speaker_rx, NULL);
+
+		if (ret)
+			dev_err(rtd->dev, "failed to detach speaker feedback: %d\n", ret);
+		q6afe_tfadsp_put_port(data->speaker_feedback);
+		q6afe_tfadsp_put_port(data->speaker_rx);
+		data->speaker_feedback = NULL;
+		data->speaker_rx = NULL;
+	}
 	if (data->jack_notifier_registered) {
 		snd_soc_component_set_jack(data->wcd_component, NULL, NULL);
 		snd_soc_jack_notifier_unregister(&data->jack, &data->jack_notifier);
@@ -402,6 +452,33 @@ static int sm8150_dai_init(struct snd_soc_pcm_runtime *rtd)
 	}
 
 	switch (cpu_dai->id) {
+	case SECONDARY_MI2S_RX:
+		pdata->speaker_rx = q6afe_tfadsp_get_port(codec_dai->component->dev,
+						       SECONDARY_MI2S_RX);
+		if (IS_ERR(pdata->speaker_rx)) {
+			rval = PTR_ERR(pdata->speaker_rx);
+			pdata->speaker_rx = NULL;
+			return rval;
+		}
+		pdata->speaker_feedback = q6afe_tfadsp_get_port(codec_dai->component->dev,
+							     SECONDARY_MI2S_TX);
+		if (IS_ERR(pdata->speaker_feedback)) {
+			rval = PTR_ERR(pdata->speaker_feedback);
+			pdata->speaker_feedback = NULL;
+			q6afe_tfadsp_put_port(pdata->speaker_rx);
+			pdata->speaker_rx = NULL;
+			return rval;
+		}
+		rval = q6afe_tfadsp_set_feedback(pdata->speaker_rx,
+						 pdata->speaker_feedback);
+		if (rval) {
+			q6afe_tfadsp_put_port(pdata->speaker_feedback);
+			q6afe_tfadsp_put_port(pdata->speaker_rx);
+			pdata->speaker_feedback = NULL;
+			pdata->speaker_rx = NULL;
+			return rval;
+		}
+		break;
 	case SLIMBUS_0_RX...SLIMBUS_6_TX:
 		/* setting up wcd multiple times for slim port is redundant */
 		if (pdata->slim_port_setup || !link->no_pcm)

@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/unaligned.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/qcom/q6afe-tfadsp.h>
@@ -29,6 +30,7 @@
 #define TFA9872_MANAOOSC		BIT(4)
 #define TFA9872_INTSMUTE		BIT(1)
 #define TFA9872_MTPEX			BIT(1)
+#define TFA9872_PROFILE			"boombox"
 
 struct tfa9872_priv {
 	struct device *dev;
@@ -76,11 +78,11 @@ static int tfa9872_load_config(struct tfa9872_priv *tfa)
 	if (ret)
 		return ret;
 	ret = tfa9872_container_parse(fw, to_i2c_client(tfa->dev)->addr,
-				      tfa->rate, "stereo", 0, resistance, &tfa->config);
+				      tfa->rate, TFA9872_PROFILE, 0, resistance, &tfa->config);
 	release_firmware(fw);
 	if (!ret)
-		dev_info(tfa->dev, "stereo configuration ready, calibration %u mOhm\n",
-			 resistance);
+		dev_info(tfa->dev, "%s configuration ready, calibration %u mOhm\n",
+			 TFA9872_PROFILE, resistance);
 	return ret;
 }
 
@@ -179,7 +181,7 @@ static int tfa9872_hw_params(struct snd_pcm_substream *substream,
 	return ret;
 }
 
-static int tfa9872_start(struct tfa9872_priv *tfa)
+static int tfa9872_configure(struct tfa9872_priv *tfa)
 {
 	int ret;
 
@@ -211,16 +213,7 @@ static int tfa9872_start(struct tfa9872_priv *tfa)
 		dev_err(tfa->dev, "TFADSP configuration incomplete: %d\n", ret);
 		return ret;
 	}
-
-	ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
-				 TFA9872_PWDN | TFA9872_DCA | TFA9872_AMPE,
-				 TFA9872_DCA | TFA9872_AMPE);
-	if (ret)
-		return ret;
-	ret = regmap_update_bits(tfa->regmap, TFA9872_AUDIO_CONTROL,
-				 TFA9872_INTSMUTE, 0);
-
-	return ret;
+	return 0;
 }
 
 static int tfa9872_stop(struct tfa9872_priv *tfa)
@@ -247,7 +240,12 @@ static int tfa9872_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 	if (mute) {
 		ret = tfa9872_stop(tfa);
 	} else {
-		ret = tfa9872_start(tfa);
+		ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
+					 TFA9872_PWDN | TFA9872_DCA | TFA9872_AMPE,
+					 TFA9872_DCA | TFA9872_AMPE);
+		if (!ret)
+			ret = regmap_update_bits(tfa->regmap, TFA9872_AUDIO_CONTROL,
+						 TFA9872_INTSMUTE, 0);
 		if (ret) {
 			int stop_ret = tfa9872_stop(tfa);
 
@@ -260,10 +258,73 @@ static int tfa9872_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 	return ret;
 }
 
+static int tfa9872_prepare(struct snd_pcm_substream *substream,
+			   struct snd_soc_dai *dai)
+{
+	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(dai->component);
+	int ret, stop_ret;
+
+	guard(mutex)(&tfa->lock);
+	/* Prepare errors reach ALSA; ASoC does not propagate mute callback errors. */
+	ret = tfa9872_configure(tfa);
+	if (ret) {
+		stop_ret = tfa9872_stop(tfa);
+		if (stop_ret)
+			dev_err(tfa->dev, "failed to power down amplifier: %d\n", stop_ret);
+	}
+	return ret;
+}
+
 static const struct snd_soc_dai_ops tfa9872_dai_ops = {
 	.hw_params = tfa9872_hw_params,
+	.prepare = tfa9872_prepare,
 	.set_fmt = tfa9872_set_fmt,
 	.mute_stream = tfa9872_mute_stream,
+};
+
+static int tfa9872_resistance_get(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *value)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(component);
+	/* Mono GetRe25C returns RPC status followed by two Q16 resistances. */
+	const u8 command[] = { 'm', 'm', 0, 6, 0, 4, 0x85, 0x81, 4, 0 };
+	__le32 result[3];
+	u32 status, resistance;
+	int ret;
+
+	guard(mutex)(&tfa->lock);
+	ret = q6afe_tfadsp_read_msg(tfa->afe_port, command, sizeof(command),
+				    result, sizeof(result));
+	if (ret)
+		return ret;
+	status = le32_to_cpu(result[0]);
+	if (status) {
+		dev_err(tfa->dev, "TFADSP resistance query failed: status=%u\n", status);
+		return -EIO;
+	}
+	resistance = le32_to_cpu(result[1]);
+	if (!resistance)
+		return -ENODATA;
+	resistance = DIV_ROUND_CLOSEST((u64)resistance * 1000, 65536);
+	if (resistance > U16_MAX)
+		return -ERANGE;
+	put_unaligned_le32(resistance, value->value.bytes.data);
+	return 0;
+}
+
+static const struct snd_kcontrol_new tfa9872_controls[] = {
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "TFA9872 DSP Resistance",
+		.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
+		/* Byte diagnostics are excluded from ALSA simple-mixer volume probing. */
+		.info = snd_soc_bytes_info_ext,
+		.get = tfa9872_resistance_get,
+		.private_value = (unsigned long)&(struct soc_bytes_ext) {
+			.max = sizeof(__le32),
+		},
+	},
 };
 
 static const struct snd_soc_dapm_widget tfa9872_widgets[] = {
@@ -289,6 +350,8 @@ static struct snd_soc_dai_driver tfa9872_dai = {
 };
 
 static const struct snd_soc_component_driver tfa9872_component = {
+	.controls = tfa9872_controls,
+	.num_controls = ARRAY_SIZE(tfa9872_controls),
 	.dapm_widgets = tfa9872_widgets,
 	.num_dapm_widgets = ARRAY_SIZE(tfa9872_widgets),
 	.dapm_routes = tfa9872_routes,
@@ -305,6 +368,12 @@ static int tfa9872_tfadsp_event(struct notifier_block *nb,
 	mutex_lock(&tfa->lock);
 	switch (event) {
 	case Q6AFE_TFADSP_EVENT_CLOSE:
+		/* An XRUN may create a new RX instance before this work acquires the lock. */
+		if (q6afe_tfadsp_is_ready(tfa->afe_port))
+			break;
+		fallthrough;
+	case Q6AFE_TFADSP_EVENT_RX_DISABLED:
+	case Q6AFE_TFADSP_EVENT_TX_DISABLED:
 		if (tfa9872_stop(tfa))
 			dev_err(tfa->dev, "failed to power down after DSP close\n");
 		break;

@@ -140,8 +140,10 @@
 				"sec-mi2s-active", "sec-mi2s-sleep";
 		pinctrl-0 = <&tert_mi2s_active &tert_mi2s_dout_active>;
 		pinctrl-1 = <&tert_mi2s_sleep &tert_mi2s_dout_sleep>;
-		pinctrl-2 = <&sec_mi2s_active &sec_mi2s_sd1_active>;
-		pinctrl-3 = <&sec_mi2s_sleep &sec_mi2s_sd1_sleep>;
+		pinctrl-2 = <&sec_mi2s_active &sec_mi2s_sd1_active
+			    &sec_mi2s_sd0_active>;
+		pinctrl-3 = <&sec_mi2s_sleep &sec_mi2s_sd1_sleep
+			    &sec_mi2s_sd0_sleep>;
 		audio-routing =
 			"RX_BIAS", "MCLK",
 			"MIC BIAS1", "MCLK",

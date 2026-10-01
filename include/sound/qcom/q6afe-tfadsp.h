@@ -27,10 +27,12 @@ struct q6afe_tfadsp_event_data {
 struct q6afe_port *q6afe_tfadsp_get_port(struct device *dev,
 					 int dai_id);
 void q6afe_tfadsp_put_port(struct q6afe_port *port);
+int q6afe_tfadsp_set_feedback(struct q6afe_port *rx, struct q6afe_port *tx);
 int q6afe_tfadsp_set_topology(struct q6afe_port *port, u32 topology_id);
 int q6afe_tfadsp_send_msg(struct q6afe_port *port, const void *buf,
 			  size_t len);
-int q6afe_tfadsp_read_msg(struct q6afe_port *port, void *buf, size_t len);
+int q6afe_tfadsp_read_msg(struct q6afe_port *port, const void *command,
+			  size_t command_size, void *buf, size_t len);
 bool q6afe_tfadsp_is_ready(struct q6afe_port *port);
 int q6afe_tfadsp_wait_configured(struct q6afe_port *port);
 int q6afe_tfadsp_register_notifier(struct q6afe_port *port,
