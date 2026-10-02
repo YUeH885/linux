@@ -2110,6 +2110,14 @@ config SND_SOC_SMA1307
 	  If you are using a system with an SMA1307 amplifier connected
 	  via I2C, enable this option.
 
+config SND_SOC_SMA6101
+	tristate "Silicon Mitus SMA6101 Audio Amplifier"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Enable support for the Silicon Mitus SMA6101 boosted audio amplifier
+	  and piezoelectric screen sounder.
+
 config SND_SOC_SPDIF
 	tristate "S/PDIF CODEC"
 
