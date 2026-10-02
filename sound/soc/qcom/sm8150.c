@@ -452,15 +452,26 @@ static int sm8150_dai_init(struct snd_soc_pcm_runtime *rtd)
 	}
 
 	switch (cpu_dai->id) {
-	case SECONDARY_MI2S_RX:
-		pdata->speaker_rx = q6afe_tfadsp_get_port(codec_dai->component->dev,
+	case SECONDARY_MI2S_RX: {
+		struct snd_soc_dai *tfa_dai = codec_dai;
+		struct snd_soc_dai *dai;
+
+		for_each_rtd_codec_dais(rtd, i, dai) {
+			if (of_property_present(dai->component->dev->of_node,
+						"qcom,q6afe")) {
+				tfa_dai = dai;
+				break;
+			}
+		}
+
+		pdata->speaker_rx = q6afe_tfadsp_get_port(tfa_dai->component->dev,
 						       SECONDARY_MI2S_RX);
 		if (IS_ERR(pdata->speaker_rx)) {
 			rval = PTR_ERR(pdata->speaker_rx);
 			pdata->speaker_rx = NULL;
 			return rval;
 		}
-		pdata->speaker_feedback = q6afe_tfadsp_get_port(codec_dai->component->dev,
+		pdata->speaker_feedback = q6afe_tfadsp_get_port(tfa_dai->component->dev,
 							     SECONDARY_MI2S_TX);
 		if (IS_ERR(pdata->speaker_feedback)) {
 			rval = PTR_ERR(pdata->speaker_feedback);
@@ -479,6 +490,7 @@ static int sm8150_dai_init(struct snd_soc_pcm_runtime *rtd)
 			return rval;
 		}
 		break;
+	}
 	case SLIMBUS_0_RX...SLIMBUS_6_TX:
 		/* setting up wcd multiple times for slim port is redundant */
 		if (pdata->slim_port_setup || !link->no_pcm)
