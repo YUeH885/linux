@@ -19825,6 +19825,20 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/sound/nxp,tfa9872.yaml
 F:	sound/soc/codecs/tfa9872*
 
+SILICON MITUS SMA6101 DRIVER
+M:	Yuzu <yuzu23234@gmail.com>
+L:	linux-sound@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/sound/siliconmitus,sma6101.yaml
+F:	sound/soc/codecs/sma6101*
+
+DONGWOON DW7800 DRIVER
+M:	Yuzu <yuzu23234@gmail.com>
+L:	linux-input@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/input/dongwoon,dw7800.yaml
+F:	drivers/input/misc/dw7800.c
+
 NXP TFA9879 DRIVER
 M:	Peter Rosin <peda@lysator.liu.se>
 L:	linux-sound@vger.kernel.org
