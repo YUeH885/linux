@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/dongwoon,dw7800.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Dongwoon Anatech DW7800 Haptic Driver
+
+maintainers:
+  - Yuzu <yuzu23234@gmail.com>
+
+description:
+  Dongwoon Anatech DW7800 I2C haptic vibrator driver with internal FIFO
+  and force-feedback rumble support.
+
+properties:
+  compatible:
+    const: dongwoon,dw7800
+
+  reg:
+    maxItems: 1
+
+  dongwoon,vpwr-on:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Power configuration indicator from vendor DTS.
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        vibrator@59 {
+            compatible = "dongwoon,dw7800";
+            reg = <0x59>;
+        };
+    };
