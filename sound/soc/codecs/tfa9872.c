@@ -30,7 +30,16 @@
 #define TFA9872_MANAOOSC		BIT(4)
 #define TFA9872_INTSMUTE		BIT(1)
 #define TFA9872_MTPEX			BIT(1)
-#define TFA9872_PROFILE			"boombox"
+
+static const char * const tfa9872_profiles[] = {
+	"stereo",
+	"boombox",
+};
+
+static const char * const tfa9872_channels[] = {
+	"Left",
+	"Right",
+};
 
 struct tfa9872_priv {
 	struct device *dev;
@@ -39,6 +48,9 @@ struct tfa9872_priv {
 	const char *firmware_name;
 	struct tfa9872_config *config;
 	unsigned int rate;
+	unsigned int profile_idx;
+	unsigned int channel;
+	bool enabled;
 	struct notifier_block tfadsp_nb;
 	/* Serialize DAI transitions with asynchronous DSP close events. */
 	struct mutex lock;
@@ -61,6 +73,7 @@ static void tfa9872_release_config(void *data)
 static int tfa9872_load_config(struct tfa9872_priv *tfa)
 {
 	const struct firmware *fw;
+	const char *profile = tfa9872_profiles[tfa->profile_idx];
 	unsigned int mtp, resistance;
 	int ret;
 
@@ -78,11 +91,11 @@ static int tfa9872_load_config(struct tfa9872_priv *tfa)
 	if (ret)
 		return ret;
 	ret = tfa9872_container_parse(fw, to_i2c_client(tfa->dev)->addr,
-				      tfa->rate, TFA9872_PROFILE, 0, resistance, &tfa->config);
+				      tfa->rate, profile, 0, resistance, &tfa->config);
 	release_firmware(fw);
 	if (!ret)
 		dev_info(tfa->dev, "%s configuration ready, calibration %u mOhm\n",
-			 TFA9872_PROFILE, resistance);
+			 profile, resistance);
 	return ret;
 }
 
@@ -185,13 +198,23 @@ static int tfa9872_configure(struct tfa9872_priv *tfa)
 {
 	int ret;
 
-	if (!tfa->config || !tfa->afe_port)
+	if (!tfa->config) {
+		ret = tfa9872_load_config(tfa);
+		if (ret)
+			return ret;
+	}
+
+	if (!tfa->afe_port)
 		return -EAGAIN;
 
 	ret = tfa9872_init(tfa);
 	if (ret)
 		return ret;
 	ret = tfa9872_apply_config(tfa);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(tfa->regmap, 0x26, 0x00ff,
+				 (tfa->channel == 1) ? 0x0001 : 0x0010);
 	if (ret)
 		return ret;
 	ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
@@ -237,7 +260,7 @@ static int tfa9872_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 		return 0;
 
 	mutex_lock(&tfa->lock);
-	if (mute) {
+	if (mute || !tfa->enabled) {
 		ret = tfa9872_stop(tfa);
 	} else {
 		ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
@@ -265,6 +288,9 @@ static int tfa9872_prepare(struct snd_pcm_substream *substream,
 	int ret, stop_ret;
 
 	guard(mutex)(&tfa->lock);
+	if (!tfa->enabled)
+		return 0;
+
 	/* Prepare errors reach ALSA; ASoC does not propagate mute callback errors. */
 	ret = tfa9872_configure(tfa);
 	if (ret) {
@@ -313,7 +339,108 @@ static int tfa9872_resistance_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+static const struct soc_enum tfa9872_profile_enum =
+	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(tfa9872_profiles), tfa9872_profiles);
+
+static int tfa9872_profile_get(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.enumerated.item[0] = tfa->profile_idx;
+	return 0;
+}
+
+static int tfa9872_profile_put(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(component);
+	unsigned int item = ucontrol->value.enumerated.item[0];
+
+	if (item >= ARRAY_SIZE(tfa9872_profiles))
+		return -EINVAL;
+
+	guard(mutex)(&tfa->lock);
+	if (tfa->profile_idx == item)
+		return 0;
+
+	tfa->profile_idx = item;
+	if (tfa->config) {
+		tfa9872_config_free(tfa->config);
+		tfa->config = NULL;
+	}
+	return 1;
+}
+
+static int tfa9872_enable_get(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = tfa->enabled;
+	return 0;
+}
+
+static int tfa9872_enable_put(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(component);
+	bool val = !!ucontrol->value.integer.value[0];
+
+	guard(mutex)(&tfa->lock);
+	if (tfa->enabled == val)
+		return 0;
+
+	tfa->enabled = val;
+	if (!tfa->enabled)
+		tfa9872_stop(tfa);
+	return 1;
+}
+
+static const struct soc_enum tfa9872_channel_enum =
+	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(tfa9872_channels), tfa9872_channels);
+
+static int tfa9872_channel_get(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.enumerated.item[0] = tfa->channel;
+	return 0;
+}
+
+static int tfa9872_channel_put(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(component);
+	unsigned int item = ucontrol->value.enumerated.item[0];
+
+	if (item >= ARRAY_SIZE(tfa9872_channels))
+		return -EINVAL;
+
+	guard(mutex)(&tfa->lock);
+	if (tfa->channel == item)
+		return 0;
+
+	tfa->channel = item;
+	regmap_update_bits(tfa->regmap, 0x26, 0x00ff,
+			   (tfa->channel == 1) ? 0x0001 : 0x0010);
+	return 1;
+}
+
 static const struct snd_kcontrol_new tfa9872_controls[] = {
+	SOC_ENUM_EXT("TFA9872 Profile", tfa9872_profile_enum,
+		     tfa9872_profile_get, tfa9872_profile_put),
+	SOC_ENUM_EXT("TFA9872 Channel", tfa9872_channel_enum,
+		     tfa9872_channel_get, tfa9872_channel_put),
+	SOC_SINGLE_BOOL_EXT("TFA9872 Switch", 0,
+			    tfa9872_enable_get, tfa9872_enable_put),
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "TFA9872 DSP Resistance",
@@ -402,6 +529,9 @@ static int tfa9872_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 	mutex_init(&tfa->lock);
+	tfa->enabled = true;
+	tfa->profile_idx = 0;
+	tfa->channel = 1;
 	tfa->regmap = devm_regmap_init_i2c(client, &tfa9872_regmap_config);
 	if (IS_ERR(tfa->regmap))
 		return PTR_ERR(tfa->regmap);
