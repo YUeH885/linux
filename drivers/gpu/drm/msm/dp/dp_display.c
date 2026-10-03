@@ -290,6 +290,8 @@ static int msm_dp_display_process_hpd_high(struct msm_dp_display_private *dp)
 			return -ETIMEDOUT;
 	}
 
+	dp->msm_dp_display.psr_supported = dp->panel->psr_cap.version && psr_enabled;
+	dp->link->psr_supported = dp->msm_dp_display.psr_supported;
 	msm_dp_link_process_request(dp->link);
 
 	if (!dp->msm_dp_display.is_edp)
@@ -297,8 +299,6 @@ static int msm_dp_display_process_hpd_high(struct msm_dp_display_private *dp)
 						 connector_status_connected,
 						 dp->panel->dpcd,
 						 dp->panel->downstream_ports);
-
-	dp->msm_dp_display.psr_supported = dp->panel->psr_cap.version && psr_enabled;
 
 	dp->audio_supported = info->has_audio;
 	msm_dp_panel_handle_sink_request(dp->panel, drm_edid);
@@ -786,9 +786,9 @@ enum drm_mode_status msm_dp_display_mode_valid(struct msm_dp *dp,
 		mode_bpp = default_bpp;
 
 	mode_bpp = msm_dp_panel_get_mode_bpp(msm_dp_display->panel,
-			mode_bpp, mode_pclk_khz);
+			mode_bpp, mode->clock);
 
-	mode_rate_khz = mode_pclk_khz * mode_bpp;
+	mode_rate_khz = mode->clock * mode_bpp;
 	supported_rate_khz = link_info->num_lanes * link_info->rate * 8;
 
 	if (mode_rate_khz > supported_rate_khz)

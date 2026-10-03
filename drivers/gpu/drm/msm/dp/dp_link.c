@@ -1056,9 +1056,9 @@ int msm_dp_link_process_request(struct msm_dp_link *msm_dp_link)
 		msm_dp_link->sink_request |= DP_TEST_LINK_TRAINING;
 	} else if (!msm_dp_link_process_phy_test_pattern_request(link)) {
 		msm_dp_link->sink_request |= DP_TEST_LINK_PHY_TEST_PATTERN;
-	} else if (msm_dp_link_read_psr_error_status(link)) {
+	} else if (msm_dp_link->psr_supported && msm_dp_link_read_psr_error_status(link)) {
 		DRM_ERROR("PSR IRQ_HPD received\n");
-	} else if (msm_dp_link_psr_capability_changed(link)) {
+	} else if (msm_dp_link->psr_supported && msm_dp_link_psr_capability_changed(link)) {
 		drm_dbg_dp(link->drm_dev, "PSR Capability changed\n");
 	} else {
 		ret = msm_dp_link_process_link_status_update(link);
