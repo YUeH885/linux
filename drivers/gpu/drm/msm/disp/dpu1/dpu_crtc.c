@@ -1455,8 +1455,8 @@ static int dpu_crtc_assign_resources(struct drm_crtc *crtc,
 
 		cstate->mixers[i].hw_lm = to_dpu_hw_mixer(hw_lm[i]);
 		cstate->mixers[i].lm_ctl = to_dpu_hw_ctl(hw_ctl[ctl_idx]);
-		if (i < num_dspp)
-			cstate->mixers[i].hw_dspp = to_dpu_hw_dspp(hw_dspp[i]);
+		cstate->mixers[i].hw_dspp = i < num_dspp ?
+			to_dpu_hw_dspp(hw_dspp[i]) : NULL;
 	}
 
 	cstate->num_mixers = num_lm;
@@ -1476,6 +1476,7 @@ int dpu_crtc_check_mode_changed(struct drm_crtc_state *old_crtc_state,
 {
 	struct drm_encoder *drm_enc;
 	struct drm_crtc *crtc = new_crtc_state->crtc;
+	struct dpu_kms *dpu_kms = _dpu_crtc_get_kms(crtc);
 	bool clone_mode_enabled = drm_crtc_in_clone_mode(old_crtc_state);
 	bool clone_mode_requested = drm_crtc_in_clone_mode(new_crtc_state);
 
@@ -1490,6 +1491,16 @@ int dpu_crtc_check_mode_changed(struct drm_crtc_state *old_crtc_state,
 	if ((clone_mode_requested && !clone_mode_enabled) ||
 	    (!clone_mode_requested && clone_mode_enabled))
 		new_crtc_state->mode_changed = true;
+
+	if (new_crtc_state->color_mgmt_changed && !dpu_kms->catalog->dspp_top) {
+		bool old_dspp = old_crtc_state->ctm || old_crtc_state->gamma_lut ||
+				old_crtc_state->degamma_lut;
+		bool new_dspp = new_crtc_state->ctm || new_crtc_state->gamma_lut ||
+				new_crtc_state->degamma_lut;
+
+		if (old_dspp != new_dspp)
+			new_crtc_state->mode_changed = true;
+	}
 
 	return 0;
 }
@@ -1517,9 +1528,8 @@ static int dpu_crtc_atomic_check(struct drm_crtc *crtc,
 	    drm_color_lut_size(crtc_state->gamma_lut) != DPU_GAMMA_LUT_SIZE)
 		return -EINVAL;
 
-	/* don't reallocate resources if only ACTIVE has beeen changed */
-	if (crtc_state->mode_changed || crtc_state->connectors_changed ||
-	    crtc_state->color_mgmt_changed) {
+	/* Resource changes require the encoder's atomic_mode_set as well. */
+	if (crtc_state->mode_changed || crtc_state->connectors_changed) {
 		rc = dpu_crtc_assign_resources(crtc, crtc_state);
 		if (rc < 0)
 			return rc;
