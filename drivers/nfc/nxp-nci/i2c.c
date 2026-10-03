@@ -13,6 +13,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
@@ -34,6 +35,8 @@ struct nxp_nci_i2c_phy {
 	struct i2c_client *i2c_dev;
 	struct nci_dev *ndev;
 
+	struct clk *clk;
+	bool clk_enabled;
 	struct gpio_desc *gpiod_en;
 	struct gpio_desc *gpiod_fw;
 
@@ -47,13 +50,28 @@ static int nxp_nci_i2c_set_mode(void *phy_id,
 				    enum nxp_nci_mode mode)
 {
 	struct nxp_nci_i2c_phy *phy = (struct nxp_nci_i2c_phy *) phy_id;
+	int r;
 
-	gpiod_set_value_cansleep(phy->gpiod_fw, (mode == NXP_NCI_MODE_FW) ? 1 : 0);
-	gpiod_set_value_cansleep(phy->gpiod_en, (mode != NXP_NCI_MODE_COLD) ? 1 : 0);
-	usleep_range(10000, 15000);
-
-	if (mode == NXP_NCI_MODE_COLD)
+	if (mode == NXP_NCI_MODE_COLD) {
+		gpiod_set_value_cansleep(phy->gpiod_fw, 0);
+		gpiod_set_value_cansleep(phy->gpiod_en, 0);
+		if (phy->clk_enabled) {
+			clk_disable_unprepare(phy->clk);
+			phy->clk_enabled = false;
+		}
 		phy->hard_fault = 0;
+	} else {
+		if (!phy->clk_enabled) {
+			r = clk_prepare_enable(phy->clk);
+			if (r)
+				return r;
+			phy->clk_enabled = true;
+		}
+		phy->hard_fault = 0;
+		gpiod_set_value_cansleep(phy->gpiod_fw, (mode == NXP_NCI_MODE_FW) ? 1 : 0);
+		gpiod_set_value_cansleep(phy->gpiod_en, 1);
+	}
+	usleep_range(10000, 15000);
 
 	return 0;
 }
@@ -83,6 +101,7 @@ static int nxp_nci_i2c_write(void *phy_id, struct sk_buff *skb)
 		r = -EREMOTEIO;
 	} else {
 		/* Success but return 0 and not number of bytes */
+		usleep_range(1000, 1500);
 		r = 0;
 	}
 
@@ -211,7 +230,7 @@ static irqreturn_t nxp_nci_i2c_irq_thread_fn(int irq, void *phy_id)
 
 	mutex_lock(&info->info_lock);
 
-	if (phy->hard_fault != 0)
+	if (phy->hard_fault != 0 || info->mode == NXP_NCI_MODE_COLD)
 		goto exit_irq_handled;
 
 	switch (info->mode) {
@@ -295,6 +314,12 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
 	r = devm_acpi_dev_add_driver_gpios(dev, acpi_nxp_nci_gpios);
 	if (r)
 		dev_dbg(dev, "Unable to add GPIO mapping table\n");
+
+	phy->clk = devm_clk_get_optional(dev, NULL);
+	if (IS_ERR(phy->clk)) {
+		nfc_err(dev, "Failed to get clock\n");
+		return PTR_ERR(phy->clk);
+	}
 
 	phy->gpiod_en = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
 	if (IS_ERR(phy->gpiod_en)) {
