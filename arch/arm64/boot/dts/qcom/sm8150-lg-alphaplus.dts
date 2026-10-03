@@ -131,6 +131,22 @@
 		vin-supply = <&vph_pwr>;
 	};
 
+	sbu_mux: sbu-mux {
+		compatible = "lg,alphaplus-sbu-mux", "gpio-sbu-mux";
+		enable-gpios = <&tlmm 42 GPIO_ACTIVE_LOW>;
+		select-gpios = <&tlmm 148 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sbu_mux_default>;
+		mode-switch;
+		orientation-switch;
+
+		port {
+			sbu_mux_in: endpoint {
+				remote-endpoint = <&pm8150b_typec_sbu_out>;
+			};
+		};
+	};
+
 	sound {
 		compatible = "qcom,sm8150-lg-alphaplus-sndcard",
 			     "qcom,sm8150-sndcard";
@@ -591,14 +607,48 @@
 &tlmm {
 	/*
 	 * Reserve the eGPIO range except GPIO96 for SD card detect,
-	 * GPIO113 for NFC clock request,
+	 * GPIO113 for NFC clock request, GPIO119 for SBU LDO/OE,
 	 * GPIO152 for touchscreen VDD, GPIO123 for the WCD9340 interrupt,
 	 * GPIO125 for the SMA6101 interrupt, GPIO126-135 for the secondary/
-	 * tertiary MI2S interfaces and GPIO143 for the codec reset. Touch
-	 * IRQ uses PDC90, not TLMM122.
+	 * tertiary MI2S interfaces, GPIO143 for the codec reset and GPIO148
+	 * for DisplayPort AUX select. Touch IRQ uses PDC90, not TLMM122.
 	 */
-	gpio-reserved-ranges = <93 3>, <97 16>, <114 9>, <124 1>, <136 7>,
-			       <144 8>, <153 22>;
+	gpio-reserved-ranges = <93 3>, <97 16>, <114 5>, <120 3>, <124 1>,
+			       <136 7>, <144 4>, <149 3>, <153 22>;
+
+	sbu_mux_default: sbu-mux-default-state {
+		sbu-switch-pins {
+			pins = "gpio87";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+			output-high;
+		};
+
+		uart-sel-pins {
+			pins = "gpio35";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+			output-low;
+		};
+
+		ldo-en-pins {
+			pins = "gpio119";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+			output-low;
+		};
+
+		usbplug-cc-pins {
+			pins = "gpio38";
+			function = "gpio";
+			drive-strength = <16>;
+			bias-disable;
+			output-low;
+		};
+	};
 
 	sma_intr_default: sma-intr-default-state {
 		pins = "gpio125";
@@ -798,7 +848,6 @@
 	connector {
 		compatible = "usb-c-connector";
 		power-role = "dual";
-		try-power-role = "sink";
 		data-role = "dual";
 		vbus-supply = <&pm8150b_vbus>;
 
@@ -809,6 +858,13 @@
 					 PDO_FIXED_USB_COMM |
 					 PDO_FIXED_DATA_SWAP)>;
 		op-sink-microwatt = <13000000>;
+
+		altmodes {
+			displayport {
+				svid = /bits/ 16 <0xff01>;
+				vdo = <0x00001c46>;
+			};
+		};
 
 		ports {
 			#address-cells = <1>;
@@ -827,6 +883,14 @@
 
 				pm8150b_typec_mux_in: endpoint {
 					remote-endpoint = <&usb_1_qmpphy_out>;
+				};
+			};
+
+			port@2 {
+				reg = <2>;
+
+				pm8150b_typec_sbu_out: endpoint {
+					remote-endpoint = <&sbu_mux_in>;
 				};
 			};
 		};
@@ -1094,6 +1158,14 @@
 &mdss_dsi0_phy {
 	status = "okay";
 	vdds-supply = <&vreg_l5a_0p875>;
+};
+
+&mdss_dp {
+	status = "okay";
+};
+
+&mdss_dp_out {
+	data-lanes = <0 1>;
 };
 
 &pm8150_gpios {
