@@ -591,19 +591,43 @@
 &tlmm {
 	/*
 	 * Reserve the eGPIO range except GPIO96 for SD card detect,
+	 * GPIO113 for NFC clock request,
 	 * GPIO152 for touchscreen VDD, GPIO123 for the WCD9340 interrupt,
 	 * GPIO125 for the SMA6101 interrupt, GPIO126-135 for the secondary/
 	 * tertiary MI2S interfaces and GPIO143 for the codec reset. Touch
 	 * IRQ uses PDC90, not TLMM122.
 	 */
-	gpio-reserved-ranges = <93 3>, <97 26>, <124 1>, <136 7>, <144 8>,
-			       <153 22>;
+	gpio-reserved-ranges = <93 3>, <97 16>, <114 9>, <124 1>, <136 7>,
+			       <144 8>, <153 22>;
 
 	sma_intr_default: sma-intr-default-state {
 		pins = "gpio125";
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;
+	};
+
+	nfc_default: nfc-default-state {
+		int-pins {
+			pins = "gpio47";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+
+		enable-pins {
+			pins = "gpio41";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		firmware-pins {
+			pins = "gpio113";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
 	};
 
 	bluetooth_uart_default: bluetooth-uart-default-state {
@@ -1207,6 +1231,27 @@
 	vdd-1.8-xo-supply = <&vreg_l7a_1p8>;
 	vdd-1.3-rfa-supply = <&vdda_wcss_adcdac_1>;
 	vdd-3.3-ch0-supply = <&vreg_l11c_3p3>;
+};
+
+&i2c9 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	nfc@28 {
+		compatible = "nxp,pn547", "nxp,nxp-nci-i2c";
+		reg = <0x28>;
+
+		clocks = <&rpmhcc RPMH_LN_BB_CLK2>;
+
+		interrupt-parent = <&tlmm>;
+		interrupts = <47 IRQ_TYPE_EDGE_RISING>;
+
+		enable-gpios = <&tlmm 41 GPIO_ACTIVE_HIGH>;
+		firmware-gpios = <&tlmm 113 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-0 = <&nfc_default>;
+		pinctrl-names = "default";
+	};
 };
 
 &pm8150l_flash {
