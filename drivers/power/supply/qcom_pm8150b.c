@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/bitops.h>
+#include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/iio/consumer.h>
 #include <linux/interrupt.h>
@@ -248,8 +249,10 @@ struct pm8150b_charger {
 	struct fwnode_handle *typec_fwnode;
 	struct notifier_block psy_nb;
 	struct delayed_work policy_work;
-	/* Serialize Gen4 SRAM DMA arbitration. */
+	/* Serialize Gen4 register updates and SRAM DMA arbitration. */
 	struct mutex fg_lock;
+	struct completion fg_mem_attn;
+	int fg_mem_attn_irq;
 	/* Serialize ADC channel selection and reads. */
 	struct mutex adc_lock;
 	/* Serialize USB-C, PD, and PM8150B input limit updates. */
@@ -421,24 +424,30 @@ static int pm8150b_fg_read_temp(struct pm8150b_charger *chip, int *temp)
 static int pm8150b_fg_set_smb_measure(struct pm8150b_charger *chip,
 				      bool enable)
 {
-	int ret, ret2;
+	int ret;
 
 	if (chip->fg_smb_measure_enabled == enable)
 		return 0;
 
 	mutex_lock(&chip->fg_lock);
-	ret = pm8150b_fg_request(chip);
-	if (!ret)
-		ret = regmap_update_bits(chip->regmap,
-					 PM8150B_FG_CNV_CHAR_CFG,
-					 PM8150B_FG_SMB_MEASURE_EN,
-					 enable ? PM8150B_FG_SMB_MEASURE_EN : 0);
-	ret2 = pm8150b_fg_release(chip);
+	/* Changing the conversion sequence requires the FG measurement boundary. */
+	reinit_completion(&chip->fg_mem_attn);
+	enable_irq(chip->fg_mem_attn_irq);
+	ret = wait_for_completion_timeout(&chip->fg_mem_attn,
+					  msecs_to_jiffies(2000));
+	disable_irq(chip->fg_mem_attn_irq);
+	if (!ret) {
+		ret = -ETIMEDOUT;
+		goto unlock;
+	}
+
+	ret = regmap_update_bits(chip->regmap, PM8150B_FG_CNV_CHAR_CFG,
+				 PM8150B_FG_SMB_MEASURE_EN,
+				 enable ? PM8150B_FG_SMB_MEASURE_EN : 0);
+unlock:
 	mutex_unlock(&chip->fg_lock);
 	if (ret)
 		return ret;
-	if (ret2)
-		return ret2;
 
 	chip->fg_smb_measure_enabled = enable;
 	return 0;
@@ -2330,6 +2339,14 @@ static irqreturn_t pm8150b_wdog_bark_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t pm8150b_fg_mem_attn_irq(int irq, void *data)
+{
+	struct pm8150b_charger *chip = data;
+
+	complete(&chip->fg_mem_attn);
+	return IRQ_HANDLED;
+}
+
 static void pm8150b_disable_irq_wake(void *data)
 {
 	disable_irq_wake((unsigned long)data);
@@ -2397,6 +2414,7 @@ static int pm8150b_probe(struct platform_device *pdev)
 	if (!chip->regmap)
 		return dev_err_probe(chip->dev, -ENODEV, "PMIC regmap not found\n");
 	mutex_init(&chip->fg_lock);
+	init_completion(&chip->fg_mem_attn);
 	mutex_init(&chip->adc_lock);
 	mutex_init(&chip->usb_lock);
 	INIT_DELAYED_WORK(&chip->policy_work, pm8150b_policy_work);
@@ -2408,6 +2426,19 @@ static int pm8150b_probe(struct platform_device *pdev)
 	chip->fg_smb_measure_enabled = -1;
 	chip->temp_zone = PM8150B_TEMP_NORMAL;
 	platform_set_drvdata(pdev, chip);
+
+	/* Keep this IRQ alive until policy work has been stopped. */
+	chip->fg_mem_attn_irq = platform_get_irq_byname(pdev, "mem-attn");
+	if (chip->fg_mem_attn_irq < 0)
+		return chip->fg_mem_attn_irq;
+	ret = devm_request_irq(chip->dev, chip->fg_mem_attn_irq,
+			       pm8150b_fg_mem_attn_irq, IRQF_NO_AUTOEN,
+			       "mem-attn", chip);
+	if (ret)
+		return dev_err_probe(chip->dev, ret,
+				     "Failed to request mem-attn IRQ\n");
+	irq_set_status_flags(chip->fg_mem_attn_irq, IRQ_DISABLE_UNLAZY);
+
 	pm8150b_parse_watchdog_config(chip);
 	pm8150b_parse_mitigation(chip);
 
