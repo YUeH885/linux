@@ -82,6 +82,7 @@ config SND_SOC_QDSP6_AFE
 
 config SND_SOC_QDSP6_AFE_DAI
 	tristate
+	select SND_SOC_HDMI_CODEC
 
 config SND_SOC_QDSP6_AFE_CLOCKS
 	tristate
@@ -97,6 +98,7 @@ config SND_SOC_QDSP6_ASM
 
 config SND_SOC_QDSP6_ASM_DAI
 	select SND_SOC_COMPRESS
+	select SND_SOC_HDMI_CODEC
 	tristate
 
 config SND_SOC_QDSP6_APM_DAI
@@ -190,6 +192,7 @@ config SND_SOC_SM8150
 	select GPIO_WCD934X
 	select SND_SOC_QDSP6
 	select SND_SOC_QCOM_COMMON
+	select SND_SOC_HDMI_CODEC
 	select SND_SOC_ES9218P
 	select SND_SOC_WCD934X
 	help

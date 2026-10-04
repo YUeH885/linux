@@ -45,6 +45,7 @@ struct q6copp {
 	int channels;
 	int app_type;
 	int acdb_id;
+	u8 channel_map[PCM_MAX_NUM_CHANNEL];
 
 	struct aprv2_ibasic_rsp_result_t result;
 	struct kref refcount;
@@ -305,7 +306,7 @@ static struct q6copp *q6adm_find_matching_copp(struct q6adm *adm,
 					       int port_id, int topology,
 					       int mode, int rate,
 					       int channel_mode, int bit_width,
-					       int app_type)
+					       int app_type, const u8 *channel_map)
 {
 	struct q6copp *c;
 	struct q6copp *ret = NULL;
@@ -316,7 +317,9 @@ static struct q6copp *q6adm_find_matching_copp(struct q6adm *adm,
 	list_for_each_entry(c, &adm->copps_list, node) {
 		if ((port_id == c->afe_port) && (topology == c->topology) &&
 		    (mode == c->mode) && (rate == c->rate) &&
-		    (bit_width == c->bit_width) && (app_type == c->app_type)) {
+		    (bit_width == c->bit_width) && (app_type == c->app_type) &&
+		    (channel_mode == c->channels) &&
+		    !memcmp(channel_map, c->channel_map, PCM_MAX_NUM_CHANNEL)) {
 			ret = c;
 			kref_get(&c->refcount);
 		}
@@ -333,7 +336,7 @@ static int q6adm_device_open(struct q6adm *adm, struct q6copp *copp,
 	struct q6adm_cmd_device_open_v5 *open;
 	int afe_port = q6afe_get_port_id(port_id);
 	struct apr_pkt *pkt;
-	int ret, pkt_size = APR_HDR_SIZE + sizeof(*open);
+	int pkt_size = APR_HDR_SIZE + sizeof(*open);
 
 	void *p __free(kfree) = kzalloc(pkt_size, GFP_KERNEL);
 	if (!p)
@@ -357,10 +360,8 @@ static int q6adm_device_open(struct q6adm *adm, struct q6copp *copp,
 	open->bit_width = bit_width;
 	open->sample_rate = rate;
 
-	ret = q6dsp_map_channels(&open->dev_channel_mapping[0],
-				 channel_mode);
-	if (ret)
-		return ret;
+	memcpy(open->dev_channel_mapping, copp->channel_map,
+	       sizeof(open->dev_channel_mapping));
 
 	return q6adm_apr_send_copp_pkt(adm, copp, pkt, ADM_CMDRSP_DEVICE_OPEN_V5);
 }
@@ -378,25 +379,35 @@ static int q6adm_device_open(struct q6adm *adm, struct q6copp *copp,
  * @bit_width: audio sample bit width
  * @app_type: Application type.
  * @acdb_id: ACDB id
+ * @channel_map: Optional interleaved DSP channel positions.
  *
  * Return: Will be an negative on error or a valid copp pointer on success.
  */
 struct q6copp *q6adm_open(struct device *dev, int port_id, int path, int rate,
 	       int channel_mode, int topology, int perf_mode,
-	       uint16_t bit_width, int app_type, int acdb_id)
+	       u16 bit_width, int app_type, int acdb_id,
+	       const u8 *channel_map)
 {
 	struct q6adm *adm = dev_get_drvdata(dev->parent);
 	struct q6copp *copp;
 	unsigned long flags;
 	int ret = 0;
+	u8 map[PCM_MAX_NUM_CHANNEL];
 
 	if (port_id < 0) {
 		dev_err(dev, "Invalid port_id %d\n", port_id);
 		return ERR_PTR(-EINVAL);
 	}
 
+	if (channel_map) {
+		memcpy(map, channel_map, sizeof(map));
+	} else {
+		ret = q6dsp_map_channels(map, channel_mode);
+		if (ret)
+			return ERR_PTR(ret);
+	}
 	copp = q6adm_find_matching_copp(adm, port_id, topology, perf_mode,
-				      rate, channel_mode, bit_width, app_type);
+				      rate, channel_mode, bit_width, app_type, map);
 	if (copp) {
 		dev_err(dev, "Found Matching Copp 0x%x\n", copp->copp_idx);
 		return copp;
@@ -419,6 +430,7 @@ struct q6copp *q6adm_open(struct device *dev, int port_id, int path, int rate,
 	copp->channels = channel_mode;
 	copp->bit_width = bit_width;
 	copp->app_type = app_type;
+	memcpy(copp->channel_map, map, sizeof(map));
 
 	ret = q6adm_device_open(adm, copp, port_id, path, topology,
 				channel_mode, bit_width, rate);

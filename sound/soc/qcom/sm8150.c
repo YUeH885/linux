@@ -4,6 +4,7 @@
  */
 
 #include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
 #include <linux/gpio/consumer.h>
 #include <linux/delay.h>
@@ -17,6 +18,7 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/jack.h>
+#include <sound/hdmi-codec.h>
 #include <sound/soc.h>
 #include <sound/soc-card.h>
 #include <sound/qcom/q6afe-tfadsp.h>
@@ -31,6 +33,8 @@
 #define WCD934X_DEFAULT_MCLK_RATE	9600000
 struct sm8150_snd_data {
 	struct snd_soc_jack jack;
+	struct snd_soc_jack dp_jack;
+	struct snd_soc_dai *dp_dai;
 	struct snd_soc_component *wcd_component;
 	struct snd_soc_component *es_component;
 	struct notifier_block jack_notifier;
@@ -196,31 +200,128 @@ static int sm8150_jack_status_changed(struct notifier_block *notifier,
 	return NOTIFY_OK;
 }
 
+static int sm8150_enable_route(struct snd_soc_card *card, const char *name,
+			       bool fixed)
+{
+	struct snd_kcontrol *control = snd_soc_card_get_kcontrol(card, name);
+	struct snd_ctl_elem_value value = {};
+	int ret;
+
+	if (!control)
+		return -ENOENT;
+	value.value.integer.value[0] = 1;
+	ret = control->put(control, &value);
+	if (ret < 0)
+		return ret;
+	if (fixed) {
+		/* This dedicated PCM must remain reachable across ALSA state restore. */
+		control->vd[0].access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE;
+		control->put = NULL;
+	}
+	return 0;
+}
+
+static int sm8150_dp_init(struct snd_soc_pcm_runtime *rtd)
+{
+	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+	struct snd_soc_pcm_runtime *fe;
+	int ret;
+
+	for_each_card_rtds(rtd->card, fe) {
+		if (!fe->dai_link->dynamic ||
+		    fe->dai_link->id != MSM_FRONTEND_DAI_MULTIMEDIA3)
+			continue;
+		ret = hdmi_codec_set_pcm(codec_dai, fe);
+		if (ret)
+			return ret;
+		ret = qcom_snd_dp_jack_setup(rtd, &data->dp_jack, 0);
+		if (ret)
+			return ret;
+		data->dp_dai = codec_dai;
+		return 0;
+	}
+	return -ENODEV;
+}
+
+static void sm8150_dp_exit(struct snd_soc_pcm_runtime *rtd)
+{
+	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+
+	snd_soc_component_set_jack(snd_soc_rtd_to_codec(rtd, 0)->component, NULL, NULL);
+	data->dp_dai = NULL;
+}
+
+static int sm8150_dp_startup(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+
+	return hdmi_codec_hw_constraint_eld(data->dp_dai, substream->runtime);
+}
+
+static int sm8150_dp_hw_params(struct snd_pcm_substream *substream,
+			       struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	unsigned int map[8];
+	int ret;
+
+	ret = hdmi_codec_get_chmap(data->dp_dai, params_channels(params), map);
+	if (ret < 0)
+		return ret;
+	return snd_soc_dai_set_channel_map(snd_soc_rtd_to_cpu(rtd, 0),
+					 params_channels(params), map, 0, NULL);
+}
+
+static const struct snd_soc_ops sm8150_dp_fe_ops = {
+	.startup = sm8150_dp_startup,
+	.hw_params = sm8150_dp_hw_params,
+};
+
+static int sm8150_dp_prepare(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+
+	if (hdmi_codec_is_plugged(codec_dai) == 0)
+		/* Stop AFE before the codec's offline prepare releases DP clocks. */
+		return snd_soc_dai_prepare(snd_soc_rtd_to_cpu(rtd, 0), substream);
+	/* Establish DP audio clocks before AFE start, including PCM re-prepare. */
+	return snd_soc_dai_prepare(codec_dai, substream);
+}
+
+static const struct snd_soc_ops sm8150_dp_be_ops = {
+	.prepare = sm8150_dp_prepare,
+};
+
 static int sm8150_late_probe(struct snd_soc_card *card)
 {
 	struct sm8150_snd_data *data = snd_soc_card_get_drvdata(card);
 	struct snd_soc_dai *es_dai;
-	struct snd_kcontrol *control;
-	struct snd_ctl_elem_value value = {};
 	int ret;
 
 	if (!data->wcd_component)
 		return -ENODEV;
 
 	es_dai = snd_soc_card_get_codec_dai(card, "es9218-hifi");
-	if (data->speaker_feedback) {
+	if (data->speaker_feedback || data->dp_dai) {
 		/* Make the shared playback PCM usable before desktop port probing. */
 		ret = snd_soc_dapm_new_widgets(card);
 		if (ret)
 			return ret;
+	}
+	if (data->dp_dai) {
+		ret = sm8150_enable_route(card, "DISPLAY_PORT_RX Audio Mixer MultiMedia3", true);
+		if (ret)
+			return ret;
+	}
+	if (data->speaker_feedback) {
 		/* The external DAC allows probing independently of speaker firmware. */
-		control = snd_soc_card_get_kcontrol(card, es_dai ?
-						 "TERT_MI2S_RX Audio Mixer MultiMedia1" :
-						 "SEC_MI2S_RX Audio Mixer MultiMedia1");
-		if (!control)
-			return -ENOENT;
-		value.value.integer.value[0] = 1;
-		ret = control->put(control, &value);
+		ret = sm8150_enable_route(card, es_dai ?
+					 "TERT_MI2S_RX Audio Mixer MultiMedia1" :
+					 "SEC_MI2S_RX Audio Mixer MultiMedia1", false);
 		if (ret < 0)
 			return ret;
 	}
@@ -620,9 +721,24 @@ static void sm8150_add_ops(struct snd_soc_card *card)
 {
 	struct snd_soc_dai_link *link;
 	int i;
+	bool has_dp = false;
 
+	for_each_card_prelinks(card, i, link)
+		if (link->no_pcm && link->id == DISPLAY_PORT_RX)
+			has_dp = true;
 	for_each_card_prelinks(card, i, link) {
-		if (link->id == TERTIARY_MI2S_RX) {
+		if (link->no_pcm && link->id == DISPLAY_PORT_RX) {
+			link->init = sm8150_dp_init;
+			link->exit = sm8150_dp_exit;
+			link->ops = &sm8150_dp_be_ops;
+			continue;
+		}
+		if (has_dp && link->dynamic && link->id == MSM_FRONTEND_DAI_MULTIMEDIA3) {
+			link->ops = &sm8150_dp_fe_ops;
+			link->dpcm_merged_format = 1;
+			link->dpcm_merged_chan = 1;
+			link->dpcm_merged_rate = 1;
+		} else if (link->id == TERTIARY_MI2S_RX) {
 			link->ops = &sm8150_tert_mi2s_ops;
 			link->be_hw_params_fixup = sm8150_mi2s_be_hw_params_fixup;
 		} else if (link->id == SECONDARY_MI2S_RX) {

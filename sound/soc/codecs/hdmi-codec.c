@@ -284,6 +284,11 @@ struct hdmi_codec_priv {
 	uint8_t eld[MAX_ELD_BYTES];
 	struct snd_parsed_hdmi_eld eld_parsed;
 	struct snd_pcm_chmap *chmap_info;
+	struct snd_pcm_chmap_elem packed_chmaps[8];
+	struct snd_ctl_elem_id eld_id;
+	bool packed_channels;
+	int (*chmap_tlv)(struct snd_kcontrol *kcontrol, int op_flag,
+			 unsigned int size, unsigned int __user *tlv);
 	unsigned int chmap_idx;
 	struct mutex lock;
 	bool busy;
@@ -292,6 +297,10 @@ struct hdmi_codec_priv {
 	u8 iec_status[AES_IEC958_STATUS_SIZE];
 	struct snd_info_entry *proc_entry;
 };
+
+static const struct snd_soc_component_driver hdmi_driver;
+static int hdmi_codec_get_ch_alloc_table_idx(struct hdmi_codec_priv *hcp,
+					     unsigned char channels);
 
 static const struct snd_soc_dapm_widget hdmi_widgets[] = {
 	SND_SOC_DAPM_OUTPUT("TX"),
@@ -318,6 +327,7 @@ static int hdmi_eld_ctl_get(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct hdmi_codec_priv *hcp = snd_soc_component_get_drvdata(component);
 
+	guard(mutex)(&hcp->lock);
 	memcpy(ucontrol->value.bytes.data, hcp->eld, sizeof(hcp->eld));
 
 	return 0;
@@ -340,6 +350,34 @@ static unsigned long hdmi_codec_spk_mask_from_alloc(int spk_alloc)
 	return spk_mask;
 }
 
+static void hdmi_codec_pack_chmap(unsigned int ca,
+				  struct snd_pcm_chmap_elem *map)
+{
+	static const struct {
+		unsigned long speaker;
+		unsigned int position;
+	} positions[] = {
+		{ FL, SNDRV_CHMAP_FL }, { FR, SNDRV_CHMAP_FR },
+		{ LFE, SNDRV_CHMAP_LFE }, { FC, SNDRV_CHMAP_FC },
+		{ RL, SNDRV_CHMAP_RL }, { RR, SNDRV_CHMAP_RR },
+		{ RC, SNDRV_CHMAP_RC },
+		{ RLC, SNDRV_CHMAP_RLC }, { RRC, SNDRV_CHMAP_RRC },
+		{ FLC, SNDRV_CHMAP_FLC }, { FRC, SNDRV_CHMAP_FRC },
+	};
+	unsigned long mask = 0;
+	unsigned int i;
+
+	memset(map, 0, sizeof(*map));
+	for (i = 0; i < ARRAY_SIZE(hdmi_codec_channel_alloc); i++)
+		if (hdmi_codec_channel_alloc[i].ca_id == ca) {
+			mask = hdmi_codec_channel_alloc[i].mask;
+			break;
+		}
+	for (i = 0; i < ARRAY_SIZE(positions); i++)
+		if (mask & positions[i].speaker)
+			map->map[map->channels++] = positions[i].position;
+}
+
 static void hdmi_codec_eld_chmap(struct hdmi_codec_priv *hcp)
 {
 	u8 spk_alloc;
@@ -347,6 +385,25 @@ static void hdmi_codec_eld_chmap(struct hdmi_codec_priv *hcp)
 
 	spk_alloc = drm_eld_get_spk_alloc(hcp->eld);
 	spk_mask = hdmi_codec_spk_mask_from_alloc(spk_alloc);
+	if (!hcp->chmap_info)
+		return;
+
+	if (hcp->packed_channels) {
+		unsigned int channels, count = 0;
+		int idx;
+
+		/* ADSP supplies active channels without vacant HDMI transport slots. */
+		memset(hcp->packed_chmaps, 0, sizeof(hcp->packed_chmaps));
+		for (channels = 2; channels <= 8; channels++) {
+			idx = hdmi_codec_get_ch_alloc_table_idx(hcp, channels);
+			if (idx < 0)
+				continue;
+			hdmi_codec_pack_chmap(hdmi_codec_channel_alloc[idx].ca_id,
+					      &hcp->packed_chmaps[count++]);
+		}
+		hcp->chmap_info->chmap = hcp->packed_chmaps;
+		return;
+	}
 
 	/* Detect if only stereo supported, else return 8 channels mappings */
 	if ((spk_mask & ~(FL | FR)) && hcp->chmap_info->max_channels > 2)
@@ -369,8 +426,8 @@ static int hdmi_codec_get_ch_alloc_table_idx(struct hdmi_codec_priv *hcp,
 	for (i = 0; i < ARRAY_SIZE(hdmi_codec_channel_alloc); i++, cap++) {
 		/* If spk_alloc == 0, HDMI is unplugged return stereo config*/
 		if (!spk_alloc && cap->ca_id == 0)
-			return i;
-		if (cap->n_ch != channels)
+			return !hcp->packed_channels || channels == 2 ? i : -EINVAL;
+		if ((hcp->packed_channels ? hweight_long(cap->mask) : cap->n_ch) != channels)
 			continue;
 		if (!(cap->mask == (spk_mask & cap->mask)))
 			continue;
@@ -379,6 +436,165 @@ static int hdmi_codec_get_ch_alloc_table_idx(struct hdmi_codec_priv *hcp,
 
 	return -EINVAL;
 }
+
+/* Only explicitly bound DPCM codecs opt into deferred offline preparation. */
+int hdmi_codec_is_plugged(struct snd_soc_dai *dai)
+{
+	struct hdmi_codec_priv *hcp;
+
+	if (dai->component->driver != &hdmi_driver)
+		return -EOPNOTSUPP;
+	hcp = snd_soc_dai_get_drvdata(dai);
+	if (!hcp->packed_channels)
+		return -EOPNOTSUPP;
+	return !!READ_ONCE(hcp->jack_status);
+}
+EXPORT_SYMBOL_GPL(hdmi_codec_is_plugged);
+
+/* Return the CEA allocation and packed DPCM frontend channel positions. */
+int hdmi_codec_get_chmap(struct snd_soc_dai *dai, unsigned int channels,
+			 unsigned int *map)
+{
+	struct hdmi_codec_priv *hcp;
+	struct snd_pcm_chmap_elem packed;
+	unsigned int i;
+	int idx;
+
+	if (dai->component->driver != &hdmi_driver)
+		return -EOPNOTSUPP;
+	hcp = snd_soc_dai_get_drvdata(dai);
+	guard(mutex)(&hcp->lock);
+	if (!hcp->packed_channels)
+		return -EOPNOTSUPP;
+	idx = hdmi_codec_get_ch_alloc_table_idx(hcp, channels);
+	if (idx < 0)
+		return idx;
+	idx = hdmi_codec_channel_alloc[idx].ca_id;
+	hdmi_codec_pack_chmap(idx, &packed);
+	if (packed.channels != channels)
+		return -EINVAL;
+	if (map)
+		for (i = 0; i < channels; i++)
+			map[i] = packed.map[i];
+	return idx;
+}
+EXPORT_SYMBOL_GPL(hdmi_codec_get_chmap);
+
+static const unsigned int hdmi_codec_eld_rates[] = {
+	32000, 44100, 48000, 88200, 96000, 176400, 192000,
+};
+
+static const struct {
+	snd_pcm_format_t format;
+	unsigned int width;
+} hdmi_codec_eld_formats[] = {
+	{ SNDRV_PCM_FORMAT_S16_LE, BIT(0) },
+	{ SNDRV_PCM_FORMAT_S20_3LE, BIT(1) },
+	{ SNDRV_PCM_FORMAT_S24_LE, BIT(2) },
+	{ SNDRV_PCM_FORMAT_S24_3LE, BIT(2) },
+	{ SNDRV_PCM_FORMAT_S32_LE, BIT(2) },
+};
+
+static int hdmi_codec_eld_rule(struct snd_pcm_hw_params *params,
+			       struct snd_pcm_hw_rule *rule)
+{
+	struct hdmi_codec_priv *hcp = rule->private;
+	const struct snd_interval *rates =
+		hw_param_interval_c(params, SNDRV_PCM_HW_PARAM_RATE);
+	const struct snd_interval *channels =
+		hw_param_interval_c(params, SNDRV_PCM_HW_PARAM_CHANNELS);
+	const struct snd_mask *formats =
+		hw_param_mask_c(params, SNDRV_PCM_HW_PARAM_FORMAT);
+	struct snd_mask allowed_formats;
+	unsigned int allowed_rates = 0, allowed_channels = 0;
+	const u8 *sad;
+	unsigned int i, r, f, c, n;
+
+	guard(mutex)(&hcp->lock);
+	n = drm_eld_sad_count(hcp->eld);
+	if (!n) {
+		snd_mask_none(&allowed_formats);
+		snd_mask_set_format(&allowed_formats, SNDRV_PCM_FORMAT_S16_LE);
+		allowed_rates = BIT(2);
+		allowed_channels = BIT(0);
+		goto refine;
+	}
+	sad = drm_eld_sad(hcp->eld);
+	snd_mask_none(&allowed_formats);
+	for (i = 0; i < n; i++, sad += 3) {
+		if (((sad[0] >> 3) & 0xf) != HDMI_AUDIO_CODING_TYPE_PCM)
+			continue;
+		for (r = 0; r < ARRAY_SIZE(hdmi_codec_eld_rates); r++) {
+			if (!(sad[1] & BIT(r)) ||
+			    !snd_interval_test(rates, hdmi_codec_eld_rates[r]))
+				continue;
+			for (f = 0; f < ARRAY_SIZE(hdmi_codec_eld_formats); f++) {
+				if (!(sad[2] & hdmi_codec_eld_formats[f].width) ||
+				    !snd_mask_test_format(formats,
+						  hdmi_codec_eld_formats[f].format))
+					continue;
+				for (c = 2; c <= min(8U, (sad[0] & 7) + 1U); c++) {
+					if (!snd_interval_test(channels, c) ||
+					    hdmi_codec_get_ch_alloc_table_idx(hcp, c) < 0)
+						continue;
+					allowed_rates |= BIT(r);
+					allowed_channels |= BIT(c - 2);
+					snd_mask_set_format(&allowed_formats,
+							    hdmi_codec_eld_formats[f].format);
+				}
+			}
+		}
+	}
+refine:
+	if (rule->var == SNDRV_PCM_HW_PARAM_FORMAT)
+		return snd_mask_refine(hw_param_mask(params, rule->var), &allowed_formats);
+	if (rule->var == SNDRV_PCM_HW_PARAM_RATE)
+		return snd_interval_list(hw_param_interval(params, rule->var),
+				 allowed_rates ? ARRAY_SIZE(hdmi_codec_eld_rates) : 0,
+				 hdmi_codec_eld_rates,
+				 allowed_rates);
+	{
+		static const unsigned int counts[] = { 2, 3, 4, 5, 6, 7, 8 };
+
+		return snd_interval_list(hw_param_interval(params, rule->var),
+				 allowed_channels ? ARRAY_SIZE(counts) : 0,
+				 counts, allowed_channels);
+	}
+}
+
+/* Apply the same ELD to a DPCM frontend that owns the userspace PCM. */
+int hdmi_codec_hw_constraint_eld(struct snd_soc_dai *dai,
+				 struct snd_pcm_runtime *runtime)
+{
+	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
+	static const int variables[] = {
+		SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_HW_PARAM_RATE,
+		SNDRV_PCM_HW_PARAM_CHANNELS,
+	};
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(variables); i++) {
+		ret = snd_pcm_hw_rule_add(runtime, 0, variables[i], hdmi_codec_eld_rule,
+					  hcp, SNDRV_PCM_HW_PARAM_FORMAT,
+					  SNDRV_PCM_HW_PARAM_RATE,
+					  SNDRV_PCM_HW_PARAM_CHANNELS, -1);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(hdmi_codec_hw_constraint_eld);
+
+static int hdmi_codec_chmap_ctl_tlv(struct snd_kcontrol *kcontrol, int op_flag,
+				    unsigned int size, unsigned int __user *tlv)
+{
+	struct snd_pcm_chmap *info = snd_kcontrol_chip(kcontrol);
+	struct hdmi_codec_priv *hcp = info->private_data;
+
+	guard(mutex)(&hcp->lock);
+	return hcp->chmap_tlv(kcontrol, op_flag, size, tlv);
+}
 static int hdmi_codec_chmap_ctl_get(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
@@ -386,6 +602,19 @@ static int hdmi_codec_chmap_ctl_get(struct snd_kcontrol *kcontrol,
 	unsigned int i;
 	struct snd_pcm_chmap *info = snd_kcontrol_chip(kcontrol);
 	struct hdmi_codec_priv *hcp = info->private_data;
+	struct snd_pcm_chmap_elem packed;
+
+	guard(mutex)(&hcp->lock);
+	if (hcp->packed_channels) {
+		memset(ucontrol->value.integer.value, 0,
+		       info->max_channels * sizeof(ucontrol->value.integer.value[0]));
+		if (hcp->chmap_idx == HDMI_CODEC_CHMAP_IDX_UNKNOWN)
+			return 0;
+		hdmi_codec_pack_chmap(hcp->chmap_idx, &packed);
+		for (i = 0; i < packed.channels; i++)
+			ucontrol->value.integer.value[i] = packed.map[i];
+		return 0;
+	}
 
 	if (hcp->chmap_idx != HDMI_CODEC_CHMAP_IDX_UNKNOWN)
 		map = info->chmap[hcp->chmap_idx].map;
@@ -516,6 +745,7 @@ static int hdmi_codec_fill_codec_params(struct snd_soc_dai *dai,
 	u8 ca_id = 0;
 	bool pcm_audio = !(hcp->iec_status[0] & IEC958_AES0_NONAUDIO);
 
+	guard(mutex)(&hcp->lock);
 	if (pcm_audio) {
 		/* Select a channel allocation that matches with ELD and pcm channels */
 		idx = hdmi_codec_get_ch_alloc_table_idx(hcp, channels);
@@ -615,6 +845,12 @@ static int hdmi_codec_prepare(struct snd_pcm_substream *substream,
 
 	if (!hcp->hcd.ops->prepare)
 		return 0;
+
+	if (hdmi_codec_is_plugged(dai) == 0) {
+		/* The CPU has stopped its AFE port before this offline prepare. */
+		hcp->hcd.ops->audio_shutdown(dai->dev->parent, hcp->hcd.data);
+		return 0;
+	}
 
 	dev_dbg(dai->dev, "%s() width %d rate %d channels %d\n", __func__,
 		width, rate, channels);
@@ -788,14 +1024,20 @@ static struct snd_kcontrol_new hdmi_codec_controls[] = {
 	},
 };
 
-static int hdmi_codec_pcm_new(struct snd_soc_pcm_runtime *rtd,
-			      struct snd_soc_dai *dai)
+int hdmi_codec_set_pcm(struct snd_soc_dai *dai,
+		       struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_dai_driver *drv = dai->driver;
 	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
 	unsigned int i;
 	int ret;
 
+	guard(mutex)(&hcp->lock);
+	if (!rtd->pcm)
+		return -EINVAL;
+	if (hcp->chmap_info && (hcp->packed_channels || rtd->dai_link->dynamic))
+		return -EBUSY;
+	hcp->packed_channels = rtd->dai_link->dynamic;
 	ret =  snd_pcm_add_chmap_ctls(rtd->pcm, SNDRV_PCM_STREAM_PLAYBACK,
 				      NULL, drv->playback.channels_max, 0,
 				      &hcp->chmap_info);
@@ -805,10 +1047,15 @@ static int hdmi_codec_pcm_new(struct snd_soc_pcm_runtime *rtd,
 	/* override handlers */
 	hcp->chmap_info->private_data = hcp;
 	hcp->chmap_info->kctl->get = hdmi_codec_chmap_ctl_get;
+	if (hcp->packed_channels) {
+		hcp->chmap_tlv = hcp->chmap_info->kctl->tlv.c;
+		hcp->chmap_info->kctl->tlv.c = hdmi_codec_chmap_ctl_tlv;
+	}
 
 	/* default chmap supported is stereo */
 	hcp->chmap_info->chmap = hdmi_codec_stereo_chmaps;
 	hcp->chmap_idx = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
+	hdmi_codec_eld_chmap(hcp);
 
 	for (i = 0; i < ARRAY_SIZE(hdmi_codec_controls); i++) {
 		struct snd_kcontrol *kctl;
@@ -822,9 +1069,23 @@ static int hdmi_codec_pcm_new(struct snd_soc_pcm_runtime *rtd,
 		ret = snd_ctl_add(rtd->card->snd_card, kctl);
 		if (ret < 0)
 			return ret;
+		if (!strcmp(kctl->id.name, "ELD"))
+			hcp->eld_id = kctl->id;
 	}
 
 	return 0;
+}
+EXPORT_SYMBOL_GPL(hdmi_codec_set_pcm);
+
+static int hdmi_codec_pcm_new(struct snd_soc_pcm_runtime *rtd,
+			      struct snd_soc_dai *dai)
+{
+	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
+
+	/* A machine driver may already have assigned the DPCM frontend PCM. */
+	if (hcp->packed_channels && hcp->chmap_info)
+		return 0;
+	return hdmi_codec_set_pcm(dai, rtd);
 }
 
 #ifdef CONFIG_SND_PROC_FS
@@ -931,18 +1192,13 @@ static int hdmi_dai_remove(struct snd_soc_dai *dai)
 	struct hdmi_codec_priv *hcp =
 		snd_soc_component_get_drvdata(dai->component);
 
+	guard(mutex)(&hcp->lock);
+	hcp->chmap_info = NULL;
+	hcp->chmap_tlv = NULL;
+	hcp->packed_channels = false;
+	memset(&hcp->eld_id, 0, sizeof(hcp->eld_id));
 	hdmi_dai_proc_free(hcp);
 	return 0;
-}
-
-static void hdmi_codec_jack_report(struct hdmi_codec_priv *hcp,
-				   unsigned int jack_status)
-{
-	if (jack_status != hcp->jack_status) {
-		if (hcp->jack)
-			snd_soc_jack_report(hcp->jack, jack_status, SND_JACK_AVOUT);
-		hcp->jack_status = jack_status;
-	}
 }
 
 static void plugged_cb(struct device *dev, bool plugged)
@@ -950,22 +1206,42 @@ static void plugged_cb(struct device *dev, bool plugged)
 	struct hdmi_codec_priv *hcp = dev_get_drvdata(dev);
 	int ret;
 
-	if (plugged) {
-		if (hcp->hcd.ops->get_eld) {
-			hcp->hcd.ops->get_eld(dev->parent, hcp->hcd.data,
-					    hcp->eld, sizeof(hcp->eld));
-			ret = snd_parse_eld(dev, &hcp->eld_parsed,
-					    hcp->eld, sizeof(hcp->eld));
-			if (ret < 0)
-				dev_dbg(dev, "Failed to parse ELD: %d\n", ret);
-			else
-				snd_show_eld(dev, &hcp->eld_parsed);
+	{
+		guard(mutex)(&hcp->lock);
+		WRITE_ONCE(hcp->jack_status, plugged ? SND_JACK_AVOUT : 0);
+		if (plugged) {
+			if (hcp->hcd.ops->get_eld) {
+				hcp->hcd.ops->get_eld(dev->parent, hcp->hcd.data,
+						    hcp->eld, sizeof(hcp->eld));
+				ret = snd_parse_eld(dev, &hcp->eld_parsed,
+						    hcp->eld, sizeof(hcp->eld));
+				if (ret < 0)
+					dev_dbg(dev, "Failed to parse ELD: %d\n", ret);
+			}
+		} else {
+			memset(hcp->eld, 0, sizeof(hcp->eld));
+			memset(&hcp->eld_parsed, 0, sizeof(hcp->eld_parsed));
 		}
-		hdmi_codec_jack_report(hcp, SND_JACK_AVOUT);
-	} else {
-		hdmi_codec_jack_report(hcp, 0);
-		memset(hcp->eld, 0, sizeof(hcp->eld));
+		hdmi_codec_eld_chmap(hcp);
+		if (hcp->chmap_info) {
+			if (!plugged && hcp->packed_channels) {
+				struct snd_pcm_substream *substream;
+
+				/* Wake userspace to stop the DSP before DP releases its clocks. */
+				for (substream = hcp->chmap_info->pcm->streams[0].substream;
+				     substream; substream = substream->next)
+					snd_pcm_stop_xrun(substream);
+			}
+			snd_ctl_notify(hcp->chmap_info->pcm->card, SNDRV_CTL_EVENT_MASK_VALUE,
+				       &hcp->eld_id);
+			snd_ctl_notify(hcp->chmap_info->pcm->card,
+				       SNDRV_CTL_EVENT_MASK_VALUE | SNDRV_CTL_EVENT_MASK_INFO,
+				       &hcp->chmap_info->kctl->id);
+		}
 	}
+	/* Jack reporting can take DAPM locks also held during PCM startup. */
+	if (hcp->jack)
+		snd_soc_jack_report(hcp->jack, hcp->jack_status, SND_JACK_AVOUT);
 }
 
 static int hdmi_codec_set_jack(struct snd_soc_component *component,

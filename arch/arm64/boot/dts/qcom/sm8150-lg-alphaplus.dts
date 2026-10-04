@@ -257,6 +257,19 @@
 				sound-dai = <&tfa9872>, <&sma6101>;
 			};
 		};
+
+		displayport-dai-link {
+			link-name = "DisplayPort Playback";
+			cpu {
+				sound-dai = <&q6afedai DISPLAY_PORT_RX>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&mdss_dp>;
+			};
+		};
 	};
 };
 
@@ -1195,6 +1208,12 @@
 		drive-strength = <2>;
 		bias-disable;
 		output-low;
+	};
+};
+
+&q6asmdai {
+	dai@2 {
+		direction = <Q6ASM_DAI_RX>;
 	};
 };
 
