@@ -51,6 +51,7 @@ struct tfa9872_priv {
 	unsigned int profile_idx;
 	unsigned int channel;
 	bool enabled;
+	bool playback_active;
 	struct notifier_block tfadsp_nb;
 	/* Serialize DAI transitions with asynchronous DSP close events. */
 	struct mutex lock;
@@ -251,6 +252,19 @@ static int tfa9872_stop(struct tfa9872_priv *tfa)
 	return mute_ret ?: ret;
 }
 
+static int tfa9872_unmute(struct tfa9872_priv *tfa)
+{
+	int ret;
+
+	ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
+				 TFA9872_PWDN | TFA9872_DCA | TFA9872_AMPE,
+				 TFA9872_DCA | TFA9872_AMPE);
+	if (!ret)
+		ret = regmap_update_bits(tfa->regmap, TFA9872_AUDIO_CONTROL,
+					 TFA9872_INTSMUTE, 0);
+	return ret;
+}
+
 static int tfa9872_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 {
 	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(dai->component);
@@ -260,15 +274,11 @@ static int tfa9872_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 		return 0;
 
 	mutex_lock(&tfa->lock);
+	tfa->playback_active = !mute;
 	if (mute || !tfa->enabled) {
 		ret = tfa9872_stop(tfa);
 	} else {
-		ret = regmap_update_bits(tfa->regmap, TFA9872_SYS_CONTROL0,
-					 TFA9872_PWDN | TFA9872_DCA | TFA9872_AMPE,
-					 TFA9872_DCA | TFA9872_AMPE);
-		if (!ret)
-			ret = regmap_update_bits(tfa->regmap, TFA9872_AUDIO_CONTROL,
-						 TFA9872_INTSMUTE, 0);
+		ret = tfa9872_unmute(tfa);
 		if (ret) {
 			int stop_ret = tfa9872_stop(tfa);
 
@@ -390,14 +400,30 @@ static int tfa9872_enable_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct tfa9872_priv *tfa = snd_soc_component_get_drvdata(component);
 	bool val = !!ucontrol->value.integer.value[0];
+	int ret = 0;
 
 	guard(mutex)(&tfa->lock);
 	if (tfa->enabled == val)
 		return 0;
 
+	if (val && tfa->playback_active) {
+		/* ACP can enable the amplifier after the shared MI2S backend starts. */
+		ret = tfa9872_configure(tfa);
+		if (!ret)
+			ret = tfa9872_unmute(tfa);
+		if (ret) {
+			int stop_ret = tfa9872_stop(tfa);
+
+			if (stop_ret)
+				dev_err(tfa->dev, "failed to power down amplifier: %d\n",
+					stop_ret);
+		}
+	} else if (!val) {
+		ret = tfa9872_stop(tfa);
+	}
+	if (ret)
+		return ret;
 	tfa->enabled = val;
-	if (!tfa->enabled)
-		tfa9872_stop(tfa);
 	return 1;
 }
 
