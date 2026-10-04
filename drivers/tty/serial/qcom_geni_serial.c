@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/panic_notifier.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_opp.h>
 #include <linux/platform_device.h>
@@ -1326,6 +1327,10 @@ static void qcom_geni_serial_shutdown(struct uart_port *uport)
 	irq_work_sync(&port->tx_kick);
 	disable_irq(uport->irq);
 
+	/* A closed port has no receiver to service a wake event. */
+	if (!uport->suspended)
+		dev_pm_clear_wake_irq(uport->dev);
+
 	uart_port_lock_irq(uport);
 	qcom_geni_serial_stop_tx(uport);
 	qcom_geni_serial_stop_rx(uport);
@@ -1410,15 +1415,30 @@ static int qcom_geni_serial_startup(struct uart_port *uport)
 	ret = pm_runtime_resume_and_get(uport->dev);
 	if (ret < 0) {
 		dev_err(uport->dev, "Failed to resume and get %d\n", ret);
+		dev_pm_clear_wake_irq(uport->dev);
 		return ret;
 	}
 
 	if (!port->setup) {
 		ret = qcom_geni_serial_port_setup(uport);
-		if (ret) {
-			pm_runtime_put_sync(uport->dev);
-			return ret;
-		}
+		if (ret)
+			goto err_wake_irq;
+	}
+
+	/* System resume reuses the wake IRQ retained by shutdown. */
+	if (port->wakeup_irq > 0 && !tty_port_suspended(tport)) {
+		ret = dev_pm_set_dedicated_wake_irq(uport->dev, port->wakeup_irq);
+		if (ret)
+			goto err_wake_irq;
+
+		/* GPIO IRQ allocation changes RX mux behind pinctrl's cache. */
+		ret = pinctrl_pm_select_sleep_state(uport->dev);
+		if (ret)
+			goto err_wake_irq;
+
+		ret = pinctrl_pm_select_default_state(uport->dev);
+		if (ret)
+			goto err_wake_irq;
 	}
 
 	/*
@@ -1436,6 +1456,11 @@ static int qcom_geni_serial_startup(struct uart_port *uport)
 	WRITE_ONCE(port->tx_kick_enabled, true);
 
 	return 0;
+
+err_wake_irq:
+	dev_pm_clear_wake_irq(uport->dev);
+	pm_runtime_put_sync(uport->dev);
+	return ret;
 }
 
 static int geni_serial_set_rate(struct geni_se *se, unsigned long baud)
@@ -1973,16 +1998,8 @@ static int qcom_geni_serial_probe(struct platform_device *pdev)
 	if (ret)
 		goto error;
 
-	if (port->wakeup_irq > 0) {
+	if (port->wakeup_irq > 0)
 		device_init_wakeup(&pdev->dev, true);
-		ret = dev_pm_set_dedicated_wake_irq(&pdev->dev,
-						port->wakeup_irq);
-		if (ret) {
-			device_init_wakeup(&pdev->dev, false);
-			ida_free(&port_ida, uport->line);
-			goto error;
-		}
-	}
 
 	devm_pm_runtime_enable(port->se.dev);
 
