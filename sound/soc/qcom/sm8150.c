@@ -600,11 +600,19 @@ static const struct snd_soc_dapm_widget sm8150_snd_widgets[] = {
 	SND_SOC_DAPM_MIC("Digital Mic0", NULL),
 };
 
+/* Jack-owned pins must not be overwritten by ALSA state restoration. */
+#define SM8150_JACK_PIN_CONTROL(xname, xpin) \
+{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
+	.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE, \
+	.info = snd_soc_dapm_info_pin_switch, \
+	.get = snd_soc_dapm_get_pin_switch, \
+	.private_value = (unsigned long)xpin }
+
 static const struct snd_kcontrol_new sm8150_snd_controls[] = {
-	SOC_DAPM_PIN_SWITCH("Headphone Jack"),
-	SOC_DAPM_PIN_SWITCH("WCD Headphone Jack"),
-	SOC_DAPM_PIN_SWITCH("ES9218P Headphone Jack"),
-	SOC_DAPM_PIN_SWITCH("Headset Mic"),
+	SM8150_JACK_PIN_CONTROL("Headphone Jack Switch", "Headphone Jack"),
+	SM8150_JACK_PIN_CONTROL("WCD Headphone Jack Switch", "WCD Headphone Jack"),
+	SM8150_JACK_PIN_CONTROL("ES9218P Headphone Jack Switch", "ES9218P Headphone Jack"),
+	SM8150_JACK_PIN_CONTROL("Headset Mic Switch", "Headset Mic"),
 	SOC_DAPM_PIN_SWITCH("Handset Mic"),
 };
 
