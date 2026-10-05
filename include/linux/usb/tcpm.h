@@ -130,6 +130,9 @@ enum tcpm_transmit_type {
  *		swap following Discover Identity on SOP' occurs.
  *		Return true when the TCPM is allowed to request a Vconn swap
  *		after Discovery Identity on SOP.
+ * @avoid_snk_hard_reset:
+ *		Optional; return true when a sink hard reset could interrupt a
+ *		non-PD supply or an attachment inherited across boot.
  */
 struct tcpc_dev {
 	struct fwnode_handle *fwnode;
@@ -170,6 +173,7 @@ struct tcpc_dev {
 	void (*check_contaminant)(struct tcpc_dev *dev);
 	bool (*cable_comm_capable)(struct tcpc_dev *dev);
 	bool (*attempt_vconn_swap_discovery)(struct tcpc_dev *dev);
+	bool (*avoid_snk_hard_reset)(struct tcpc_dev *dev);
 };
 
 struct tcpm_port;
