@@ -90,6 +90,15 @@ properties:
     required:
       - iommus
 
+  qcom,mac-address-file:
+    $ref: /schemas/types.yaml#/definitions/string
+    description: |
+      Firmware loader path to the factory-provisioned MAC address file.
+      The file contains an Intf0MacAddress=<12 hexadecimal digits> line.
+      This address takes precedence over MAC addresses supplied by device
+      properties or firmware. When specified, a valid file is required
+      before the wireless device can be registered.
+
   ieee80211-freq-limit: true
 
   qcom,calibration-data:
