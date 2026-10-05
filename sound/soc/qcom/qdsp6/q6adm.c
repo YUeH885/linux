@@ -175,9 +175,11 @@ static void q6adm_free_copp(struct kref *ref)
 	unsigned long flags;
 	int ret;
 
-	ret = q6adm_device_close(adm, c, c->afe_port, c->copp_idx);
-	if (ret < 0)
-		dev_err(adm->dev, "Failed to close copp %d\n", ret);
+	if (c->id != INVALID_COPP_ID) {
+		ret = q6adm_device_close(adm, c, c->afe_port, c->copp_idx);
+		if (ret < 0)
+			dev_err(adm->dev, "Failed to close copp %d\n", ret);
+	}
 
 	spin_lock_irqsave(&adm->copps_list_lock, flags);
 	clear_bit(c->copp_idx, &adm->copp_bitmap[c->afe_port]);
@@ -290,6 +292,7 @@ static struct q6copp *q6adm_alloc_copp(struct q6adm *adm, int port_idx)
 
 	set_bit(idx, &adm->copp_bitmap[port_idx]);
 	c->copp_idx = idx;
+	c->id = INVALID_COPP_ID;
 	c->afe_port = port_idx;
 	c->adm = adm;
 
