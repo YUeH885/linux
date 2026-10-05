@@ -85,6 +85,10 @@ properties:
   vdd-pdphy-supply:
     description: VDD regulator supply to the PDPHY.
 
+  vconn-boost-gpios:
+    description: Optional board-specific external VCONN boost enable.
+    maxItems: 1
+
 required:
   - compatible
   - reg
