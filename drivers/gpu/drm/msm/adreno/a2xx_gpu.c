@@ -475,7 +475,8 @@ a2xx_create_vm(struct msm_gpu *gpu, struct platform_device *pdev)
 	struct msm_mmu *mmu = a2xx_gpummu_new(&pdev->dev, gpu);
 	struct drm_gpuvm *vm;
 
-	vm = msm_gem_vm_create(gpu->dev, mmu, "gpu", SZ_16M, 0xfff * SZ_64K, true);
+	vm = msm_gem_vm_create(gpu->dev, mmu, "gpu", SZ_16M,
+			       0xfff * SZ_64K, PAGE_SIZE, true);
 
 	if (IS_ERR(vm) && !IS_ERR(mmu))
 		mmu->funcs->destroy(mmu);
