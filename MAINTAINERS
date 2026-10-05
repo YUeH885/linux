@@ -14863,6 +14863,17 @@ Q:	http://patchwork.linuxtv.org/project/linux-media/list/
 T:	git git://linuxtv.org/mkrufky/tuners.git
 F:	drivers/media/dvb-frontends/lg2160.*
 
+LG LM-G820N
+M:	Yuzu <yuzu23234@gmail.com>
+L:	linux-arm-msm@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/display/panel/lg,sw43410.yaml
+F:	Documentation/devicetree/bindings/input/touchscreen/lg,sw42000.yaml
+F:	arch/arm64/boot/dts/qcom/sm8150-lg-alphaplus.dts
+F:	drivers/gpu/drm/panel/panel-lg-sw43410.c
+F:	drivers/input/touchscreen/lg-sw42000.c
+F:	sound/soc/qcom/sm8150.c
+
 LGDT3305 MEDIA DRIVER
 M:	Michael Krufky <mkrufky@linuxtv.org>
 L:	linux-media@vger.kernel.org
