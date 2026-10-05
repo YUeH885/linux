@@ -376,6 +376,58 @@ struct msm_routing_data {
 
 static struct msm_routing_data *routing_data;
 
+static void q6routing_close_copps(struct msm_routing_data *data,
+				  struct session_data *session)
+{
+	int idx;
+
+	for_each_set_bit(idx, &session->copp_map, MAX_COPPS_PER_PORT) {
+		q6adm_close(data->dev, session->copps[idx]);
+		session->copps[idx] = NULL;
+	}
+	session->copp_map = 0;
+}
+
+static int q6routing_map_stream(struct msm_routing_data *data,
+				struct session_data *session, int stream_id,
+				int perf_mode)
+{
+	struct session_data *pdata = &data->port_data[session->port_id];
+	struct route_payload payload = {
+		.num_copps = 1,
+		.session_id = stream_id,
+	};
+	struct q6copp *copp;
+	int copp_idx, ret;
+
+	copp = q6adm_open(data->dev, session->port_id, pdata->path_type,
+			  pdata->sample_rate, pdata->channels, NULL_COPP_TOPOLOGY,
+			  perf_mode, pdata->bits_per_sample, 0, 0);
+	if (IS_ERR(copp))
+		return PTR_ERR(copp);
+
+	copp_idx = q6adm_get_copp_id(copp);
+	payload.port_id[0] = session->port_id;
+	payload.copp_idx[0] = copp_idx;
+	ret = q6adm_matrix_map(data->dev, pdata->path_type, payload, perf_mode);
+	if (ret < 0) {
+		q6adm_close(data->dev, copp);
+		return ret;
+	}
+
+	/* Replace the DSP route before releasing the previous backend's COPP. */
+	q6routing_close_copps(data, session);
+	session->copps[copp_idx] = copp;
+	set_bit(copp_idx, &session->copp_map);
+	session->path_type = pdata->path_type;
+	session->sample_rate = pdata->sample_rate;
+	session->channels = pdata->channels;
+	session->bits_per_sample = pdata->bits_per_sample;
+	session->perf_mode = perf_mode;
+
+	return 0;
+}
+
 /**
  * q6routing_stream_open() - Register a new stream for route setup
  *
@@ -389,65 +441,29 @@ static struct msm_routing_data *routing_data;
 int q6routing_stream_open(int fedai_id, int perf_mode,
 			   int stream_id, int stream_type)
 {
-	int j, topology, num_copps = 0;
-	struct route_payload payload;
-	struct q6copp *copp;
-	int copp_idx;
-	struct session_data *session, *pdata;
+	struct session_data *session;
+	int ret;
 
 	if (!routing_data) {
 		pr_err("Routing driver not yet ready\n");
 		return -EINVAL;
 	}
 
+	mutex_lock(&routing_data->lock);
 	session = &routing_data->sessions[stream_id - 1];
 	if (session->port_id < 0) {
 		dev_err(routing_data->dev, "Routing not setup for MultiMedia%d Session\n",
-			session->fedai_id);
-		return -EINVAL;
-	}
-
-	pdata = &routing_data->port_data[session->port_id];
-
-	mutex_lock(&routing_data->lock);
-	session->fedai_id = fedai_id;
-
-	session->path_type = pdata->path_type;
-	session->sample_rate = pdata->sample_rate;
-	session->channels = pdata->channels;
-	session->bits_per_sample = pdata->bits_per_sample;
-
-	payload.num_copps = 0; /* only RX needs to use payload */
-	topology = NULL_COPP_TOPOLOGY;
-	copp = q6adm_open(routing_data->dev, session->port_id,
-			      session->path_type, session->sample_rate,
-			      session->channels, topology, perf_mode,
-			      session->bits_per_sample, 0, 0);
-
-	if (IS_ERR_OR_NULL(copp)) {
+			fedai_id);
 		mutex_unlock(&routing_data->lock);
 		return -EINVAL;
 	}
 
-	copp_idx = q6adm_get_copp_id(copp);
-	set_bit(copp_idx, &session->copp_map);
-	session->copps[copp_idx] = copp;
-
-	for_each_set_bit(j, &session->copp_map, MAX_COPPS_PER_PORT) {
-		payload.port_id[num_copps] = session->port_id;
-		payload.copp_idx[num_copps] = j;
-		num_copps++;
-	}
-
-	if (num_copps) {
-		payload.num_copps = num_copps;
-		payload.session_id = stream_id;
-		q6adm_matrix_map(routing_data->dev, session->path_type,
-				 payload, perf_mode);
-	}
+	ret = q6routing_map_stream(routing_data, session, stream_id, perf_mode);
+	if (!ret)
+		session->fedai_id = fedai_id;
 	mutex_unlock(&routing_data->lock);
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(q6routing_stream_open);
 
@@ -475,21 +491,16 @@ static struct session_data *get_session_from_id(struct msm_routing_data *data,
 void q6routing_stream_close(int fedai_id, int stream_type)
 {
 	struct session_data *session;
-	int idx;
 
+	mutex_lock(&routing_data->lock);
 	session = get_session_from_id(routing_data, fedai_id);
 	if (!session)
-		return;
+		goto out;
 
-	for_each_set_bit(idx, &session->copp_map, MAX_COPPS_PER_PORT) {
-		if (session->copps[idx]) {
-			q6adm_close(routing_data->dev, session->copps[idx]);
-			session->copps[idx] = NULL;
-		}
-	}
-
+	q6routing_close_copps(routing_data, session);
 	session->fedai_id = -1;
-	session->copp_map = 0;
+out:
+	mutex_unlock(&routing_data->lock);
 }
 EXPORT_SYMBOL_GPL(q6routing_stream_close);
 
@@ -504,10 +515,12 @@ static int msm_routing_get_audio_mixer(struct snd_kcontrol *kcontrol,
 	struct msm_routing_data *priv = dev_get_drvdata(c->dev);
 	struct session_data *session = &priv->sessions[session_id];
 
+	mutex_lock(&priv->lock);
 	if (session->port_id == mc->reg)
 		ucontrol->value.integer.value[0] = 1;
 	else
 		ucontrol->value.integer.value[0] = 0;
+	mutex_unlock(&priv->lock);
 
 	return 0;
 }
@@ -524,22 +537,60 @@ static int msm_routing_put_audio_mixer(struct snd_kcontrol *kcontrol,
 	int be_id = mc->reg;
 	int session_id = mc->shift;
 	struct session_data *session = &data->sessions[session_id];
+	bool enable = ucontrol->value.integer.value[0];
+	int old_port, ret, restore_ret;
 
-	if (ucontrol->value.integer.value[0]) {
-		if (session->port_id == be_id)
+	mutex_lock(&data->lock);
+	old_port = session->port_id;
+	if (enable) {
+		if (session->port_id == be_id) {
+			mutex_unlock(&data->lock);
 			return 0;
+		}
 
 		session->port_id = be_id;
-		snd_soc_dapm_mixer_update_power(dapm, kcontrol, 1, update);
 	} else {
-		if (session->port_id == -1 || session->port_id != be_id)
+		if (session->port_id != be_id) {
+			mutex_unlock(&data->lock);
 			return 0;
+		}
 
 		session->port_id = -1;
-		snd_soc_dapm_mixer_update_power(dapm, kcontrol, 0, update);
+		q6routing_close_copps(data, session);
 	}
+	mutex_unlock(&data->lock);
+
+	/* DPCM prepares the new backend and supplies its format through hw_params. */
+	ret = snd_soc_dapm_mixer_update_power(dapm, kcontrol, enable, update);
+	if (ret < 0)
+		goto restore_route;
+
+	mutex_lock(&data->lock);
+	if (enable && session->fedai_id >= 0)
+		ret = q6routing_map_stream(data, session, session_id + 1,
+					   session->perf_mode);
+	mutex_unlock(&data->lock);
+	if (ret < 0)
+		goto restore_route;
 
 	return 1;
+
+restore_route:
+	mutex_lock(&data->lock);
+	session->port_id = old_port;
+	mutex_unlock(&data->lock);
+	restore_ret = snd_soc_dapm_mixer_update_power(dapm, kcontrol, !enable, update);
+	if (restore_ret < 0)
+		dev_err(data->dev, "failed to restore backend power: %d\n", restore_ret);
+	mutex_lock(&data->lock);
+	if (old_port >= 0 && session->fedai_id >= 0) {
+		restore_ret = q6routing_map_stream(data, session, session_id + 1,
+						   session->perf_mode);
+		if (restore_ret < 0)
+			dev_err(data->dev, "failed to restore DSP route: %d\n", restore_ret);
+	}
+	mutex_unlock(&data->lock);
+	return ret;
 }
 
 static const struct snd_kcontrol_new usb_rx_mixer_controls[] = {
