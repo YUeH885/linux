@@ -204,6 +204,7 @@ struct wcd_mbhc_config {
 	bool moisture_duty_cycle_en;
 	bool hphl_swh; /*track HPHL switch NC / NO */
 	bool gnd_swh; /*track GND switch NC / NO */
+	bool report_mechanical_before_impedance;
 	u32 hs_thr;
 	u32 hph_thr;
 	u32 micb_mv;
