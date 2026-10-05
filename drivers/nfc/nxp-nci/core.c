@@ -43,8 +43,11 @@ static int nxp_nci_open(struct nci_dev *ndev)
 		goto open_exit;
 	}
 
-	if (info->phy_ops->set_mode)
+	if (info->phy_ops->set_mode) {
 		r = info->phy_ops->set_mode(info->phy_id, NXP_NCI_MODE_NCI);
+		if (r < 0)
+			goto open_exit;
+	}
 
 	info->mode = NXP_NCI_MODE_NCI;
 
@@ -60,10 +63,10 @@ static int nxp_nci_close(struct nci_dev *ndev)
 
 	mutex_lock(&info->info_lock);
 
+	info->mode = NXP_NCI_MODE_COLD;
+
 	if (info->phy_ops->set_mode)
 		r = info->phy_ops->set_mode(info->phy_id, NXP_NCI_MODE_COLD);
-
-	info->mode = NXP_NCI_MODE_COLD;
 
 	mutex_unlock(&info->info_lock);
 	return r;
