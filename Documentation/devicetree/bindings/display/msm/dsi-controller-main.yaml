@@ -123,6 +123,13 @@ properties:
       Indicates if the DSI controller needs to sync the other DSI controller
       with MIPI DCS commands when qcom,dual-dsi-mode enabled.
 
+  qcom,idle-ulps-enabled:
+    type: boolean
+    description:
+      The command-mode panel retains its image while the idle DSI lanes
+      enter ULPS and the link clocks stop. Requires PHY ULPS support and
+      a standalone DSI link.
+
   assigned-clocks:
     minItems: 2
     maxItems: 4
