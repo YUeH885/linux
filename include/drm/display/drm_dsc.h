@@ -244,6 +244,10 @@ struct drm_dsc_config {
 	 */
 	u8 dsc_version_major;
 	/**
+	 * @scr_rev: DSC 1.1 Supplemental Codec Revision, either 0 or 1
+	 */
+	u8 scr_rev;
+	/**
 	 * @native_422: True if Native 4:2:2 supported, else false
 	 */
 	bool native_422;
