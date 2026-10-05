@@ -21,6 +21,9 @@ properties:
               - nxp,pn557
           - const: nxp,nxp-nci-i2c
 
+  clocks:
+    maxItems: 1
+
   enable-gpios:
     description: Output GPIO pin used for enabling/disabling the controller
 
