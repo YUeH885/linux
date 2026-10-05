@@ -19,6 +19,7 @@ properties:
   compatible:
     items:
       - enum:
+          - lg,alphaplus-sbu-mux
           - nxp,cbdtu02043
           - onnn,fsusb42
           - onnn,fsusb43l10x
