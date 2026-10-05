@@ -1199,6 +1199,26 @@ config CHARGER_QCOM_SMB1355
 	  The charger uses the shared Qualcomm I2C PMIC regmap and IRQs
 	  to report current limits, temperature and charging faults.
 
+config CHARGER_QCOM_PM8150B_KUNIT_TEST
+	tristate "PM8150B charging policy tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Test temperature hysteresis and parallel charging power budgets.
+	  Exercise thermal zone transitions, charging current allocation
+	  and the effect of Type-C input limits with synthetic values.
+	  The tests run without charger hardware.
+
+config CHARGER_QCOM_PM8150B_PM_KUNIT_TEST
+	bool "PM8150B suspend coordination tests" if !KUNIT_ALL_TESTS
+	depends on CHARGER_QCOM_PM8150B && KUNIT=y && PM_SLEEP
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise the charger's real property and power-management callbacks
+	  with a test policy worker. Check that requests during system sleep
+	  are retained and applied on completion, including aborted suspend.
+	  No charger hardware is required.
+
 config FUEL_GAUGE_MM8013
 	tristate "Mitsumi MM8013 fuel gauge driver"
 	depends on I2C
