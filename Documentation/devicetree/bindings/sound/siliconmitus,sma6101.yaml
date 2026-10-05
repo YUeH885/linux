@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/siliconmitus,sma6101.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Silicon Mitus SMA6101 Audio Amplifier and Screen Sounder
+
+maintainers:
+  - Yuzu <yuzu23234@gmail.com>
+
+description:
+  Silicon Mitus SMA6101 boosted class-D audio amplifier and piezoelectric
+  screen sounder driver.
+
+allOf:
+  - $ref: dai-common.yaml#
+
+properties:
+  compatible:
+    const: siliconmitus,sma6101
+
+  reg:
+    maxItems: 1
+
+  '#sound-dai-cells':
+    const: 0
+
+  reset-gpios:
+    maxItems: 1
+
+  sm,reset-gpio:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    description: Vendor reset GPIO property for compatibility.
+
+  interrupts:
+    maxItems: 1
+
+  sys-clk-id:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [0, 1, 2, 3]
+    description: Clock source (0=19.2MHz, 1=24.576MHz, 2=PLL MCLK, 3=PLL BCLK).
+
+  init-vol:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Initial speaker volume register value.
+
+  stereo-two-chip:
+    type: boolean
+    description: Configure amplifier for two-chip stereo playback.
+
+  registers-of-eq:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    description: Pairs of register address and value for EQ configuration.
+    items:
+      items:
+        - description: Register offset
+        - description: Register value
+
+  registers-of-bo:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    description: Pairs of register address and value for brownout protection.
+    items:
+      items:
+        - description: Register offset
+        - description: Register value
+
+required:
+  - compatible
+  - reg
+  - '#sound-dai-cells'
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/gpio/gpio.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        amplifier@1e {
+            compatible = "siliconmitus,sma6101";
+            reg = <0x1e>;
+            #sound-dai-cells = <0>;
+            reset-gpios = <&tlmm 135 GPIO_ACTIVE_HIGH>;
+            interrupt-parent = <&tlmm>;
+            interrupts = <125 IRQ_TYPE_LEVEL_LOW>;
+            sys-clk-id = <3>;
+            init-vol = <0x30>;
+            stereo-two-chip;
+            registers-of-eq = <0x40 0x00>, <0x41 0x00>;
+            registers-of-bo = <0x05 0xb8>, <0x06 0x38>;
+        };
+    };
