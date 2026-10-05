@@ -7,6 +7,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_clock.h>
 #include <linux/pm_runtime.h>
+#include <linux/string.h>
 #include <dt-bindings/phy/phy.h>
 
 #include "dsi_phy.h"
@@ -806,6 +807,14 @@ void msm_dsi_phy_disable(struct msm_dsi_phy *phy)
 
 	regulator_bulk_disable(phy->cfg->num_regulators, phy->supplies);
 	pm_runtime_put(&phy->pdev->dev);
+}
+
+int msm_dsi_phy_set_ulps(struct msm_dsi_phy *phy, bool enable)
+{
+	if (!phy || !phy->cfg->ops.set_ulps)
+		return -EOPNOTSUPP;
+
+	return phy->cfg->ops.set_ulps(phy, enable);
 }
 
 void msm_dsi_phy_set_usecase(struct msm_dsi_phy *phy,

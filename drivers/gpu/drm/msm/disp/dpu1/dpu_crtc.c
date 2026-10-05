@@ -1042,6 +1042,7 @@ static int dpu_crtc_kickoff_clone_mode(struct drm_crtc *crtc)
 	struct drm_encoder *encoder;
 	struct drm_encoder *rt_encoder = NULL, *wb_encoder = NULL;
 	struct dpu_kms *dpu_kms = _dpu_crtc_get_kms(crtc);
+	int ret;
 
 	/* Find encoder for real time display */
 	drm_for_each_encoder_mask(encoder, crtc->dev,
@@ -1057,8 +1058,12 @@ static int dpu_crtc_kickoff_clone_mode(struct drm_crtc *crtc)
 		return -EINVAL;
 	}
 
-	dpu_encoder_prepare_for_kickoff(wb_encoder);
-	dpu_encoder_prepare_for_kickoff(rt_encoder);
+	ret = dpu_encoder_prepare_for_kickoff(wb_encoder);
+	if (ret)
+		return ret;
+	ret = dpu_encoder_prepare_for_kickoff(rt_encoder);
+	if (ret)
+		return ret;
 
 	dpu_vbif_clear_errors(dpu_kms);
 
@@ -1115,7 +1120,8 @@ void dpu_crtc_commit_kickoff(struct drm_crtc *crtc)
 		 */
 		drm_for_each_encoder_mask(encoder, crtc->dev,
 				crtc->state->encoder_mask)
-			dpu_encoder_prepare_for_kickoff(encoder);
+			if (dpu_encoder_prepare_for_kickoff(encoder))
+				goto end;
 
 		dpu_vbif_clear_errors(dpu_kms);
 
