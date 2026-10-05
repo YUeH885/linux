@@ -14,6 +14,8 @@
 #include <linux/soc/qcom/pdr.h>
 #include <linux/rpmsg.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/srcu.h>
 
 enum {
 	PR_TYPE_APR = 0,
@@ -37,6 +39,8 @@ struct packet_router {
 	struct work_struct rx_work;
 	struct list_head rx_list;
 };
+
+DEFINE_STATIC_SRCU(apr_srcu);
 
 struct apr_rx_buf {
 	struct list_head node;
@@ -151,6 +155,17 @@ int gpr_send_port_pkt(gpr_port_t *port, const struct gpr_pkt *pkt)
 }
 EXPORT_SYMBOL_GPL(gpr_send_port_pkt);
 
+static void apr_remove_service(struct apr_device *adev)
+{
+	struct packet_router *apr = adev->svc.pr;
+	unsigned long flags;
+
+	spin_lock_irqsave(&apr->svcs_lock, flags);
+	idr_remove(&apr->svcs_idr, adev->svc.id);
+	spin_unlock_irqrestore(&apr->svcs_lock, flags);
+	synchronize_srcu(&apr_srcu);
+}
+
 static void apr_dev_release(struct device *dev)
 {
 	struct apr_device *adev = to_apr_device(dev);
@@ -191,13 +206,14 @@ static int apr_do_rx_callback(struct packet_router *apr, struct apr_rx_buf *abuf
 {
 	uint16_t hdr_size, msg_type, ver, svc_id;
 	struct pkt_router_svc *svc;
-	struct apr_device *adev;
+	struct apr_device *adev = NULL;
 	struct apr_driver *adrv = NULL;
 	struct apr_resp_pkt resp;
 	struct apr_hdr *hdr;
 	unsigned long flags;
 	void *buf = abuf->buf;
 	int len = abuf->len;
+	int idx;
 
 	hdr = buf;
 	ver = APR_HDR_FIELD_VER(hdr->hdr_field);
@@ -229,16 +245,18 @@ static int apr_do_rx_callback(struct packet_router *apr, struct apr_rx_buf *abuf
 		return -EINVAL;
 	}
 
+	idx = srcu_read_lock(&apr_srcu);
 	svc_id = hdr->dest_svc;
 	spin_lock_irqsave(&apr->svcs_lock, flags);
 	svc = idr_find(&apr->svcs_idr, svc_id);
-	if (svc && svc->dev->driver) {
+	if (svc) {
 		adev = svc_to_apr_device(svc);
-		adrv = to_apr_driver(adev->dev.driver);
+		adrv = READ_ONCE(adev->driver);
 	}
 	spin_unlock_irqrestore(&apr->svcs_lock, flags);
 
-	if (!adrv || !adev) {
+	if (!adrv || !adrv->callback) {
+		srcu_read_unlock(&apr_srcu, idx);
 		dev_err(apr->dev, "APR: service is not registered (%d)\n",
 			svc_id);
 		return -EINVAL;
@@ -255,6 +273,7 @@ static int apr_do_rx_callback(struct packet_router *apr, struct apr_rx_buf *abuf
 		resp.payload = buf + hdr_size;
 
 	adrv->callback(adev, &resp);
+	srcu_read_unlock(&apr_srcu, idx);
 
 	return 0;
 }
@@ -368,8 +387,10 @@ static int apr_device_probe(struct device *dev)
 	int ret;
 
 	ret = adrv->probe(adev);
-	if (!ret)
+	if (!ret) {
 		adev->svc.callback = adrv->gpr_callback;
+		WRITE_ONCE(adev->driver, adrv);
+	}
 
 	return ret;
 }
@@ -378,13 +399,17 @@ static void apr_device_remove(struct device *dev)
 {
 	struct apr_device *adev = to_apr_device(dev);
 	struct apr_driver *adrv = to_apr_driver(dev->driver);
-	struct packet_router *apr = dev_get_drvdata(adev->dev.parent);
+	struct packet_router *apr = adev->svc.pr;
 
+	if (apr->type == PR_TYPE_APR) {
+		/* Children can still need DSP replies while their PCM paths close. */
+		of_platform_depopulate(dev);
+		WRITE_ONCE(adev->driver, NULL);
+		synchronize_srcu(&apr_srcu);
+	}
 	if (adrv->remove)
 		adrv->remove(adev);
-	spin_lock(&apr->svcs_lock);
-	idr_remove(&apr->svcs_idr, adev->svc.id);
-	spin_unlock(&apr->svcs_lock);
+	adev->svc.callback = NULL;
 }
 
 static int apr_uevent(const struct device *dev, struct kobj_uevent_env *env)
@@ -420,13 +445,15 @@ static int apr_add_device(struct device *dev, struct device_node *np,
 	if (!adev)
 		return -ENOMEM;
 
+	device_initialize(&adev->dev);
+	adev->dev.release = apr_dev_release;
 	adev->svc_id = svc_id;
 	svc = &adev->svc;
 
 	svc->id = svc_id;
 	svc->pr = apr;
 	svc->priv = adev;
-	svc->dev = dev;
+	svc->dev = &adev->dev;
 	spin_lock_init(&svc->lock);
 
 	adev->domain_id = domain_id;
@@ -450,7 +477,6 @@ static int apr_add_device(struct device *dev, struct device_node *np,
 	adev->dev.bus = &aprbus;
 	adev->dev.parent = dev;
 	adev->dev.of_node = np;
-	adev->dev.release = apr_dev_release;
 	adev->dev.driver = NULL;
 
 	spin_lock(&apr->svcs_lock);
@@ -458,7 +484,7 @@ static int apr_add_device(struct device *dev, struct device_node *np,
 	spin_unlock(&apr->svcs_lock);
 	if (ret < 0) {
 		dev_err(dev, "idr_alloc failed: %d\n", ret);
-		goto out;
+		goto err_free;
 	}
 
 	/* Protection domain is optional, it does not exist on older platforms */
@@ -466,18 +492,24 @@ static int apr_add_device(struct device *dev, struct device_node *np,
 					    1, &adev->service_path);
 	if (ret < 0 && ret != -EINVAL) {
 		dev_err(dev, "Failed to read second value of qcom,protection-domain\n");
-		goto out;
+		goto err_remove_service;
 	}
 
 	dev_info(dev, "Adding APR/GPR dev: %s\n", dev_name(&adev->dev));
 
-	ret = device_register(&adev->dev);
+	ret = device_add(&adev->dev);
 	if (ret) {
-		dev_err(dev, "device_register failed: %d\n", ret);
+		dev_err(dev, "device_add failed: %d\n", ret);
+		apr_remove_service(adev);
 		put_device(&adev->dev);
 	}
 
-out:
+	return ret;
+
+err_remove_service:
+	apr_remove_service(adev);
+err_free:
+	put_device(&adev->dev);
 	return ret;
 }
 
@@ -564,12 +596,14 @@ static int apr_remove_device(struct device *dev, void *svc_path)
 {
 	struct apr_device *adev = to_apr_device(dev);
 
-	if (svc_path && adev->service_path) {
-		if (!strcmp(adev->service_path, (char *)svc_path))
-			device_unregister(&adev->dev);
-	} else {
-		device_unregister(&adev->dev);
-	}
+	if (svc_path && adev->service_path &&
+	    strcmp(adev->service_path, (char *)svc_path))
+		return 0;
+
+	/* The service ID belongs to the device, not its current driver. */
+	device_del(&adev->dev);
+	apr_remove_service(adev);
+	put_device(&adev->dev);
 
 	return 0;
 }
