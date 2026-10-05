@@ -5,12 +5,14 @@
 
 #include <linux/bitfield.h>
 #include <linux/bits.h>
+#include <linux/interrupt.h>
 #include <linux/leds.h>
 #include <linux/led-class-flash.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/sysfs.h>
 #include <media/v4l2-flash-led-class.h>
 
 /* registers definitions */
@@ -166,6 +168,7 @@ static const struct reg_field mvflash_4ch_regs[REG_MAX_COUNT] = {
 };
 
 struct qcom_flash_data {
+	struct device		*dev;
 	struct v4l2_flash	**v4l2_flash;
 	struct regmap_field     *r_fields[REG_MAX_COUNT];
 	struct mutex		lock;
@@ -176,6 +179,8 @@ struct qcom_flash_data {
 	u8			chan_en_bits;
 	u8			revision;
 	u8			torch_clamp;
+	u32			last_fault_status1;
+	u32			last_fault_status2;
 };
 
 struct qcom_flash_led {
@@ -509,7 +514,7 @@ static int qcom_flash_fault_get(struct led_classdev_flash *fled_cdev, u32 *fault
 {
 	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);
 	struct qcom_flash_data *flash_data = led->flash_data;
-	u8 shift, chan_id, chan_mask = 0;
+	u8 shift, chan_id, chan_mask = 0, unmapped_mask = 0;
 	u8 ot_mask = 0, oc_mask = 0, uv_mask = 0;
 	u32 val, fault_sts = 0;
 	int i, rc;
@@ -517,6 +522,8 @@ static int qcom_flash_fault_get(struct led_classdev_flash *fled_cdev, u32 *fault
 	rc = regmap_field_read(flash_data->r_fields[REG_STATUS1], &val);
 	if (rc)
 		return rc;
+	if (val)
+		WRITE_ONCE(flash_data->last_fault_status1, val);
 
 	for (i = 0; i < led->chan_count; i++) {
 		chan_id = led->chan_id[i];
@@ -526,11 +533,20 @@ static int qcom_flash_fault_get(struct led_classdev_flash *fled_cdev, u32 *fault
 			fault_sts |= LED_FAULT_SHORT_CIRCUIT;
 
 		chan_mask |= BIT(chan_id);
+		unmapped_mask |= BIT(shift + 1);
 	}
+
+	/* Keep STATUS1 bits without a generic fault mapping visible in diagnostics. */
+	if (val & unmapped_mask)
+		dev_warn_ratelimited(flash_data->dev,
+				     "unmapped LED status1 bits: %#x\n",
+				     val & unmapped_mask);
 
 	rc = regmap_field_read(flash_data->r_fields[REG_STATUS2], &val);
 	if (rc)
 		return rc;
+	if (val)
+		WRITE_ONCE(flash_data->last_fault_status2, val);
 
 	if (flash_data->hw_type == QCOM_MVFLASH_3CH) {
 		ot_mask = FLASH_STS_3CH_OTST1 |
@@ -579,6 +595,55 @@ static int qcom_flash_fault_get(struct led_classdev_flash *fled_cdev, u32 *fault
 
 	*fault = fault_sts;
 	return 0;
+}
+
+static ssize_t fault_status_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct qcom_flash_data *flash_data = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "status1=%02x status2=%02x\n",
+			  READ_ONCE(flash_data->last_fault_status1),
+			  READ_ONCE(flash_data->last_fault_status2));
+}
+static DEVICE_ATTR_RO(fault_status);
+
+static struct attribute *qcom_flash_attrs[] = {
+	&dev_attr_fault_status.attr,
+	NULL,
+};
+
+static const struct attribute_group qcom_flash_group = {
+	.attrs = qcom_flash_attrs,
+};
+
+static irqreturn_t qcom_flash_fault_irq(int irq, void *data)
+{
+	struct qcom_flash_data *flash_data = data;
+	u32 status1, status2;
+	int rc;
+
+	rc = regmap_field_read(flash_data->r_fields[REG_STATUS1], &status1);
+	if (rc) {
+		dev_err_ratelimited(flash_data->dev,
+				    "failed to read fault status1: %d\n", rc);
+		return IRQ_HANDLED;
+	}
+
+	rc = regmap_field_read(flash_data->r_fields[REG_STATUS2], &status2);
+	if (rc) {
+		dev_err_ratelimited(flash_data->dev,
+				    "failed to read fault status2: %d\n", rc);
+		return IRQ_HANDLED;
+	}
+
+	WRITE_ONCE(flash_data->last_fault_status1, status1);
+	WRITE_ONCE(flash_data->last_fault_status2, status2);
+	dev_err_ratelimited(flash_data->dev,
+			    "flash LED fault: status1=%#x status2=%#x\n",
+			    status1, status2);
+
+	return IRQ_HANDLED;
 }
 
 static int qcom_flash_led_brightness_set(struct led_classdev *led_cdev,
@@ -842,12 +907,13 @@ static int qcom_flash_led_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct regmap *regmap;
 	struct reg_field *regs;
-	int count, i, rc;
+	int count, i, irq, rc;
 	u32 val, reg_base;
 
 	flash_data = devm_kzalloc(dev, sizeof(*flash_data), GFP_KERNEL);
 	if (!flash_data)
 		return -ENOMEM;
+	flash_data->dev = dev;
 
 	regmap = dev_get_regmap(dev->parent, NULL);
 	if (!regmap) {
@@ -925,6 +991,10 @@ static int qcom_flash_led_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, flash_data);
 	mutex_init(&flash_data->lock);
 
+	rc = devm_device_add_group(dev, &qcom_flash_group);
+	if (rc)
+		return rc;
+
 	count = device_get_child_node_count(dev);
 	if (count == 0 || count > flash_data->max_channels) {
 		dev_err(dev, "No child or child count exceeds %d\n", flash_data->max_channels);
@@ -949,6 +1019,18 @@ static int qcom_flash_led_probe(struct platform_device *pdev)
 			goto release;
 
 		flash_data->leds_count++;
+	}
+
+	irq = platform_get_irq_byname_optional(pdev, "led-fault-irq");
+	if (irq >= 0) {
+		rc = devm_request_threaded_irq(dev, irq, NULL,
+					       qcom_flash_fault_irq, IRQF_ONESHOT,
+					       dev_name(dev), flash_data);
+		if (rc)
+			goto release;
+	} else if (irq != -ENXIO) {
+		rc = irq;
+		goto release;
 	}
 
 	return regmap_field_write(flash_data->r_fields[REG_TORCH_CLAMP], flash_data->torch_clamp);
