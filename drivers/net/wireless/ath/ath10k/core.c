@@ -9,6 +9,7 @@
 #include <linux/export.h>
 #include <linux/module.h>
 #include <linux/firmware.h>
+#include <linux/hex.h>
 #include <linux/of.h>
 #include <linux/property.h>
 #include <linux/dmi.h>
@@ -964,6 +965,60 @@ static const struct firmware *ath10k_fetch_fw_file(struct ath10k *ar,
 		return ERR_PTR(ret);
 
 	return fw;
+}
+
+static int ath10k_core_get_mac_address(struct ath10k *ar)
+{
+	static const char prefix[] = "Intf0MacAddress=";
+	const struct firmware *fw;
+	const char *name, *pos, *end, *next;
+	u8 addr[ETH_ALEN];
+	bool found = false;
+	size_t len;
+	int ret;
+
+	if (!device_property_present(ar->dev, "qcom,mac-address-file")) {
+		device_get_mac_address(ar->dev, ar->mac_addr);
+		return 0;
+	}
+
+	ret = device_property_read_string(ar->dev, "qcom,mac-address-file",
+					  &name);
+	if (ret)
+		return ret;
+
+	ret = request_firmware(&fw, name, ar->dev);
+	if (ret)
+		return ret;
+
+	/* Firmware buffers are not NUL-terminated. Parse complete lines only. */
+	pos = (const char *)fw->data;
+	end = pos + fw->size;
+	ret = -EINVAL;
+	while (pos < end) {
+		next = memchr(pos, '\n', end - pos);
+		len = next ? next - pos : end - pos;
+		if (len && pos[len - 1] == '\r')
+			len--;
+		if (len >= sizeof(prefix) - 1 &&
+		    !memcmp(pos, prefix, sizeof(prefix) - 1)) {
+			if (found || len != sizeof(prefix) - 1 + ETH_ALEN * 2)
+				goto out;
+			if (hex2bin(addr, pos + sizeof(prefix) - 1, ETH_ALEN) ||
+			    !is_valid_ether_addr(addr))
+				goto out;
+			found = true;
+		}
+		pos = next ? next + 1 : end;
+	}
+	if (found) {
+		ether_addr_copy(ar->mac_addr, addr);
+		ret = 0;
+	}
+
+out:
+	release_firmware(fw);
+	return ret;
 }
 
 static int ath10k_push_board_ext_data(struct ath10k *ar, const void *data,
@@ -3401,6 +3456,12 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 		goto err_power_down;
 	}
 
+	ret = ath10k_core_get_mac_address(ar);
+	if (ret) {
+		ath10k_err(ar, "failed to load factory MAC address: %d\n", ret);
+		goto err_power_down;
+	}
+
 	ret = ath10k_core_fetch_firmware_files(ar);
 	if (ret) {
 		ath10k_err(ar, "could not fetch firmware files (%d)\n", ret);
@@ -3448,8 +3509,6 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 
 		ath10k_debug_print_board_info(ar);
 	}
-
-	device_get_mac_address(ar->dev, ar->mac_addr);
 
 	ret = ath10k_core_init_firmware_features(ar);
 	if (ret) {
