@@ -941,6 +941,20 @@ config INPUT_DRV260X_HAPTICS
 	  To compile this driver as a module, choose M here: the
 	  module will be called drv260x-haptics.
 
+config INPUT_DW7800_HAPTICS
+	tristate "Dongwoon DW7800 haptics support"
+	depends on I2C
+	select INPUT_FF_MEMLESS
+	select REGMAP_I2C
+	help
+	  Enable the Dongwoon DW7800 I2C haptics controller with
+	  a linear resonant actuator. The driver exposes rumble effects
+	  through the input force-feedback interface and sequences
+	  playback, power and register access through a regmap.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called dw7800.
+
 config INPUT_DRV2665_HAPTICS
 	tristate "TI DRV2665 haptics support"
 	depends on INPUT && I2C
