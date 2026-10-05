@@ -330,6 +330,7 @@ static const struct dpu_perf_cfg sm8150_perf_data = {
 	.min_llcc_ib = 800000,
 	.min_dram_ib = 800000,
 	.min_prefill_lines = 24,
+	.cpu_dma_latency_us = 44,
 	.danger_lut_tbl = {0xf, 0xffff, 0x0},
 	.safe_lut_tbl = {0xfff8, 0xf000, 0xffff},
 	.qos_lut_tbl = {
