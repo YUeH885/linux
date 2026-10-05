@@ -3,6 +3,7 @@
  */
 
 #include <drm/drm_managed.h>
+#include <drm/drm_color_mgmt.h>
 
 #include "dpu_hwio.h"
 #include "dpu_hw_catalog.h"
@@ -27,7 +28,6 @@
 /* DSPP_GC */
 #define GC_EN BIT(0)
 #define GC_DIS 0
-#define GC_8B_ROUND_EN BIT(1)
 #define GC_LUT_SWAP_OFF 0x1c
 #define GC_C0_OFF 0x4
 #define GC_C1_OFF 0xc
@@ -35,6 +35,41 @@
 #define GC_C0_INDEX_OFF 0x8
 #define GC_C1_INDEX_OFF 0x10
 #define GC_C2_INDEX_OFF 0x18
+
+/* IGC v3.1: data ports are relative to DSPP_TOP, control to each DSPP. */
+#define IGC_EN BIT(0)
+#define IGC_INDEX_UPDATE BIT(25)
+#define IGC_DSPP_MASK GENMASK(31, 28)
+#define IGC_DITHER_OFF 0x7e0
+
+static void dpu_setup_dspp_igc(struct dpu_hw_dspp *ctx,
+			       const struct drm_color_lut *lut)
+{
+	u32 base = ctx->cap->sblk->igc.base;
+	u32 select = IGC_DSPP_MASK & ~BIT(28 + ctx->idx - DSPP_0);
+	int i;
+
+	if (!lut) {
+		DPU_REG_WRITE(&ctx->hw, base, 0);
+		return;
+	}
+
+	mutex_lock(&ctx->top->lut_lock);
+	for (i = 0; i < DPU_DEGAMMA_LUT_SIZE; i++) {
+		u32 control = select | (i == 0 ? IGC_INDEX_UPDATE : 0);
+
+		DPU_REG_WRITE(&ctx->top->hw, 0,
+			      control | drm_color_lut_extract(lut[i].green, 12));
+		DPU_REG_WRITE(&ctx->top->hw, 4,
+			      control | drm_color_lut_extract(lut[i].blue, 12));
+		DPU_REG_WRITE(&ctx->top->hw, 8,
+			      control | drm_color_lut_extract(lut[i].red, 12));
+	}
+	mutex_unlock(&ctx->top->lut_lock);
+
+	DPU_REG_WRITE(&ctx->hw, base + IGC_DITHER_OFF, 0);
+	DPU_REG_WRITE(&ctx->hw, base, IGC_EN);
+}
 
 static void dpu_setup_dspp_pcc(struct dpu_hw_dspp *ctx,
 		struct dpu_hw_pcc_cfg *cfg)
@@ -76,7 +111,7 @@ static void dpu_setup_dspp_pcc(struct dpu_hw_dspp *ctx,
 }
 
 static void dpu_setup_dspp_gc(struct dpu_hw_dspp *ctx,
-		struct dpu_hw_gc_lut *gc_lut)
+		const struct drm_color_lut *lut)
 {
 	int i = 0;
 	u32 base, reg;
@@ -93,7 +128,7 @@ static void dpu_setup_dspp_gc(struct dpu_hw_dspp *ctx,
 		return;
 	}
 
-	if (!gc_lut) {
+	if (!lut) {
 		DRM_DEBUG_DRIVER("disable gc feature\n");
 		DPU_REG_WRITE(&ctx->hw, base, GC_DIS);
 		return;
@@ -104,14 +139,20 @@ static void dpu_setup_dspp_gc(struct dpu_hw_dspp *ctx,
 	DPU_REG_WRITE(&ctx->hw, base + GC_C2_INDEX_OFF, 0);
 
 	for (i = 0; i < PGC_TBL_LEN; i++) {
-		DPU_REG_WRITE(&ctx->hw, base + GC_C0_OFF, gc_lut->c0[i]);
-		DPU_REG_WRITE(&ctx->hw, base + GC_C1_OFF, gc_lut->c1[i]);
-		DPU_REG_WRITE(&ctx->hw, base + GC_C2_OFF, gc_lut->c2[i]);
+		DPU_REG_WRITE(&ctx->hw, base + GC_C0_OFF,
+			      drm_color_lut_extract(lut[2 * i].green, 10) |
+			      drm_color_lut_extract(lut[2 * i + 1].green, 10) << 16);
+		DPU_REG_WRITE(&ctx->hw, base + GC_C1_OFF,
+			      drm_color_lut_extract(lut[2 * i].blue, 10) |
+			      drm_color_lut_extract(lut[2 * i + 1].blue, 10) << 16);
+		DPU_REG_WRITE(&ctx->hw, base + GC_C2_OFF,
+			      drm_color_lut_extract(lut[2 * i].red, 10) |
+			      drm_color_lut_extract(lut[2 * i + 1].red, 10) << 16);
 	}
 
 	DPU_REG_WRITE(&ctx->hw, base + GC_LUT_SWAP_OFF, BIT(0));
 
-	reg = GC_EN | ((gc_lut->flags & PGC_8B_ROUND) ? GC_8B_ROUND_EN : 0);
+	reg = GC_EN;
 	DPU_REG_WRITE(&ctx->hw, base, reg);
 }
 
@@ -121,11 +162,13 @@ static void dpu_setup_dspp_gc(struct dpu_hw_dspp *ctx,
  * @dev:  Corresponding device for devres management
  * @cfg:  DSPP catalog entry for which driver object is required
  * @addr: Mapped register io address of MDP
+ * @top: Shared DSPP LUT ports, or NULL when absent
  * Return: pointer to structure or ERR_PTR
  */
 struct dpu_hw_dspp *dpu_hw_dspp_init(struct drm_device *dev,
 				     const struct dpu_dspp_cfg *cfg,
-				     void __iomem *addr)
+				     void __iomem *addr,
+				     struct dpu_hw_dspp_top *top)
 {
 	struct dpu_hw_dspp *c;
 
@@ -138,14 +181,32 @@ struct dpu_hw_dspp *dpu_hw_dspp_init(struct drm_device *dev,
 
 	c->hw.blk_addr = addr + cfg->base;
 	c->hw.log_mask = DPU_DBG_MASK_DSPP;
+	c->top = top;
 
 	/* Assign ops */
 	c->idx = cfg->id;
 	c->cap = cfg;
+	if (top && c->cap->sblk->igc.version == 0x30001)
+		c->ops.setup_igc = dpu_setup_dspp_igc;
 	if (c->cap->sblk->pcc.base)
 		c->ops.setup_pcc = dpu_setup_dspp_pcc;
 	if (c->cap->sblk->gc.base)
 		c->ops.setup_gc = dpu_setup_dspp_gc;
 
 	return c;
+}
+
+struct dpu_hw_dspp_top *dpu_hw_dspp_top_init(struct drm_device *dev,
+					  void __iomem *addr)
+{
+	struct dpu_hw_dspp_top *top;
+
+	top = drmm_kzalloc(dev, sizeof(*top), GFP_KERNEL);
+	if (!top)
+		return ERR_PTR(-ENOMEM);
+
+	top->hw.blk_addr = addr;
+	top->hw.log_mask = DPU_DBG_MASK_DSPP;
+	mutex_init(&top->lut_lock);
+	return top;
 }
