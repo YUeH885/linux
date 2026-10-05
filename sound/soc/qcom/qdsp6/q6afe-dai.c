@@ -367,21 +367,26 @@ static int q6dma_hw_params(struct snd_pcm_substream *substream,
 
 	return 0;
 }
-static void q6afe_dai_shutdown(struct snd_pcm_substream *substream,
-				struct snd_soc_dai *dai)
+static int q6afe_dai_stop(struct snd_soc_dai *dai)
 {
 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
 	int rc;
 
 	if (!dai_data->is_port_started[dai->id])
-		return;
+		return 0;
 
 	rc = q6afe_port_stop(dai_data->port[dai->id]);
 	if (rc < 0)
 		dev_err(dai->dev, "fail to close AFE port (%d)\n", rc);
 
 	dai_data->is_port_started[dai->id] = false;
+	return rc;
+}
 
+static void q6afe_dai_shutdown(struct snd_pcm_substream *substream,
+				struct snd_soc_dai *dai)
+{
+	q6afe_dai_stop(dai);
 }
 
 static int q6afe_dai_prepare(struct snd_pcm_substream *substream,
@@ -390,14 +395,10 @@ static int q6afe_dai_prepare(struct snd_pcm_substream *substream,
 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
 	int rc;
 
-	if (dai_data->is_port_started[dai->id]) {
-		/* stop the port and restart with new port config */
-		rc = q6afe_port_stop(dai_data->port[dai->id]);
-		if (rc < 0) {
-			dev_err(dai->dev, "fail to close AFE port (%d)\n", rc);
-			return rc;
-		}
-	}
+	/* Stop the old instance before applying new parameters. */
+	rc = q6afe_dai_stop(dai);
+	if (rc < 0)
+		return rc;
 
 	switch (dai->id) {
 	case HDMI_RX:
@@ -702,11 +703,14 @@ static int msm_dai_q6_dai_probe(struct snd_soc_dai *dai)
 static int msm_dai_q6_dai_remove(struct snd_soc_dai *dai)
 {
 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
+	int ret;
 
+	/* Card removal can bypass the PCM shutdown of a prepared backend. */
+	ret = q6afe_dai_stop(dai);
 	q6afe_port_put(dai_data->port[dai->id]);
 	dai_data->port[dai->id] = NULL;
 
-	return 0;
+	return ret;
 }
 
 static const struct snd_soc_dai_ops q6afe_usb_ops = {
