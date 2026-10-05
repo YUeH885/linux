@@ -9,6 +9,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/sizes.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/pcm.h>
@@ -1317,10 +1318,15 @@ static int q6asm_dai_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	rc = of_parse_phandle_with_fixed_args(node, "iommus", 1, 0, &args);
-	if (rc < 0)
+	if (rc < 0) {
 		pdata->sid = -1;
-	else
+	} else {
 		pdata->sid = args.args[0] & SID_MASK_DEFAULT;
+		of_node_put(args.np);
+		/* Keep the aligned mapping end below the stream-ID word boundary. */
+		dev->bus_dma_limit = min_not_zero(dev->bus_dma_limit,
+						  DMA_BIT_MASK(32) - SZ_4K);
+	}
 
 	dev_set_drvdata(dev, pdata);
 
