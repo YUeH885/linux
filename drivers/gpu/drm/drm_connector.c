@@ -3683,20 +3683,23 @@ struct drm_connector *drm_connector_find_by_fwnode(struct fwnode_handle *fwnode)
  *
  * This function can be used to report these out-of-band events after obtaining
  * a drm_connector reference through calling drm_connector_find_by_fwnode().
+ *
+ * Returns: 0 when the connector was found, or a negative error code otherwise.
  */
-void drm_connector_oob_hotplug_event(struct fwnode_handle *connector_fwnode,
-				     enum drm_connector_status status)
+int drm_connector_oob_hotplug_event(struct fwnode_handle *connector_fwnode,
+				    enum drm_connector_status status)
 {
 	struct drm_connector *connector;
 
 	connector = drm_connector_find_by_fwnode(connector_fwnode);
 	if (IS_ERR(connector))
-		return;
+		return PTR_ERR(connector);
 
 	if (connector->funcs->oob_hotplug_event)
 		connector->funcs->oob_hotplug_event(connector, status);
 
 	drm_connector_put(connector);
+	return 0;
 }
 EXPORT_SYMBOL(drm_connector_oob_hotplug_event);
 
