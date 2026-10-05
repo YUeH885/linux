@@ -163,6 +163,8 @@ struct q6afe_hdmi_cfg {
 	u16                  channel_allocation;
 	u32                  sample_rate;
 	u16                  bit_width;
+	u8                   channels;
+	u8                   channel_map[8];
 };
 
 struct q6afe_slim_cfg {

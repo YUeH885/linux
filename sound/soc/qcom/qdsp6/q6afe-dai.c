@@ -12,6 +12,7 @@
 #include <sound/pcm.h>
 #include <sound/soc.h>
 #include <sound/pcm_params.h>
+#include <sound/hdmi-codec.h>
 #include "q6dsp-lpass-ports.h"
 #include "q6dsp-common.h"
 #include "q6afe.h"
@@ -71,6 +72,8 @@ static int q6hdmi_hw_params(struct snd_pcm_substream *substream,
 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
 	int channels = params_channels(params);
 	struct q6afe_hdmi_cfg *hdmi = &dai_data->port_config[dai->id].hdmi;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	unsigned int map[PCM_MAX_NUM_CHANNEL];
 	int ret;
 
 	hdmi->sample_rate = params_rate(params);
@@ -79,16 +82,46 @@ static int q6hdmi_hw_params(struct snd_pcm_substream *substream,
 		hdmi->bit_width = 16;
 		break;
 	case SNDRV_PCM_FORMAT_S24_LE:
+	case SNDRV_PCM_FORMAT_S32_LE:
 		hdmi->bit_width = 24;
 		break;
+	default:
+		return -EINVAL;
 	}
 
-	ret = q6dsp_get_channel_allocation(channels);
+	ret = hdmi_codec_get_chmap(snd_soc_rtd_to_codec(rtd, 0), channels, map);
+	if (ret == -EOPNOTSUPP) {
+		ret = q6dsp_map_channels(hdmi->channel_map, channels);
+		if (ret < 0)
+			return ret;
+		ret = q6dsp_get_channel_allocation(channels);
+	} else if (ret >= 0) {
+		int err = q6dsp_map_chmap(hdmi->channel_map, channels, map);
+
+		if (err)
+			return err;
+	}
 	if (ret < 0)
 		return ret;
 
 	hdmi->channel_allocation = (u16) ret;
+	hdmi->channels = channels;
 
+	return 0;
+}
+
+static int q6hdmi_get_channel_map(const struct snd_soc_dai *dai,
+				  unsigned int *tx_num, unsigned int *tx_slot,
+				  unsigned int *rx_num, unsigned int *rx_slot)
+{
+	struct q6afe_dai_data *data = dev_get_drvdata(dai->dev);
+	struct q6afe_hdmi_cfg *hdmi = &data->port_config[dai->id].hdmi;
+	unsigned int i;
+
+	*tx_num = 0;
+	*rx_num = hdmi->channels;
+	for (i = 0; i < hdmi->channels; i++)
+		rx_slot[i] = hdmi->channel_map[i];
 	return 0;
 }
 
@@ -389,10 +422,18 @@ static void q6afe_dai_shutdown(struct snd_pcm_substream *substream,
 	q6afe_dai_stop(dai);
 }
 
+static int q6afe_dai_hw_free(struct snd_pcm_substream *substream,
+			     struct snd_soc_dai *dai)
+{
+	/* DAI shutdown runs codecs first, after the DP audio clocks are gone. */
+	return q6afe_dai_stop(dai);
+}
+
 static int q6afe_dai_prepare(struct snd_pcm_substream *substream,
 		struct snd_soc_dai *dai)
 {
 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	int rc;
 
 	/* Stop the old instance before applying new parameters. */
@@ -403,6 +444,9 @@ static int q6afe_dai_prepare(struct snd_pcm_substream *substream,
 	switch (dai->id) {
 	case HDMI_RX:
 	case DISPLAY_PORT_RX:
+		/* Offline ALSA capability probes must not start an unclocked DP port. */
+		if (hdmi_codec_is_plugged(snd_soc_rtd_to_codec(rtd, 0)) == 0)
+			return 0;
 		q6afe_hdmi_port_prepare(dai_data->port[dai->id],
 					&dai_data->port_config[dai->id].hdmi);
 		break;
@@ -735,6 +779,8 @@ static const struct snd_soc_dai_ops q6hdmi_ops = {
 	.remove			= msm_dai_q6_dai_remove,
 	.prepare		= q6afe_dai_prepare,
 	.hw_params		= q6hdmi_hw_params,
+	.hw_free		= q6afe_dai_hw_free,
+	.get_channel_map	= q6hdmi_get_channel_map,
 	.shutdown		= q6afe_dai_shutdown,
 };
 

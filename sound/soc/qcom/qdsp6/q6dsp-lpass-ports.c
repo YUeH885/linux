@@ -86,7 +86,9 @@
 				SNDRV_PCM_RATE_96000 |			\
 				SNDRV_PCM_RATE_192000,			\
 			.formats = SNDRV_PCM_FMTBIT_S16_LE |		\
-				   SNDRV_PCM_FMTBIT_S24_LE,		\
+				   SNDRV_PCM_FMTBIT_S24_LE |		\
+				   SNDRV_PCM_FMTBIT_S32_LE,		\
+			.sig_bits = 24,					\
 			.channels_min = 2,				\
 			.channels_max = 8,				\
 			.rate_min = 48000,				\

@@ -7,6 +7,41 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/errno.h>
+#include <sound/pcm.h>
+
+int q6dsp_map_chmap(u8 ch_map[PCM_MAX_NUM_CHANNEL], unsigned int channels,
+		    const unsigned int *map)
+{
+	static const u8 positions[] = {
+		[SNDRV_CHMAP_FL] = PCM_CHANNEL_FL,
+		[SNDRV_CHMAP_FR] = PCM_CHANNEL_FR,
+		[SNDRV_CHMAP_FC] = PCM_CHANNEL_FC,
+		[SNDRV_CHMAP_LFE] = PCM_CHANNEL_LFE,
+		[SNDRV_CHMAP_RL] = PCM_CHANNEL_LB,
+		[SNDRV_CHMAP_RR] = PCM_CHANNEL_RB,
+		[SNDRV_CHMAP_SL] = PCM_CHANNEL_LS,
+		[SNDRV_CHMAP_SR] = PCM_CHANNEL_RS,
+		[SNDRV_CHMAP_RC] = PCM_CHANNEL_CS,
+		[SNDRV_CHMAP_FLC] = PCM_CHANNEL_FLC,
+		[SNDRV_CHMAP_FRC] = PCM_CHANNEL_FRC,
+		[SNDRV_CHMAP_RLC] = PCM_CHANNEL_RLC,
+		[SNDRV_CHMAP_RRC] = PCM_CHANNEL_RRC,
+	};
+	unsigned int i;
+
+	if (!channels || channels > PCM_MAX_NUM_CHANNEL)
+		return -EINVAL;
+
+	memset(ch_map, 0, PCM_MAX_NUM_CHANNEL);
+	for (i = 0; i < channels; i++) {
+		if (map[i] >= ARRAY_SIZE(positions) || !positions[map[i]])
+			return -EINVAL;
+		ch_map[i] = positions[map[i]];
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(q6dsp_map_chmap);
 
 int q6dsp_map_channels(u8 ch_map[PCM_MAX_NUM_CHANNEL], int ch)
 {

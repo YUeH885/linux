@@ -37,6 +37,8 @@
 #define AFE_SVC_CMD_SET_PARAM		0x000100f3
 #define AFE_PORT_CMDRSP_GET_PARAM_V2	0x00010106
 #define AFE_PARAM_ID_HDMI_CONFIG	0x00010210
+#define AFE_PARAM_ID_HDMI_DP_MST_VID_IDX_CFG	0x000102B5
+#define AFE_PARAM_ID_HDMI_DPTX_IDX_CFG		0x000102B6
 #define AFE_MODULE_AUDIO_DEV_INTERFACE	0x0001020C
 #define AFE_PARAM_ID_SET_TOPOLOGY	0x0001025A
 #define AFE_MODULE_TDM			0x0001028A
@@ -500,6 +502,11 @@ struct afe_port_cmd_set_param_v2 {
 	u32 payload_address_lsw;
 	u32 payload_address_msw;
 	u32 mem_map_handle;
+} __packed;
+
+struct afe_display_index_cfg {
+	u32 minor_version;
+	u32 index;
 } __packed;
 
 struct afe_param_id_hdmi_multi_chan_audio_cfg {
@@ -2263,6 +2270,24 @@ int q6afe_port_start(struct q6afe_port *port)
 	int ret, param_id = port->cfg_type;
 	struct apr_pkt *pkt;
 	int pkt_size;
+	size_t config_size = sizeof(port->port_cfg);
+
+	if (port_id == AFE_PORT_ID_HDMI_OVER_DP_RX) {
+		struct afe_display_index_cfg index = { .minor_version = 1 };
+
+		/* The single DP transmitter uses controller 0 and video stream 0. */
+		ret = q6afe_port_set_param_v2(port, &index,
+					      AFE_PARAM_ID_HDMI_DP_MST_VID_IDX_CFG,
+					      AFE_MODULE_AUDIO_DEV_INTERFACE, sizeof(index));
+		if (ret)
+			return ret;
+		ret = q6afe_port_set_param_v2(port, &index,
+					      AFE_PARAM_ID_HDMI_DPTX_IDX_CFG,
+					      AFE_MODULE_AUDIO_DEV_INTERFACE, sizeof(index));
+		if (ret)
+			return ret;
+		config_size = sizeof(port->port_cfg.hdmi_multi_ch);
+	}
 
 	if (port->tfadsp) {
 		u32 topology_id = port->id == AFE_PORT_ID_SECONDARY_MI2S_RX ?
@@ -2293,7 +2318,7 @@ int q6afe_port_start(struct q6afe_port *port)
 
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
 				       AFE_MODULE_AUDIO_DEV_INTERFACE,
-				       sizeof(port->port_cfg));
+				       config_size);
 	if (ret) {
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);

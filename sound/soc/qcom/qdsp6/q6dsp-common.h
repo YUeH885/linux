@@ -18,8 +18,14 @@
 #define PCM_CHANNEL_LB   8	/* Left back channel; Rear left channel. */
 #define PCM_CHANNEL_RB   9	/* Right back channel; Rear right channel. */
 #define PCM_CHANNELS   10	/* Top surround channel. */
+#define PCM_CHANNEL_FLC 13
+#define PCM_CHANNEL_FRC 14
+#define PCM_CHANNEL_RLC 15
+#define PCM_CHANNEL_RRC 16
 
 int q6dsp_map_channels(u8 ch_map[PCM_MAX_NUM_CHANNEL], int ch);
+int q6dsp_map_chmap(u8 ch_map[PCM_MAX_NUM_CHANNEL], unsigned int channels,
+		    const unsigned int *map);
 int q6dsp_get_channel_allocation(int channels);
 
 #endif /* __Q6DSP_COMMON_H__ */
