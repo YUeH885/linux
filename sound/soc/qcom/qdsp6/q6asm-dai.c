@@ -19,9 +19,11 @@
 #include <asm/dma.h>
 #include <linux/dma-mapping.h>
 #include <sound/pcm_params.h>
+#include <sound/hdmi-codec.h>
 #include "q6asm.h"
 #include "q6routing.h"
 #include "q6dsp-errno.h"
+#include "q6dsp-common.h"
 
 #define DRV_NAME	"q6asm-fe-dai"
 
@@ -64,6 +66,7 @@ struct q6asm_dai_rtd {
 	uint64_t bytes_received;
 	uint64_t copied_total;
 	uint16_t bits_per_sample;
+	u8 channel_map[PCM_MAX_NUM_CHANNEL];
 	snd_pcm_uframes_t queue_ptr;
 	uint16_t source; /* Encoding source bit mask */
 	struct audio_client *audio_client;
@@ -81,6 +84,7 @@ struct q6asm_dai_data {
 	struct snd_soc_dai_driver *dais;
 	int num_dais;
 	long long int sid;
+	u8 playback_map[MAX_SESSIONS][PCM_MAX_NUM_CHANNEL];
 };
 
 /* PCM v2 carries 24-bit samples in the high bits of 32-bit words. */
@@ -211,6 +215,7 @@ static int q6asm_dai_prepare(struct snd_soc_component *component,
 	struct q6asm_dai_rtd *prtd = runtime->private_data;
 	struct q6asm_dai_data *pdata;
 	struct device *dev = component->dev;
+	struct snd_soc_dpcm *dpcm;
 	int ret, i;
 
 	pdata = snd_soc_component_get_drvdata(component);
@@ -243,6 +248,14 @@ static int q6asm_dai_prepare(struct snd_soc_component *component,
 		q6routing_stream_close(soc_prtd->dai_link->id,
 					 substream->stream);
 		prtd->state = Q6ASM_STREAM_STOPPED;
+	}
+
+	for_each_dpcm_be(soc_prtd, substream->stream, dpcm) {
+		if (hdmi_codec_is_plugged(snd_soc_rtd_to_codec(dpcm->be, 0)) == 0) {
+			/* Prepare may probe capabilities; trigger requires a live link. */
+			prtd->state = Q6ASM_STREAM_IDLE;
+			return 0;
+		}
 	}
 
 	ret = q6asm_map_memory_regions(substream->stream, prtd->audio_client,
@@ -282,7 +295,8 @@ static int q6asm_dai_prepare(struct snd_soc_component *component,
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		ret = q6asm_media_format_block_multi_ch_pcm(
 				prtd->audio_client, prtd->stream_id,
-				runtime->rate, runtime->channels, NULL,
+				runtime->rate, runtime->channels,
+				prtd->channel_map[0] ? prtd->channel_map : NULL,
 				prtd->bits_per_sample);
 	} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
 		ret = q6asm_enc_cfg_blk_pcm_format_support(prtd->audio_client,
@@ -345,15 +359,21 @@ static int q6asm_dai_trigger(struct snd_soc_component *component,
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		if (prtd->state != Q6ASM_STREAM_RUNNING)
+			return -ENOLINK;
 		ret = q6asm_run_nowait(prtd->audio_client, prtd->stream_id,
 				       0, 0, 0);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
+		if (prtd->state == Q6ASM_STREAM_IDLE)
+			return 0;
 		ret = q6asm_cmd_nowait(prtd->audio_client, prtd->stream_id,
 				       CMD_EOS);
 		break;
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		if (prtd->state == Q6ASM_STREAM_IDLE)
+			return 0;
 		ret = q6asm_cmd_nowait(prtd->audio_client, prtd->stream_id,
 				       CMD_PAUSE);
 		break;
@@ -507,8 +527,13 @@ static int q6asm_dai_hw_params(struct snd_soc_component *component,
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct q6asm_dai_rtd *prtd = runtime->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct q6asm_dai_data *data = dev_get_drvdata(component->dev);
 
 	prtd->pcm_size = params_buffer_bytes(params);
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		memcpy(prtd->channel_map, data->playback_map[rtd->dai_link->id],
+		       sizeof(prtd->channel_map));
 	prtd->periods = params_periods(params);
 
 	switch (params_format(params)) {
@@ -1253,6 +1278,22 @@ static struct snd_soc_dai_driver q6asm_fe_dais_template[] = {
 	Q6ASM_FEDAI_DRIVER(8),
 };
 
+static int q6asm_set_channel_map(struct snd_soc_dai *dai,
+				 unsigned int tx_num, const unsigned int *tx_slot,
+				 unsigned int rx_num, const unsigned int *rx_slot)
+{
+	struct q6asm_dai_data *data = dev_get_drvdata(dai->dev);
+
+	if (rx_num)
+		return -EINVAL;
+
+	return q6dsp_map_chmap(data->playback_map[dai->id], tx_num, tx_slot);
+}
+
+static const struct snd_soc_dai_ops q6asm_pcm_dai_ops = {
+	.set_channel_map = q6asm_set_channel_map,
+};
+
 static const struct snd_soc_dai_ops q6asm_dai_ops = {
 	.compress_new = snd_soc_new_compress,
 };
@@ -1288,6 +1329,7 @@ static int of_q6asm_parse_dai_data(struct device *dev,
 
 		dai_drv = &pdata->dais[idx++];
 		*dai_drv = q6asm_fe_dais_template[id];
+		dai_drv->ops = &q6asm_pcm_dai_ops;
 
 		ret = of_property_read_u32(node, "direction", &dir);
 		if (ret)
