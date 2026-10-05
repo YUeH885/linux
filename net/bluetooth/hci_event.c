@@ -2737,10 +2737,10 @@ static void hci_cs_disconnect(struct hci_dev *hdev, u8 status)
 
 	bt_dev_dbg(hdev, "status 0x%2.2x", status);
 
-	/* Wait for HCI_EV_DISCONN_COMPLETE if status 0x00 and not suspended
-	 * otherwise cleanup the connection immediately.
+	/* A successful command is only an acknowledgment. Keep the connection
+	 * until HCI_EV_DISCONN_COMPLETE, including during system suspend.
 	 */
-	if (!status && !hdev->suspended)
+	if (!status)
 		return;
 
 	cp = hci_sent_cmd_data(hdev, HCI_OP_DISCONNECT);
@@ -2757,6 +2757,12 @@ static void hci_cs_disconnect(struct hci_dev *hdev, u8 status)
 		mgmt_disconnect_failed(hdev, &conn->dst, conn->type,
 				       conn->dst_type, status);
 
+		/* The controller still owns this link. Let suspend fail
+		 * without losing the connection needed for recovery.
+		 */
+		if (hdev->suspended)
+			goto unlock;
+
 		if (conn->type == LE_LINK && conn->role == HCI_ROLE_SLAVE) {
 			hdev->cur_adv_instance = conn->adv_instance;
 			hci_enable_advertising(hdev);
@@ -2768,8 +2774,8 @@ static void hci_cs_disconnect(struct hci_dev *hdev, u8 status)
 		goto done;
 	}
 
-	/* During suspend, mark connection as closed immediately
-	 * since we might not receive HCI_EV_DISCONN_COMPLETE
+	/* A failed disconnect has no completion event to wait for during
+	 * suspend, so finish closing the connection here.
 	 */
 	if (hdev->suspended)
 		conn->state = BT_CLOSED;
