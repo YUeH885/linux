@@ -290,6 +290,8 @@ static int msm_dp_display_process_hpd_high(struct msm_dp_display_private *dp)
 			return -ETIMEDOUT;
 	}
 
+	dp->msm_dp_display.psr_supported = dp->panel->psr_cap.version && psr_enabled;
+	dp->link->psr_supported = dp->msm_dp_display.psr_supported;
 	msm_dp_link_process_request(dp->link);
 
 	if (!dp->msm_dp_display.is_edp)
@@ -297,8 +299,6 @@ static int msm_dp_display_process_hpd_high(struct msm_dp_display_private *dp)
 						 connector_status_connected,
 						 dp->panel->dpcd,
 						 dp->panel->downstream_ports);
-
-	dp->msm_dp_display.psr_supported = dp->panel->psr_cap.version && psr_enabled;
 
 	dp->audio_supported = info->has_audio;
 	msm_dp_panel_handle_sink_request(dp->panel, drm_edid);
@@ -440,8 +440,8 @@ static void msm_dp_display_handle_plugged_change(struct msm_dp *msm_dp_display,
 	dp = container_of(msm_dp_display,
 			struct msm_dp_display_private, msm_dp_display);
 
-	/* notify audio subsystem only if sink supports audio */
-	if (dp->audio_supported)
+	/* A disconnect must also clear the previous receiver's audio state. */
+	if (!plugged || dp->audio_supported)
 		drm_connector_hdmi_audio_plugged_notify(msm_dp_display->connector,
 							plugged);
 }
@@ -698,10 +698,10 @@ static void msm_dp_display_audio_notify_disable(struct msm_dp_display_private *d
 {
 	struct msm_dp *msm_dp_display = &dp->msm_dp_display;
 
+	msm_dp_display_handle_plugged_change(msm_dp_display, false);
+
 	/* wait only if audio was enabled */
 	if (msm_dp_display->audio_enabled) {
-		/* signal the disconnect event */
-		msm_dp_display_handle_plugged_change(msm_dp_display, false);
 		if (!wait_for_completion_timeout(&dp->audio_comp,
 				HZ * 5))
 			DRM_ERROR("audio comp timeout\n");
@@ -1475,6 +1475,8 @@ void msm_dp_display_atomic_disable(struct msm_dp *dp)
 	if (!dp->power_on)
 		return;
 
+	/* The DSP must stop sending audio before the video stream enters idle. */
+	msm_dp_display_audio_notify_disable(msm_dp_display);
 	msm_dp_ctrl_push_idle(msm_dp_display->ctrl);
 }
 
@@ -1495,8 +1497,6 @@ void msm_dp_display_atomic_post_disable(struct msm_dp *dp)
 
 	if (dp->is_edp)
 		msm_dp_hpd_unplug_handle(msm_dp_display);
-
-	msm_dp_display_audio_notify_disable(msm_dp_display);
 
 	msm_dp_display_disable(msm_dp_display, msm_dp_display->panel);
 
