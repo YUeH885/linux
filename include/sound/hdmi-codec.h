@@ -137,4 +137,12 @@ struct snd_soc_jack;
 
 #define HDMI_CODEC_DRV_NAME "hdmi-audio-codec"
 
+int hdmi_codec_set_pcm(struct snd_soc_dai *dai,
+		       struct snd_soc_pcm_runtime *rtd);
+int hdmi_codec_get_chmap(struct snd_soc_dai *dai, unsigned int channels,
+			 unsigned int *map);
+int hdmi_codec_hw_constraint_eld(struct snd_soc_dai *dai,
+				 struct snd_pcm_runtime *runtime);
+int hdmi_codec_is_plugged(struct snd_soc_dai *dai);
+
 #endif /* __HDMI_CODEC_H__ */
