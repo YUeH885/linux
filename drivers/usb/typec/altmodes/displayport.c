@@ -37,6 +37,9 @@ enum {
 					 BIT(DP_PIN_ASSIGN_E) | \
 					 BIT(DP_PIN_ASSIGN_F))
 
+#define DP_HPD_RETRY_COUNT	60
+#define DP_HPD_RETRY_DELAY_MS	300
+
 /* DP only pin assignments */
 #define DP_PIN_ASSIGN_DP_ONLY_MASK	(BIT(DP_PIN_ASSIGN_A) | \
 					 BIT(DP_PIN_ASSIGN_C) | \
@@ -75,6 +78,8 @@ struct dp_altmode {
 
 	struct mutex lock; /* device lock */
 	struct work_struct work;
+	struct delayed_work hpd_work;
+	unsigned int hpd_retry_count;
 	struct typec_altmode *alt;
 	const struct typec_altmode *port;
 	struct fwnode_handle *connector_fwnode;
@@ -159,6 +164,56 @@ static int dp_altmode_configure(struct dp_altmode *dp, u8 con)
 	return 0;
 }
 
+static void dp_altmode_hpd_work(struct work_struct *work)
+{
+	struct dp_altmode *dp = container_of(to_delayed_work(work),
+					     struct dp_altmode, hpd_work);
+	int ret;
+
+	mutex_lock(&dp->lock);
+	if (!dp->pending_hpd || !dp->hpd) {
+		mutex_unlock(&dp->lock);
+		return;
+	}
+
+	ret = drm_connector_oob_hotplug_event(dp->connector_fwnode,
+					      connector_status_connected);
+	if (ret == -ENODEV) {
+		if (++dp->hpd_retry_count < DP_HPD_RETRY_COUNT) {
+			schedule_delayed_work(&dp->hpd_work,
+					      msecs_to_jiffies(DP_HPD_RETRY_DELAY_MS));
+		} else {
+			dev_warn(&dp->alt->dev, "timed out waiting for DRM connector (%d)\n", ret);
+			dp->pending_hpd = false;
+		}
+	} else {
+		dev_info(&dp->alt->dev, "HPD delivered to DRM connector after %u retries\n",
+			 dp->hpd_retry_count);
+		dp->pending_hpd = false;
+	}
+	mutex_unlock(&dp->lock);
+}
+
+static void dp_altmode_report_hpd(struct dp_altmode *dp)
+{
+	enum drm_connector_status status = dp->hpd ?
+		connector_status_connected : connector_status_disconnected;
+	int ret;
+
+	ret = drm_connector_oob_hotplug_event(dp->connector_fwnode, status);
+	sysfs_notify(&dp->alt->dev.kobj, "displayport", "hpd");
+	if (dp->hpd && ret == -ENODEV) {
+		/* Type-C can negotiate before the display driver registers. */
+		dp->pending_hpd = true;
+		dp->hpd_retry_count = 0;
+		schedule_delayed_work(&dp->hpd_work,
+				      msecs_to_jiffies(DP_HPD_RETRY_DELAY_MS));
+	} else {
+		cancel_delayed_work(&dp->hpd_work);
+		dp->pending_hpd = false;
+	}
+}
+
 static int dp_altmode_status_update(struct dp_altmode *dp)
 {
 	bool configured = !!DP_CONF_GET_PIN_ASSIGN(dp->data.conf);
@@ -187,11 +242,8 @@ static int dp_altmode_status_update(struct dp_altmode *dp)
 				dp->pending_irq_hpd = true;
 		}
 	} else {
-		drm_connector_oob_hotplug_event(dp->connector_fwnode,
-						hpd ? connector_status_connected :
-						      connector_status_disconnected);
 		dp->hpd = hpd;
-		sysfs_notify(&dp->alt->dev.kobj, "displayport", "hpd");
+		dp_altmode_report_hpd(dp);
 		if (hpd && irq_hpd) {
 			dp->irq_hpd_count++;
 			sysfs_notify(&dp->alt->dev.kobj, "displayport", "irq_hpd");
@@ -211,10 +263,7 @@ static int dp_altmode_configured(struct dp_altmode *dp)
 	 * configuration is complete to signal HPD.
 	 */
 	if (dp->pending_hpd) {
-		drm_connector_oob_hotplug_event(dp->connector_fwnode,
-						connector_status_connected);
-		sysfs_notify(&dp->alt->dev.kobj, "displayport", "hpd");
-		dp->pending_hpd = false;
+		dp_altmode_report_hpd(dp);
 		if (dp->pending_irq_hpd) {
 			dp->irq_hpd_count++;
 			sysfs_notify(&dp->alt->dev.kobj, "displayport", "irq_hpd");
@@ -395,6 +444,8 @@ static int dp_altmode_vdm(struct typec_altmode *alt,
 			typec_altmode_update_active(alt, false);
 			dp->data.status = 0;
 			dp->data.conf = 0;
+			dp->pending_hpd = false;
+			cancel_delayed_work(&dp->hpd_work);
 			if (dp->hpd) {
 				drm_connector_oob_hotplug_event(dp->connector_fwnode,
 								connector_status_disconnected);
@@ -798,6 +849,7 @@ int dp_altmode_probe(struct typec_altmode *alt)
 	}
 
 	INIT_WORK(&dp->work, dp_altmode_work);
+	INIT_DELAYED_WORK(&dp->hpd_work, dp_altmode_hpd_work);
 	mutex_init(&dp->lock);
 	dp->port = port;
 	dp->alt = alt;
@@ -840,7 +892,8 @@ void dp_altmode_remove(struct typec_altmode *alt)
 {
 	struct dp_altmode *dp = typec_altmode_get_drvdata(alt);
 
-	cancel_work_sync(&dp->work);
+	disable_delayed_work_sync(&dp->hpd_work);
+	disable_work_sync(&dp->work);
 	typec_altmode_put_plug(dp->plug_prime);
 
 	if (dp->connector_fwnode) {
