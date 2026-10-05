@@ -36,9 +36,10 @@ enum {
 			msm_mux_##f6,			\
 			msm_mux_##f7,			\
 			msm_mux_##f8,			\
-			msm_mux_##f9			\
+			msm_mux_##f9,			\
+			msm_mux_egpio			\
 		},					\
-		.nfuncs = 10,				\
+		.nfuncs = 11,				\
 		.ctl_reg = 0x1000 * id,		\
 		.io_reg = 0x1000 * id + 0x4,		\
 		.intr_cfg_reg = 0x1000 * id + 0x8,	\
@@ -47,6 +48,8 @@ enum {
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
+		.egpio_enable = 12,		\
+		.egpio_present = 11,		\
 		.oe_bit = 9,			\
 		.in_bit = 0,			\
 		.out_bit = 1,			\
@@ -515,6 +518,7 @@ enum sm8150_functions {
 	msm_mux_ddr_pxi3,
 	msm_mux_edp_hot,
 	msm_mux_edp_lcd,
+	msm_mux_egpio,
 	msm_mux_emac_phy,
 	msm_mux_emac_pps,
 	msm_mux_gcc_gp1,
@@ -1209,6 +1213,8 @@ static const struct pinfunction sm8150_functions[] = {
 	MSM_PIN_FUNCTION(ddr_pxi3),
 	MSM_PIN_FUNCTION(edp_hot),
 	MSM_PIN_FUNCTION(edp_lcd),
+	[msm_mux_egpio] = PINCTRL_GPIO_PINFUNCTION("egpio", gpio_groups,
+						  ARRAY_SIZE(gpio_groups)),
 	MSM_PIN_FUNCTION(emac_phy),
 	MSM_PIN_FUNCTION(emac_pps),
 	MSM_PIN_FUNCTION(gcc_gp1),
@@ -1521,6 +1527,7 @@ static const struct msm_pinctrl_soc_data sm8150_pinctrl = {
 	.wakeirq_map = sm8150_pdc_map,
 	.nwakeirq_map = ARRAY_SIZE(sm8150_pdc_map),
 	.wakeirq_dual_edge_errata = true,
+	.egpio_func = 10,
 };
 
 static int sm8150_pinctrl_probe(struct platform_device *pdev)
