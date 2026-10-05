@@ -1271,6 +1271,17 @@ config SND_SOC_HDMI_CODEC
 config SND_SOC_ES7134
 	tristate "Everest Semi ES7134 CODEC"
 
+config SND_SOC_ES9218P
+	tristate "ESS ES9218P DAC and headphone amplifier"
+	depends on SND_SOC_WCD934X
+	depends on I2C
+	depends on GPIOLIB
+	help
+	  Support the ESS ES9218P I2C-controlled stereo DAC and
+	  headphone amplifier, including low-power bypass and
+	  impedance-based amplifier selection using WCD934x.
+	  The module will be called snd-soc-es9218p.
+
 config SND_SOC_ES7241
 	tristate "Everest Semi ES7241 CODEC"
 
