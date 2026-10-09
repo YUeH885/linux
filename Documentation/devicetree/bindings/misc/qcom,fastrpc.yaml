@@ -23,6 +23,9 @@ properties:
           - qcom,kaanapali-fastrpc
           - qcom,fastrpc
       - items:
+          - const: qcom,sm8150-fastrpc
+          - const: qcom,fastrpc
+      - items:
           - enum:
               - qcom,glymur-fastrpc
               - qcom,hawi-fastrpc
