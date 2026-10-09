@@ -2219,7 +2219,7 @@
 				mboxes = <&apss_shared 24>;
 
 				fastrpc {
-					compatible = "qcom,fastrpc";
+					compatible = "qcom,sm8150-fastrpc", "qcom,fastrpc";
 					qcom,glink-channels = "fastrpcglink-apps-dsp";
 					label = "sdsp";
 					qcom,non-secure-domain;
@@ -2230,19 +2230,22 @@
 						compatible = "qcom,fastrpc-compute-cb";
 						reg = <1>;
 						iommus = <&apps_smmu 0x05a1 0x0>;
+						dma-coherent;
 					};
 
 					compute-cb@2 {
 						compatible = "qcom,fastrpc-compute-cb";
 						reg = <2>;
 						iommus = <&apps_smmu 0x05a2 0x0>;
+						dma-coherent;
 					};
 
 					compute-cb@3 {
 						compatible = "qcom,fastrpc-compute-cb";
 						reg = <3>;
 						iommus = <&apps_smmu 0x05a3 0x0>;
-						/* note: shared-cb = <4> in downstream */
+						qcom,nsessions = <4>;
+						dma-coherent;
 					};
 				};
 			};
