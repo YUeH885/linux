@@ -283,6 +283,7 @@ struct fastrpc_invoke_ctx {
 	bool is_work_done;
 	/* process updates poll memory instead of glink response */
 	bool is_polled;
+	bool interrupted;
 	struct kref refcount;
 	struct list_head node; /* list of ctxs */
 	struct completion work;
@@ -688,6 +689,7 @@ static void fastrpc_context_free(struct kref *ref)
 
 	kfree(ctx->maps);
 	kfree(ctx->olaps);
+	kfree(ctx->args);
 	kfree(ctx);
 
 	/* Release the reference taken in fastrpc_context_alloc() */
@@ -793,7 +795,15 @@ static struct fastrpc_invoke_ctx *fastrpc_context_alloc(
 			kfree(ctx);
 			return ERR_PTR(-ENOMEM);
 		}
-		ctx->args = args;
+		/* The copied ioctl arguments outlive an interrupted invocation. */
+		ctx->args = kmemdup(args, array_size(ctx->nscalars, sizeof(*args)),
+				    GFP_KERNEL);
+		if (!ctx->args) {
+			kfree(ctx->olaps);
+			kfree(ctx->maps);
+			kfree(ctx);
+			return ERR_PTR(-ENOMEM);
+		}
 		fastrpc_get_buff_overlaps(ctx);
 	}
 
@@ -1439,6 +1449,31 @@ static int fastrpc_wait_for_completion(struct fastrpc_invoke_ctx *ctx,
 	return fastrpc_wait_for_response(ctx, kernel);
 }
 
+static struct fastrpc_invoke_ctx *fastrpc_context_restore(struct fastrpc_user *fl,
+							  u32 handle, u32 sc,
+							  struct fastrpc_invoke_args *args)
+{
+	struct fastrpc_invoke_ctx *ctx, *found = NULL;
+
+	spin_lock(&fl->lock);
+	list_for_each_entry(ctx, &fl->pending, node) {
+		if (!ctx->interrupted || ctx->pid != current->pid)
+			continue;
+		if (ctx->sc != sc || ctx->msg.handle != handle ||
+		    (ctx->nscalars && memcmp(ctx->args, args,
+					    array_size(ctx->nscalars, sizeof(*args))))) {
+			found = ERR_PTR(-EINVAL);
+			break;
+		}
+		ctx->interrupted = false;
+		found = ctx;
+		break;
+	}
+	spin_unlock(&fl->lock);
+
+	return found;
+}
+
 static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
 				   u32 handle, u32 sc,
 				   struct fastrpc_invoke_args *args)
@@ -1459,6 +1494,15 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
 		return -EPERM;
 	}
 
+	/* A restarted ioctl must wait on the original DSP request. */
+	if (!kernel) {
+		ctx = fastrpc_context_restore(fl, handle, sc, args);
+		if (IS_ERR(ctx))
+			return PTR_ERR(ctx);
+		if (ctx)
+			goto wait;
+	}
+
 	ctx = fastrpc_context_alloc(fl, kernel, sc, args);
 	if (IS_ERR(ctx))
 		return PTR_ERR(ctx);
@@ -1474,6 +1518,7 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
 	if (err)
 		goto bail;
 
+wait:
 	/*
 	 * Set message context as polled if the call is for a user PD
 	 * dynamic module and user has enabled poll mode.
@@ -1508,6 +1553,7 @@ bail:
 
 	if (err == -ERESTARTSYS) {
 		spin_lock(&fl->lock);
+		ctx->interrupted = true;
 		list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
 			list_del(&buf->node);
 			list_add_tail(&buf->node, &fl->cctx->invoke_interrupted_mmaps);
