@@ -6,6 +6,7 @@
 #include <linux/device.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
+#include <linux/dma-map-ops.h>
 #include <linux/dma-resv.h>
 #include <linux/idr.h>
 #include <linux/list.h>
@@ -20,6 +21,7 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/firmware/qcom/qcom_scm.h>
+#include <linux/iommu.h>
 #include <uapi/misc/fastrpc.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/bitfield.h>
@@ -219,12 +221,19 @@ struct fastrpc_buf_overlap {
 	u64 offset;
 };
 
+struct fastrpc_iova_alias {
+	struct iommu_domain *domain;
+	dma_addr_t iova;
+	size_t size;
+};
+
 struct fastrpc_buf {
 	struct fastrpc_user *fl;
 	struct dma_buf *dmabuf;
 	struct device *dev;
 	void *virt;
 	dma_addr_t dma_addr;
+	struct fastrpc_iova_alias alias;
 	u64 size;
 	/* Lock for dma buf attachments */
 	struct mutex lock;
@@ -248,6 +257,7 @@ struct fastrpc_map {
 	struct sg_table *table;
 	struct dma_buf_attachment *attach;
 	dma_addr_t dma_addr;
+	struct fastrpc_iova_alias alias;
 	u64 size;
 	void *va;
 	u64 len;
@@ -298,6 +308,7 @@ struct fastrpc_soc_data {
 	u32 sid_pos;
 	u32 dma_addr_bits_cdsp;
 	u32 dma_addr_bits_default;
+	bool sdsp_sid_iova;
 	bool poll_mode_supported;
 };
 
@@ -361,7 +372,7 @@ struct fastrpc_user {
 static inline dma_addr_t fastrpc_ipa_to_dma_addr(struct fastrpc_channel_ctx *cctx, dma_addr_t iova)
 {
 	if (!cctx->soc_data->sid_pos)
-		return 0;
+		return iova;
 	return iova & GENMASK_ULL(cctx->soc_data->sid_pos - 1, 0);
 }
 
@@ -372,7 +383,61 @@ static inline dma_addr_t fastrpc_ipa_to_dma_addr(struct fastrpc_channel_ctx *cct
 static inline u64 fastrpc_sid_offset(struct fastrpc_channel_ctx *cctx,
 				     struct fastrpc_session_ctx *sctx)
 {
+	if (!cctx->soc_data->sid_pos)
+		return 0;
 	return (u64)sctx->sid << cctx->soc_data->sid_pos;
+}
+
+static void fastrpc_unmap_iova_alias(struct fastrpc_iova_alias *alias)
+{
+	if (alias->size)
+		iommu_unmap(alias->domain, alias->iova, alias->size);
+	alias->size = 0;
+}
+
+static int fastrpc_map_iova_alias(struct fastrpc_user *fl, struct device *dev,
+				  dma_addr_t dma_addr, size_t size,
+				  struct fastrpc_iova_alias *alias)
+{
+	struct iommu_domain *domain;
+	dma_addr_t start = dma_addr & PAGE_MASK;
+	u64 offset = fastrpc_sid_offset(fl->cctx, fl->sctx);
+	size_t len = PAGE_ALIGN(size + offset_in_page(dma_addr));
+	int prot = IOMMU_READ | IOMMU_WRITE;
+	int err;
+
+	if (!fl->cctx->soc_data->sdsp_sid_iova || !offset)
+		return 0;
+
+	domain = iommu_get_domain_for_dev(dev);
+	if (!domain)
+		return -ENODEV;
+	if (dev_is_dma_coherent(dev))
+		prot |= IOMMU_CACHE;
+
+	alias->domain = domain;
+	alias->iova = start + offset;
+	/* SM8150 SLPI presents the SID bits to the SMMU as part of the IOVA. */
+	while (alias->size < len) {
+		phys_addr_t phys = iommu_iova_to_phys(domain, start + alias->size);
+
+		if (!phys) {
+			err = -EFAULT;
+			goto err_unmap;
+		}
+		/* A contiguous DMA address range may cover discontiguous pages. */
+		err = iommu_map(domain, alias->iova + alias->size, phys,
+				PAGE_SIZE, prot, GFP_KERNEL);
+		if (err)
+			goto err_unmap;
+		alias->size += PAGE_SIZE;
+	}
+
+	return 0;
+
+err_unmap:
+	fastrpc_unmap_iova_alias(alias);
+	return err;
 }
 
 static void fastrpc_free_map(struct kref *ref)
@@ -399,6 +464,7 @@ static void fastrpc_free_map(struct kref *ref)
 				return;
 			}
 		}
+		fastrpc_unmap_iova_alias(&map->alias);
 		dma_buf_unmap_attachment_unlocked(map->attach, map->table,
 						  DMA_BIDIRECTIONAL);
 		dma_buf_detach(map->buf, map->attach);
@@ -468,6 +534,7 @@ static void fastrpc_buf_free(struct fastrpc_buf *buf)
 	if (!buf)
 		return;
 
+	fastrpc_unmap_iova_alias(&buf->alias);
 	dma_free_coherent(buf->dev, buf->size, buf->virt,
 			  fastrpc_ipa_to_dma_addr(buf->fl->cctx, buf->dma_addr));
 	kfree(buf);
@@ -517,6 +584,13 @@ static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 		return ret;
 
 	buf = *obuf;
+
+	ret = fastrpc_map_iova_alias(fl, dev, buf->dma_addr, size, &buf->alias);
+	if (ret) {
+		fastrpc_buf_free(buf);
+		*obuf = NULL;
+		return ret;
+	}
 
 	if (fl->sctx && fl->sctx->sid)
 		buf->dma_addr += fastrpc_sid_offset(fl->cctx, fl->sctx);
@@ -921,16 +995,30 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	else
 		map->dma_addr = fastrpc_compute_dma_addr(fl, sg_dma_address(map->table->sgl));
 	for_each_sg(map->table->sgl, sgl, map->table->nents,
-		sgl_index)
+		sgl_index) {
+		if (fl->cctx->soc_data->sdsp_sid_iova &&
+		    !(attr & FASTRPC_ATTR_SECUREMAP) &&
+		    sg_dma_address(sgl) != sg_dma_address(table->sgl) + map->size) {
+			err = -EINVAL;
+			goto unmap_err;
+		}
 		map->size += sg_dma_len(sgl);
+	}
 	if (len > map->size) {
 		dev_dbg(sess->dev, "Bad size passed len 0x%llx map size 0x%llx\n",
 				len, map->size);
 		err = -EINVAL;
-		goto map_err;
+		goto unmap_err;
 	}
 	map->va = sg_virt(map->table->sgl);
 	map->len = len;
+	if (!(attr & FASTRPC_ATTR_SECUREMAP)) {
+		err = fastrpc_map_iova_alias(fl, sess->dev,
+					     sg_dma_address(table->sgl), map->size,
+					     &map->alias);
+		if (err)
+			goto unmap_err;
+	}
 
 	if (attr & FASTRPC_ATTR_SECUREMAP) {
 		/*
@@ -944,14 +1032,14 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 		dst_perms[0].perm = QCOM_SCM_PERM_RW;
 		dst_perms[1].vmid = fl->cctx->vmperms[0].vmid;
 		dst_perms[1].perm = QCOM_SCM_PERM_RWX;
-		map->attr = attr;
 		err = qcom_scm_assign_mem(map->dma_addr, (u64)map->len, &src_perms, dst_perms, 2);
 		if (err) {
 			dev_err(sess->dev,
 				"Failed to assign memory with dma_addr %pad size 0x%llx err %d\n",
 				&map->dma_addr, map->len, err);
-			goto map_err;
+			goto unmap_err;
 		}
+		map->attr = attr;
 	}
 	spin_lock(&fl->lock);
 	list_add_tail(&map->node, &fl->maps);
@@ -960,12 +1048,15 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 
 	return 0;
 
+unmap_err:
+	fastrpc_unmap_iova_alias(&map->alias);
+	dma_buf_unmap_attachment_unlocked(map->attach, map->table, DMA_BIDIRECTIONAL);
 map_err:
 	dma_buf_detach(map->buf, map->attach);
 attach_err:
 	dma_buf_put(map->buf);
 get_err:
-	fastrpc_map_put(map);
+	kfree(map);
 
 	return err;
 }
@@ -2382,22 +2473,29 @@ static int fastrpc_cb_probe(struct platform_device *pdev)
 	if (of_property_read_u32(dev->of_node, "reg", &sid))
 		dev_info(dev, "FastRPC Session ID not specified in DT\n");
 
+	dma_bits = cctx->soc_data->dma_addr_bits_default;
+	if (cctx->domain_id == CDSP_DOMAIN_ID)
+		dma_bits = cctx->soc_data->dma_addr_bits_cdsp;
+
+	/* Keep SID aliases outside the DMA allocator's address space. */
+	rc = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(dma_bits));
+	if (rc) {
+		dev_err(dev, "%u-bit DMA enable failed\n", dma_bits);
+		return rc;
+	}
+
 	spin_lock_irqsave(&cctx->lock, flags);
 	if (cctx->sesscount >= FASTRPC_MAX_SESSIONS) {
 		spin_unlock_irqrestore(&cctx->lock, flags);
 		dev_err(&pdev->dev, "too many sessions\n");
 		return -ENOSPC;
 	}
-	dma_bits = cctx->soc_data->dma_addr_bits_default;
 	sess = &cctx->session[cctx->sesscount++];
 	sess->used = false;
 	sess->valid = true;
 	sess->dev = dev;
 	dev_set_drvdata(dev, sess);
 	sess->sid = sid;
-
-	if (cctx->domain_id == CDSP_DOMAIN_ID)
-		dma_bits = cctx->soc_data->dma_addr_bits_cdsp;
 
 	if (sessions > 0) {
 		struct fastrpc_session_ctx *dup_sess;
@@ -2410,11 +2508,6 @@ static int fastrpc_cb_probe(struct platform_device *pdev)
 		}
 	}
 	spin_unlock_irqrestore(&cctx->lock, flags);
-	rc = dma_set_mask(dev, DMA_BIT_MASK(dma_bits));
-	if (rc) {
-		dev_err(dev, "%u-bit DMA enable failed\n", dma_bits);
-		return rc;
-	}
 
 	return 0;
 }
@@ -2508,6 +2601,13 @@ static const struct fastrpc_soc_data default_soc_data = {
 	.sid_pos = 32,
 	.dma_addr_bits_cdsp = 32,
 	.dma_addr_bits_default = 32,
+};
+
+static const struct fastrpc_soc_data sm8150_sdsp_soc_data = {
+	.sid_pos = 32,
+	.dma_addr_bits_cdsp = 32,
+	.dma_addr_bits_default = 32,
+	.sdsp_sid_iova = true,
 };
 
 /*
@@ -2768,6 +2868,7 @@ static int fastrpc_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
 }
 
 static const struct of_device_id fastrpc_rpmsg_of_match[] = {
+	{ .compatible = "qcom,sm8150-fastrpc", .data = &sm8150_sdsp_soc_data },
 	{ .compatible = "qcom,kaanapali-fastrpc", .data = &kaanapali_soc_data },
 	{ .compatible = "qcom,fastrpc", .data = &default_soc_data },
 	{ }
