@@ -117,6 +117,7 @@ struct iris_hfi_sys_ops {
 };
 
 struct iris_hfi_session_ops {
+	int (*session_get_buffer_requirements)(struct iris_inst *inst);
 	int (*session_set_config_params)(struct iris_inst *inst, u32 plane);
 	int (*session_set_property)(struct iris_inst *inst,
 				    u32 packet_type, u32 flag, u32 plane, u32 payload_type,

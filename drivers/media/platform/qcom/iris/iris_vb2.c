@@ -290,9 +290,11 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb2);
 	struct v4l2_m2m_ctx *m2m_ctx;
 	struct iris_inst *inst;
+	bool queued = false;
 	int ret = 0;
 
 	inst = vb2_get_drv_priv(vb2->vb2_queue);
+	m2m_ctx = inst->m2m_ctx;
 
 	mutex_lock(&inst->lock);
 	if (inst->state == IRIS_INST_ERROR) {
@@ -302,8 +304,6 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
 
 	if (vbuf->field == V4L2_FIELD_ANY)
 		vbuf->field = V4L2_FIELD_NONE;
-
-	m2m_ctx = inst->m2m_ctx;
 
 	if (!vb2->planes[0].bytesused && V4L2_TYPE_IS_OUTPUT(vb2->type)) {
 		ret = -EINVAL;
@@ -330,6 +330,7 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
 	}
 
 	v4l2_m2m_buf_queue(m2m_ctx, vbuf);
+	queued = true;
 
 	if (inst->domain == DECODER)
 		ret = iris_vdec_qbuf(inst, vbuf);
@@ -338,8 +339,15 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
 
 exit:
 	if (ret) {
+		if (queued) {
+			if (V4L2_TYPE_IS_OUTPUT(vb2->type))
+				v4l2_m2m_src_buf_remove_by_idx(m2m_ctx, vb2->index);
+			else
+				v4l2_m2m_dst_buf_remove_by_idx(m2m_ctx, vb2->index);
+		}
 		iris_inst_change_state(inst, IRIS_INST_ERROR);
-		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+		vb2_buffer_done(vb2, vb2->vb2_queue->start_streaming_called ?
+				VB2_BUF_STATE_ERROR : VB2_BUF_STATE_QUEUED);
 	}
 	mutex_unlock(&inst->lock);
 }

@@ -469,6 +469,12 @@ int iris_venc_streamon_input(struct iris_inst *inst)
 	if (ret)
 		return ret;
 
+	if (inst->hfi_session_ops->session_get_buffer_requirements) {
+		ret = inst->hfi_session_ops->session_get_buffer_requirements(inst);
+		if (ret)
+			return ret;
+	}
+
 	ret = iris_alloc_and_queue_persist_bufs(inst, BUF_ARP);
 	if (ret)
 		return ret;
@@ -497,6 +503,12 @@ int iris_venc_streamon_output(struct iris_inst *inst)
 	ret = iris_set_properties(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 	if (ret)
 		goto error;
+
+	if (inst->hfi_session_ops->session_get_buffer_requirements) {
+		ret = inst->hfi_session_ops->session_get_buffer_requirements(inst);
+		if (ret)
+			goto error;
+	}
 
 	ret = iris_alloc_and_queue_persist_bufs(inst, BUF_ARP);
 	if (ret)
