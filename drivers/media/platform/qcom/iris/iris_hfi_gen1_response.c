@@ -4,6 +4,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/overflow.h>
 #include <media/v4l2-mem2mem.h>
 
 #include "iris_hfi_gen1.h"
@@ -12,8 +13,8 @@
 #include "iris_vdec.h"
 #include "iris_vpu_buffer.h"
 
-static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
-					      struct hfi_msg_event_notify_pkt *pkt)
+static int iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
+					     struct hfi_msg_event_notify_pkt *pkt)
 {
 	struct v4l2_pix_format_mplane *pixmp_ip = &inst->fmt_src->fmt.pix_mp;
 	struct v4l2_pix_format_mplane *pixmp_op = &inst->fmt_dst->fmt.pix_mp;
@@ -34,74 +35,113 @@ static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
 	struct hfi_framesize *frame_sz;
 	struct vb2_queue *dst_q;
 	struct v4l2_ctrl *ctrl;
-	u32 full_range, ptype;
+	u32 full_range, ptype, property_size;
+	u32 remaining = pkt->shdr.hdr.size - sizeof(*pkt);
+	bool hfi_4xx = core->iris_firmware_data->hfi_4xx;
 
-	do {
+	while (num_properties_changed--) {
+		if (remaining < sizeof(u32))
+			return -EBADMSG;
 		ptype = *((u32 *)data_ptr);
+		data_ptr += sizeof(u32);
+		remaining -= sizeof(u32);
 		switch (ptype) {
 		case HFI_PROPERTY_PARAM_FRAME_SIZE:
-			data_ptr += sizeof(u32);
+			property_size = sizeof(*frame_sz);
+			break;
+		case HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT:
+			property_size = sizeof(*profile_level);
+			break;
+		case HFI_PROPERTY_PARAM_VDEC_PIXEL_BITDEPTH:
+			property_size = sizeof(*pixel_depth);
+			break;
+		case HFI_PROPERTY_PARAM_VDEC_PIC_STRUCT:
+			property_size = sizeof(*pic_struct);
+			break;
+		case HFI_PROPERTY_PARAM_VDEC_COLOUR_SPACE:
+			property_size = sizeof(*colour_info);
+			break;
+		case HFI_PROPERTY_CONFIG_VDEC_ENTROPY:
+			property_size = sizeof(u32);
+			break;
+		case HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS:
+			property_size = sizeof(*bufreq);
+			break;
+		case HFI_INDEX_EXTRADATA_INPUT_CROP:
+			property_size = sizeof(*crop);
+			break;
+		case HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS:
+			property_size = sizeof(*iris_vpu_dpb_count);
+			break;
+		case HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS_4XX:
+			property_size = 3 * sizeof(u32);
+			break;
+		default:
+			dev_err(core->dev, "unknown sequence property %#x\n", ptype);
+			return -EINVAL;
+		}
+		if (remaining < property_size)
+			return -EBADMSG;
+
+		switch (ptype) {
+		case HFI_PROPERTY_PARAM_FRAME_SIZE:
 			frame_sz = (struct hfi_framesize *)data_ptr;
 			event.width = frame_sz->width;
 			event.height = frame_sz->height;
-			data_ptr += sizeof(*frame_sz);
 			break;
 		case HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT:
-			data_ptr += sizeof(u32);
 			profile_level = (struct hfi_profile_level *)data_ptr;
 			event.profile = profile_level->profile;
 			event.level = profile_level->level;
-			data_ptr += sizeof(*profile_level);
 			break;
 		case HFI_PROPERTY_PARAM_VDEC_PIXEL_BITDEPTH:
-			data_ptr += sizeof(u32);
 			pixel_depth = (struct hfi_bit_depth *)data_ptr;
 			event.bit_depth = pixel_depth->bit_depth;
-			data_ptr += sizeof(*pixel_depth);
 			break;
 		case HFI_PROPERTY_PARAM_VDEC_PIC_STRUCT:
-			data_ptr += sizeof(u32);
 			pic_struct = (struct hfi_pic_struct *)data_ptr;
 			event.pic_struct = pic_struct->progressive_only;
-			data_ptr += sizeof(*pic_struct);
 			break;
 		case HFI_PROPERTY_PARAM_VDEC_COLOUR_SPACE:
-			data_ptr += sizeof(u32);
 			colour_info = (struct hfi_colour_space *)data_ptr;
 			event.colour_space = colour_info->colour_space;
-			data_ptr += sizeof(*colour_info);
 			break;
 		case HFI_PROPERTY_CONFIG_VDEC_ENTROPY:
-			data_ptr += sizeof(u32);
 			event.entropy_mode = *(u32 *)data_ptr;
-			data_ptr += sizeof(u32);
 			break;
 		case HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS:
-			data_ptr += sizeof(u32);
 			bufreq = (struct hfi_buffer_requirements *)data_ptr;
-			event.buf_count = bufreq->count_min;
-			data_ptr += sizeof(*bufreq);
+			event.buf_count = hfi_4xx ? bufreq->hold_count : bufreq->count_min;
 			break;
 		case HFI_INDEX_EXTRADATA_INPUT_CROP:
-			data_ptr += sizeof(u32);
 			crop = (struct hfi_extradata_input_crop *)data_ptr;
 			event.input_crop.left = crop->left;
 			event.input_crop.top = crop->top;
 			event.input_crop.width = crop->width;
 			event.input_crop.height = crop->height;
-			data_ptr += sizeof(*crop);
 			break;
 		case HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS:
-			data_ptr += sizeof(u32);
 			iris_vpu_dpb_count = (struct hfi_dpb_counts *)data_ptr;
 			event.buf_count = iris_vpu_dpb_count->fw_min_count;
-			data_ptr += sizeof(*iris_vpu_dpb_count);
+			break;
+		case HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS_4XX:
+			/* HFI 4XX carries the firmware minimum in buffer requirements. */
 			break;
 		default:
 			break;
 		}
-		num_properties_changed--;
-	} while (num_properties_changed > 0);
+		data_ptr += property_size;
+		remaining -= property_size;
+	}
+
+	if (!event.width || !event.height ||
+	    event.width > core->iris_platform_data->inst_caps->max_frame_width ||
+	    event.height > core->iris_platform_data->inst_caps->max_frame_height ||
+	    event.buf_count > VIDEO_MAX_FRAME)
+		return -EINVAL;
+
+	dev_dbg(core->dev, "source change: %ux%u depth=%u progressive=%u buffers=%u\n",
+		event.width, event.height, event.bit_depth, event.pic_struct, event.buf_count);
 
 	pixmp_ip->width = event.width;
 	pixmp_ip->height = event.height;
@@ -168,37 +208,72 @@ static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
 	if (event.bit_depth || !event.pic_struct) {
 		dev_err(core->dev, "unsupported content, bit depth: %x, pic_struct = %x\n",
 			event.bit_depth, event.pic_struct);
-		iris_inst_change_state(inst, IRIS_INST_ERROR);
+		return -EINVAL;
 	}
+
+	return 0;
 }
 
 static void iris_hfi_gen1_event_seq_changed(struct iris_inst *inst,
 					    struct hfi_msg_event_notify_pkt *pkt)
 {
 	struct hfi_session_flush_pkt flush_pkt;
+	struct v4l2_pix_format_mplane output_format = inst->fmt_dst->fmt.pix_mp;
+	bool early_capture = inst->core->iris_firmware_data->hfi_4xx &&
+		!inst->fw_min_count && inst->state == IRIS_INST_STREAMING;
 	u32 num_properties_changed;
 	int ret;
-
-	ret = iris_inst_sub_state_change_drc(inst);
-	if (ret)
-		return;
 
 	switch (pkt->event_data1) {
 	case HFI_EVENT_DATA_SEQUENCE_CHANGED_SUFFICIENT_BUF_RESOURCES:
 	case HFI_EVENT_DATA_SEQUENCE_CHANGED_INSUFFICIENT_BUF_RESOURCES:
 		break;
 	default:
+		dev_err(inst->core->dev, "unhandled sequence changed data1: %#x\n",
+			pkt->event_data1);
 		iris_inst_change_state(inst, IRIS_INST_ERROR);
 		return;
 	}
 
 	num_properties_changed = pkt->event_data2;
 	if (!num_properties_changed) {
+		dev_err(inst->core->dev, "num_properties_changed is 0\n");
 		iris_inst_change_state(inst, IRIS_INST_ERROR);
 		return;
 	}
 
-	iris_hfi_gen1_read_changed_params(inst, pkt);
+	ret = iris_hfi_gen1_read_changed_params(inst, pkt);
+	if (ret) {
+		dev_err(inst->core->dev, "invalid sequence change response: %d\n", ret);
+		iris_inst_change_state(inst, IRIS_INST_ERROR);
+		iris_vb2_queue_error(inst);
+		return;
+	}
+
+	/* CAPTURE may already be streaming when the first header is parsed. */
+	if (early_capture &&
+	    pkt->event_data1 == HFI_EVENT_DATA_SEQUENCE_CHANGED_SUFFICIENT_BUF_RESOURCES &&
+	    output_format.width == inst->fmt_dst->fmt.pix_mp.width &&
+	    output_format.height == inst->fmt_dst->fmt.pix_mp.height &&
+	    output_format.plane_fmt[0].sizeimage ==
+		inst->fmt_dst->fmt.pix_mp.plane_fmt[0].sizeimage) {
+		iris_vdec_src_change(inst);
+		ret = inst->hfi_session_ops->session_resume_drc(inst,
+						V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+		if (ret) {
+			iris_inst_change_state(inst, IRIS_INST_ERROR);
+			iris_vb2_queue_error(inst);
+		}
+		return;
+	}
+
+	ret = iris_inst_sub_state_change_drc(inst);
+	if (ret) {
+		dev_err(inst->core->dev, "iris_inst_sub_state_change_drc failed: %d\n", ret);
+		iris_inst_change_state(inst, IRIS_INST_ERROR);
+		iris_vb2_queue_error(inst);
+		return;
+	}
 
 	if (inst->state != IRIS_INST_ERROR && !(inst->sub_state & IRIS_INST_SUB_FIRST_IPSC)) {
 
@@ -220,16 +295,29 @@ iris_hfi_gen1_sys_event_notify(struct iris_core *core, void *packet)
 	struct hfi_msg_event_notify_pkt *pkt = packet;
 	struct iris_inst *instance;
 
-	if (pkt->event_id == HFI_EVENT_SYS_ERROR)
-		dev_err(core->dev, "sys error (type: %x, session id:%x, data1:%x, data2:%x)\n",
-			pkt->event_id, pkt->shdr.session_id, pkt->event_data1,
-			pkt->event_data2);
+	if (pkt->event_id != HFI_EVENT_SYS_ERROR) {
+		dev_warn(core->dev, "event %#x for unknown session %#x\n",
+			 pkt->event_id, pkt->shdr.session_id);
+		return;
+	}
+
+	dev_err(core->dev, "sys error (type: %x, session id:%x, data1:%x, data2:%x)\n",
+		pkt->event_id, pkt->shdr.session_id, pkt->event_data1, pkt->event_data2);
+
+	if (core->sfr_vaddr)
+		dev_err(core->dev, "firmware failure: %.*s\n",
+			SFR_SIZE - (u32)sizeof(u32), (char *)core->sfr_vaddr + sizeof(u32));
 
 	core->state = IRIS_CORE_ERROR;
+	complete(&core->core_init_done);
 
 	mutex_lock(&core->lock);
-	list_for_each_entry(instance, &core->instances, list)
+	list_for_each_entry(instance, &core->instances, list) {
 		iris_inst_change_state(instance, IRIS_INST_ERROR);
+		iris_vb2_queue_error(instance);
+		complete(&instance->completion);
+		complete(&instance->flush_completion);
+	}
 	mutex_unlock(&core->lock);
 
 	schedule_delayed_work(&core->sys_error_handler, msecs_to_jiffies(10));
@@ -283,10 +371,8 @@ static void iris_hfi_gen1_sys_init_done(struct iris_core *core, void *packet)
 {
 	struct hfi_msg_sys_init_done_pkt *pkt = packet;
 
-	if (pkt->error_type != HFI_ERR_NONE) {
+	if (pkt->error_type != HFI_ERR_NONE)
 		core->state = IRIS_CORE_ERROR;
-		return;
-	}
 
 	complete(&core->core_init_done);
 }
@@ -406,6 +492,9 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 	bool found = false;
 	u32 flags = 0;
 
+	if (inst->domain == DECODER && uncom_pkt->shdr.hdr.size < sizeof(*uncom_pkt))
+		goto error;
+
 	if (inst->domain == DECODER) {
 		timestamp_hi = uncom_pkt->time_stamp_hi;
 		timestamp_lo = uncom_pkt->time_stamp_lo;
@@ -472,6 +561,9 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 	if (!found)
 		goto error;
 
+	if (offset > buf->buffer_size || filled_len > buf->buffer_size - offset)
+		goto error;
+
 	buf->data_offset = offset;
 	buf->data_size = filled_len;
 
@@ -530,6 +622,7 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 
 error:
 	iris_inst_change_state(inst, IRIS_INST_ERROR);
+	iris_vb2_queue_error(inst);
 	dev_err(core->dev, "error in ftb done\n");
 }
 
@@ -539,6 +632,10 @@ struct iris_hfi_gen1_response_pkt_info {
 };
 
 static const struct iris_hfi_gen1_response_pkt_info pkt_infos[] = {
+	{
+	 .pkt = HFI_MSG_SESSION_PROPERTY_INFO,
+	 .pkt_sz = sizeof(struct hfi_msg_session_property_info_pkt),
+	},
 	{
 	 .pkt = HFI_MSG_EVENT_NOTIFY,
 	 .pkt_sz = sizeof(struct hfi_msg_event_notify_pkt),
@@ -592,6 +689,49 @@ static const struct iris_hfi_gen1_response_pkt_info pkt_infos[] = {
 	 .pkt_sz = sizeof(struct hfi_msg_session_release_buffers_done_pkt),
 	},
 };
+
+static void iris_hfi_gen1_session_property_info(struct iris_inst *inst, void *packet)
+{
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
+	struct hfi_msg_session_property_info_pkt *pkt = packet;
+	struct hfi_buffer_requirements *req = (void *)pkt->data;
+	u32 remaining = pkt->shdr.hdr.size - sizeof(*pkt);
+	u32 alignment, rounded_size;
+
+	if (pkt->num_properties != 1 ||
+	    pkt->property != HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS ||
+	    !remaining || remaining % sizeof(*req))
+		goto error;
+
+	memset(inst_hfi->buffer_requirements, 0, sizeof(inst_hfi->buffer_requirements));
+	while (remaining) {
+		if (req->type < ARRAY_SIZE(inst_hfi->buffer_requirements)) {
+			alignment = max_t(u32, req->alignment, SZ_4K);
+			if (!is_power_of_2(alignment) ||
+			    check_add_overflow(req->size, alignment - 1, &rounded_size))
+				goto error;
+
+			inst_hfi->buffer_requirements[req->type] = *req;
+			inst_hfi->buffer_requirements[req->type].size =
+				rounded_size & ~(alignment - 1);
+			dev_dbg(inst->core->dev,
+				"buffer requirements: type=%u size=%u fw=%u host=%u actual=%u align=%u\n",
+				req->type, req->size, req->hold_count, req->count_min,
+				req->count_actual, req->alignment);
+		}
+		remaining -= sizeof(*req);
+		req++;
+	}
+
+	complete(&inst->completion);
+	return;
+
+error:
+	dev_err(inst->core->dev, "invalid buffer requirements response\n");
+	iris_inst_change_state(inst, IRIS_INST_ERROR);
+	iris_vb2_queue_error(inst);
+	complete(&inst->completion);
+}
 
 static void iris_hfi_gen1_handle_response(struct iris_core *core, void *response)
 {
@@ -648,7 +788,9 @@ static void iris_hfi_gen1_handle_response(struct iris_core *core, void *response
 		}
 
 		mutex_lock(&inst->lock);
-		if (hdr->pkt_type == HFI_MSG_SESSION_EMPTY_BUFFER) {
+		if (hdr->pkt_type == HFI_MSG_SESSION_PROPERTY_INFO) {
+			iris_hfi_gen1_session_property_info(inst, hdr);
+		} else if (hdr->pkt_type == HFI_MSG_SESSION_EMPTY_BUFFER) {
 			iris_hfi_gen1_session_etb_done(inst, hdr);
 		} else if (hdr->pkt_type == HFI_MSG_SESSION_FILL_BUFFER) {
 			iris_hfi_gen1_session_ftb_done(inst, hdr);
@@ -656,8 +798,12 @@ static void iris_hfi_gen1_handle_response(struct iris_core *core, void *response
 			struct hfi_msg_session_hdr_pkt *shdr;
 
 			shdr = (struct hfi_msg_session_hdr_pkt *)hdr;
-			if (shdr->error_type != HFI_ERR_NONE)
+			if (shdr->error_type != HFI_ERR_NONE) {
+				dev_err(dev, "session command %#x failed: %#x\n",
+					hdr->pkt_type, shdr->error_type);
 				iris_inst_change_state(inst, IRIS_INST_ERROR);
+				iris_vb2_queue_error(inst);
+			}
 
 			if (pkt_info->pkt == HFI_MSG_SESSION_FLUSH) {
 				if (!(--inst->flush_responses_pending))
@@ -682,8 +828,24 @@ static void iris_hfi_gen1_flush_debug_queue(struct iris_core *core, u8 *packet)
 		if (pkt->hdr.pkt_type != HFI_MSG_SYS_COV) {
 			struct hfi_msg_sys_debug_pkt *pkt =
 				(struct hfi_msg_sys_debug_pkt *)packet;
+			const u8 *message = pkt->msg_data;
+			u32 length = pkt->msg_size;
 
-			dev_dbg(core->dev, "%s", pkt->msg_data);
+			if (pkt->hdr.size < sizeof(*pkt) ||
+			    pkt->msg_size > pkt->hdr.size - sizeof(*pkt) + 1)
+				continue;
+			length = min_t(u32, length,
+				       round_down(pkt->hdr.size, sizeof(u32)) - sizeof(*pkt));
+
+			if (length && message[0] == '\n') {
+				message++;
+				length--;
+			}
+
+			if (pkt->msg_type & (BIT(3) | BIT(4)))
+				dev_err(core->dev, "firmware: %.*s", length, message);
+			else
+				dev_dbg(core->dev, "firmware: %.*s", length, message);
 		}
 	}
 }

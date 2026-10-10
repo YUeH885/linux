@@ -200,7 +200,10 @@ static void iris_remove(struct platform_device *pdev)
 	if (!core)
 		return;
 
+	disable_irq(core->irq);
+	cancel_delayed_work_sync(&core->sys_error_handler);
 	iris_core_deinit(core);
+	enable_irq(core->irq);
 
 	video_unregister_device(core->vdev_dec);
 	video_unregister_device(core->vdev_enc);
@@ -367,6 +370,10 @@ static const struct of_device_id iris_dt_match[] = {
 	{
 		.compatible = "qcom,sc7280-venus",
 		.data = &sc7280_data,
+	},
+	{
+		.compatible = "qcom,sm8150-iris",
+		.data = &sm8150_data,
 	},
 	{
 		.compatible = "qcom,sm8250-venus",

@@ -31,7 +31,7 @@
 #define UC_REGION_ADDR				(CPU_CS_BASE_OFFS + 0x64)
 #define UC_REGION_SIZE				(CPU_CS_BASE_OFFS + 0x68)
 
-static void iris_vpu_interrupt_init(struct iris_core *core)
+void iris_vpu2_interrupt_init(struct iris_core *core)
 {
 	u32 mask_val;
 
@@ -39,6 +39,11 @@ static void iris_vpu_interrupt_init(struct iris_core *core)
 	mask_val &= ~(WRAPPER_INTR_MASK_A2HWD_BMSK |
 		      WRAPPER_INTR_MASK_A2HCPU_BMSK);
 	writel(mask_val, core->reg_base + WRAPPER_INTR_MASK);
+}
+
+static void iris_vpu_interrupt_init(struct iris_core *core)
+{
+	core->iris_platform_data->vpu_ops->interrupt_init(core);
 }
 
 static void iris_vpu_setup_ucregion_memory_map(struct iris_core *core)
@@ -71,7 +76,7 @@ static void iris_vpu_setup_ucregion_memory_map(struct iris_core *core)
 		vpu_ops->program_bootup_registers(core);
 }
 
-int iris_vpu_boot_firmware(struct iris_core *core)
+int iris_vpu2_boot_firmware(struct iris_core *core)
 {
 	u32 ctrl_init = BIT(0), ctrl_status = 0, count = 0, max_tries = 1000;
 
@@ -102,12 +107,22 @@ int iris_vpu_boot_firmware(struct iris_core *core)
 	return 0;
 }
 
-void iris_vpu_raise_interrupt(struct iris_core *core)
+int iris_vpu_boot_firmware(struct iris_core *core)
+{
+	return core->iris_platform_data->vpu_ops->boot_firmware(core);
+}
+
+void iris_vpu2_raise_interrupt(struct iris_core *core)
 {
 	writel(1 << CPU_IC_SOFTINT_H2A_SHFT, core->reg_base + CPU_IC_SOFTINT);
 }
 
-void iris_vpu_clear_interrupt(struct iris_core *core)
+void iris_vpu_raise_interrupt(struct iris_core *core)
+{
+	core->iris_platform_data->vpu_ops->raise_interrupt(core);
+}
+
+void iris_vpu2_clear_interrupt(struct iris_core *core)
 {
 	u32 intr_status, mask;
 
@@ -122,7 +137,12 @@ void iris_vpu_clear_interrupt(struct iris_core *core)
 	writel(CLEAR_XTENSA2HOST_INTR, core->reg_base + CPU_CS_A2HSOFTINTCLR);
 }
 
-int iris_vpu_watchdog(struct iris_core *core, u32 intr_status)
+void iris_vpu_clear_interrupt(struct iris_core *core)
+{
+	core->iris_platform_data->vpu_ops->clear_interrupt(core);
+}
+
+int iris_vpu2_watchdog(struct iris_core *core, u32 intr_status)
 {
 	if (intr_status & WRAPPER_INTR_STATUS_A2HWD_BMSK) {
 		dev_err(core->dev, "received watchdog interrupt\n");
@@ -132,7 +152,12 @@ int iris_vpu_watchdog(struct iris_core *core, u32 intr_status)
 	return 0;
 }
 
-int iris_vpu_prepare_pc(struct iris_core *core)
+int iris_vpu_watchdog(struct iris_core *core, u32 intr_status)
+{
+	return core->iris_platform_data->vpu_ops->watchdog(core, intr_status);
+}
+
+int iris_vpu2_prepare_pc(struct iris_core *core)
 {
 	u32 wfi_status, idle_status, pc_ready;
 	u32 ctrl_status, val = 0;
@@ -173,6 +198,11 @@ skip_power_off:
 		wfi_status, idle_status, pc_ready, ctrl_status);
 
 	return -EAGAIN;
+}
+
+int iris_vpu_prepare_pc(struct iris_core *core)
+{
+	return core->iris_platform_data->vpu_ops->prepare_pc(core);
 }
 
 int iris_vpu_power_off_controller(struct iris_core *core)
@@ -231,13 +261,15 @@ void iris_vpu_power_off_hw(struct iris_core *core)
 
 void iris_vpu_power_off(struct iris_core *core)
 {
+	core->power_enabled = false;
+
 	iris_opp_set_rate(core->dev, 0);
 	core->iris_platform_data->vpu_ops->power_off_hw(core);
 	core->iris_platform_data->vpu_ops->power_off_controller(core);
 	iris_unset_icc_bw(core);
 
 	if (!iris_vpu_watchdog(core, core->intr_status))
-		disable_irq(core->irq);
+		disable_irq_nosync(core->irq);
 }
 
 int iris_vpu_power_on_controller(struct iris_core *core)
@@ -481,16 +513,21 @@ int iris_vpu_power_on(struct iris_core *core)
 	freq = core->power.clk_freq ? core->power.clk_freq :
 				      (u32)ULONG_MAX;
 
-	iris_opp_set_rate(core->dev, freq);
+	ret = iris_opp_set_rate(core->dev, freq);
+	if (ret)
+		goto err_power_off_hw;
 
 	iris_vpu_set_preset_registers(core);
 
 	iris_vpu_interrupt_init(core);
 	core->intr_status = 0;
+	core->power_enabled = true;
 	enable_irq(core->irq);
 
 	return 0;
 
+err_power_off_hw:
+	core->iris_platform_data->vpu_ops->power_off_hw(core);
 err_power_off_ctrl:
 	core->iris_platform_data->vpu_ops->power_off_controller(core);
 err_unvote_icc:
@@ -501,7 +538,12 @@ err:
 	return ret;
 }
 
-void iris_vpu_set_preset_registers(struct iris_core *core)
+void iris_vpu2_set_preset_registers(struct iris_core *core)
 {
 	writel(0x0, core->reg_base + 0xb0088);
+}
+
+void iris_vpu_set_preset_registers(struct iris_core *core)
+{
+	core->iris_platform_data->vpu_ops->set_preset_registers(core);
 }

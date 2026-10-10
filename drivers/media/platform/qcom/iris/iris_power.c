@@ -68,7 +68,7 @@ static int iris_vote_interconnects(struct iris_inst *inst)
 
 	vote_data->width = inp_f->fmt.pix_mp.width;
 	vote_data->height = inp_f->fmt.pix_mp.height;
-	vote_data->fps = DEFAULT_FPS;
+	vote_data->fps = inst->frame_rate;
 
 	inst->power.icc_bw = iris_calc_bw(inst, vote_data);
 

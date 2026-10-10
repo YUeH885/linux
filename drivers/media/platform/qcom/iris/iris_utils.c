@@ -82,6 +82,9 @@ int iris_wait_for_session_response(struct iris_inst *inst, bool is_flush)
 		return -ETIMEDOUT;
 	}
 
+	if (inst->state == IRIS_INST_ERROR)
+		return -EIO;
+
 	return 0;
 }
 
