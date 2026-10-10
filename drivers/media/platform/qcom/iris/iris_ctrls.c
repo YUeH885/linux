@@ -1349,7 +1349,8 @@ int iris_set_intra_period(struct iris_inst *inst, enum platform_inst_fw_cap_type
 	u32 hfi_id = inst->fw_caps[cap_id].hfi_id;
 	struct hfi_intra_period intra_period;
 
-	if (!gop_size || b_frame >= gop_size)
+	if (!gop_size || b_frame >= gop_size ||
+	    (inst->core->iris_firmware_data->hfi_4xx && (gop_size - 1) % (b_frame + 1)))
 		return -EINVAL;
 
 	/*

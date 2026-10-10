@@ -129,7 +129,7 @@ static void iris_vpu1_set_preset_registers(struct iris_core *core)
 
 static u64 iris_vpu1_calc_freq(struct iris_inst *inst, size_t data_size)
 {
-	struct platform_inst_caps *caps = inst->core->iris_platform_data->inst_caps;
+	struct platform_inst_caps *caps = iris_get_inst_caps(inst);
 	struct v4l2_pix_format_mplane *fmt = &inst->fmt_src->fmt.pix_mp;
 	u32 width = max(fmt->width, inst->crop.width);
 	u32 height = max(fmt->height, inst->crop.height);
