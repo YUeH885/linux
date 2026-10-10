@@ -9,6 +9,7 @@
 #include "iris_buffer.h"
 #include "iris_instance.h"
 #include "iris_power.h"
+#include "iris_secure_buffer.h"
 #include "iris_vpu_buffer.h"
 
 #define PIXELS_4K 4096
@@ -537,6 +538,7 @@ static int iris_create_internal_buffer(struct iris_inst *inst,
 	struct iris_buffers *buffers = &inst->buffers[buffer_type];
 	struct iris_core *core = inst->core;
 	struct iris_buffer *buffer;
+	int ret;
 
 	if (!buffers->size)
 		return 0;
@@ -549,11 +551,23 @@ static int iris_create_internal_buffer(struct iris_inst *inst,
 	buffer->type = buffer_type;
 	buffer->index = index;
 	buffer->buffer_size = buffers->size;
+	if (inst->domain == ENCODER && buffer_type == BUF_ARP &&
+	    core->iris_platform_data->secure_arp) {
+		ret = iris_secure_buffer_alloc(core, buffer);
+		if (ret) {
+			kfree(buffer);
+			return ret;
+		}
+		list_add_tail(&buffer->list, &buffers->list);
+		return 0;
+	}
 	buffer->dma_attrs = DMA_ATTR_WRITE_COMBINE | DMA_ATTR_NO_KERNEL_MAPPING;
 
 	buffer->kvaddr = dma_alloc_attrs(core->dev, buffer->buffer_size,
 					 &buffer->device_addr, GFP_KERNEL, buffer->dma_attrs);
 	if (!buffer->kvaddr) {
+		dev_err(core->dev, "failed to allocate internal buffer: type=%u size=%u index=%u\n",
+			buffer_type, buffer->buffer_size, index);
 		kfree(buffer);
 		return -ENOMEM;
 	}
@@ -657,8 +671,12 @@ void iris_destroy_internal_buffer(struct iris_inst *inst, struct iris_buffer *bu
 	struct iris_core *core = inst->core;
 
 	list_del(&buffer->list);
-	dma_free_attrs(core->dev, buffer->buffer_size, buffer->kvaddr,
-		       buffer->device_addr, buffer->dma_attrs);
+	if (buffer->secure) {
+		iris_secure_buffer_free(core, buffer);
+	} else {
+		dma_free_attrs(core->dev, buffer->buffer_size, buffer->kvaddr,
+			       buffer->device_addr, buffer->dma_attrs);
+	}
 	kfree(buffer);
 }
 
