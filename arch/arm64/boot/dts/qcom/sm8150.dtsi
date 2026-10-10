@@ -761,6 +761,10 @@
 			no-map;
 		};
 
+		video_iova_reserved: video-iova {
+			iommu-addresses = <&videodec 0 0 0 0x25800000>;
+		};
+
 		slpi_mem: memory@97300000 {
 			reg = <0x0 0x97300000 0x0 0x1400000>;
 			no-map;
@@ -3871,7 +3875,7 @@
 			interconnect-names = "cpu-cfg", "video-mem";
 
 			iommus = <&apps_smmu 0x2300 0x60>;
-			memory-region = <&venus_mem>;
+			memory-region = <&venus_mem>, <&video_iova_reserved>;
 
 			resets = <&gcc GCC_VIDEO_AXIC_CLK_BCR>,
 				 <&videocc VIDEO_CC_MVSC_CORE_CLK_BCR>,
