@@ -77,6 +77,7 @@ const struct iris_platform_data sm8150_data = {
 	.clk_tbl_size = ARRAY_SIZE(sm8150_clk_table),
 	.opp_clk_tbl = sm8150_opp_clk_table,
 	.dma_mask = 0xe0000000 - 1,
+	.secure_arp = true,
 	.inst_iris_fmts = iris_fmts_vpu1_dec,
 	.inst_iris_fmts_size = ARRAY_SIZE(iris_fmts_vpu1_dec),
 	.inst_caps = &platform_inst_cap_vpu1,

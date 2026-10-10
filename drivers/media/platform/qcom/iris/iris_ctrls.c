@@ -312,6 +312,9 @@ static int iris_op_s_ctrl(struct v4l2_ctrl *ctrl)
 	enum platform_inst_fw_cap_type cap_id;
 	struct platform_inst_fw_cap *cap;
 	struct vb2_queue *q;
+	u32 prev_flags;
+	s64 prev_value;
+	int ret;
 
 	cap = &inst->fw_caps[0];
 	cap_id = iris_get_cap_id(ctrl->id);
@@ -323,13 +326,18 @@ static int iris_op_s_ctrl(struct v4l2_ctrl *ctrl)
 	    (!(inst->fw_caps[cap_id].flags & CAP_FLAG_DYNAMIC_ALLOWED)))
 		return -EINVAL;
 
+	prev_flags = cap[cap_id].flags;
+	prev_value = cap[cap_id].value;
 	cap[cap_id].flags |= CAP_FLAG_CLIENT_SET;
+	cap[cap_id].value = ctrl->val;
 
-	inst->fw_caps[cap_id].value = ctrl->val;
-
-	if (vb2_is_streaming(q)) {
-		if (cap[cap_id].set)
-			cap[cap_id].set(inst, cap_id);
+	if (vb2_is_streaming(q) && cap[cap_id].set) {
+		ret = cap[cap_id].set(inst, cap_id);
+		if (ret) {
+			cap[cap_id].flags = prev_flags;
+			cap[cap_id].value = prev_value;
+			return ret;
+		}
 	}
 
 	return 0;
@@ -465,6 +473,23 @@ void iris_session_init_caps(struct iris_core *core)
 		core->inst_fw_caps_enc[cap_id].hfi_id = caps[i].hfi_id;
 		core->inst_fw_caps_enc[cap_id].set = caps[i].set;
 	}
+
+	if (core->iris_firmware_data->hfi_4xx) {
+		core->inst_fw_caps_enc[PIPE] = (struct platform_inst_fw_cap) {
+			.cap_id = PIPE,
+			.min = PIPE_1,
+			.max = core->iris_platform_data->num_vpp_pipe,
+			.value = core->iris_platform_data->num_vpp_pipe,
+			.step_or_mask = 1,
+			.hfi_id = HFI_PROPERTY_PARAM_WORK_ROUTE,
+			.set = iris_set_pipe,
+		};
+		/* The SM8150 raw encoder formats carry eight-bit samples. */
+		core->inst_fw_caps_enc[MIN_FRAME_QP_HEVC].max = MAX_QP;
+		core->inst_fw_caps_enc[MAX_FRAME_QP_HEVC].max = MAX_QP;
+		core->inst_fw_caps_enc[MAX_FRAME_QP_HEVC].value = MAX_QP;
+		core->inst_fw_caps_enc[GOP_SIZE].min = 1;
+	}
 }
 
 static u32 iris_get_port_info(struct iris_inst *inst,
@@ -538,6 +563,17 @@ int iris_set_pipe(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
 	u32 work_route = inst->fw_caps[PIPE].value;
 	u32 hfi_id = inst->fw_caps[cap_id].hfi_id;
 
+	if (inst->domain == ENCODER && inst->core->iris_firmware_data->hfi_4xx) {
+		struct v4l2_pix_format_mplane *fmt = &inst->fmt_dst->fmt.pix_mp;
+		u64 mbps = (u64)NUM_MBS_PER_FRAME(fmt->height, fmt->width) * inst->frame_rate;
+
+		work_route = inst->core->iris_platform_data->num_vpp_pipe;
+		if (inst->fw_caps[BITRATE_MODE].value == V4L2_MPEG_VIDEO_BITRATE_MODE_CBR &&
+		    mbps <= NUM_MBS_PER_FRAME(720, 1280) * 30)
+			work_route = PIPE_1;
+		inst->fw_caps[PIPE].value = work_route;
+	}
+
 	return hfi_ops->session_set_property(inst, hfi_id,
 					     HFI_HOST_FLAGS_NONE,
 					     iris_get_port_info(inst, cap_id),
@@ -591,6 +627,10 @@ int iris_set_profile_level_gen1(struct iris_inst *inst, enum platform_inst_fw_ca
 	u32 hfi_id = inst->fw_caps[cap_id].hfi_id;
 	struct hfi_profile_level pl;
 
+	/* One property carries both controls; send it once for the selected codec. */
+	if (cap_id != (inst->codec == V4L2_PIX_FMT_H264 ? PROFILE_H264 : PROFILE_HEVC))
+		return 0;
+
 	if (inst->codec == V4L2_PIX_FMT_H264) {
 		pl.profile = inst->fw_caps[PROFILE_H264].value;
 		pl.level = inst->fw_caps[LEVEL_H264].value;
@@ -602,8 +642,8 @@ int iris_set_profile_level_gen1(struct iris_inst *inst, enum platform_inst_fw_ca
 	return hfi_ops->session_set_property(inst, hfi_id,
 					     HFI_HOST_FLAGS_NONE,
 					     iris_get_port_info(inst, cap_id),
-					     HFI_PAYLOAD_U32_ENUM,
-					     &pl, sizeof(u32));
+				     HFI_PAYLOAD_STRUCTURE,
+				     &pl, sizeof(pl));
 }
 
 int iris_set_header_mode_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
@@ -657,7 +697,7 @@ int iris_set_bitrate_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type
 	u32 max_bitrate;
 
 	if (!(inst->fw_caps[cap_id].flags & CAP_FLAG_CLIENT_SET) && cap_id != BITRATE)
-		return -EINVAL;
+		return 0;
 
 	if (inst->codec == V4L2_PIX_FMT_HEVC) {
 		max_bitrate = CABAC_MAX_BITRATE;
@@ -694,8 +734,8 @@ int iris_set_bitrate_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type
 		return -EINVAL;
 	}
 
-	if (hfi_val.layer_id > 0 && !inst->fw_caps[LAYER_ENABLE].value)
-		return -EINVAL;
+	if (cap_id != BITRATE && !inst->fw_caps[LAYER_ENABLE].value)
+		return 0;
 
 	return hfi_ops->session_set_property(inst, hfi_id,
 					     HFI_HOST_FLAGS_NONE,
@@ -815,19 +855,20 @@ int iris_set_entropy_mode_gen1(struct iris_inst *inst, enum platform_inst_fw_cap
 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
 	u32 entropy_mode = inst->fw_caps[cap_id].value;
 	u32 hfi_id = inst->fw_caps[cap_id].hfi_id;
-	u32 hfi_val;
+	struct hfi_h264_entropy_control entropy = {0};
 
 	if (inst->codec != V4L2_PIX_FMT_H264)
 		return 0;
 
-	hfi_val = (entropy_mode == V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CAVLC) ?
+	entropy.entropy_mode = (entropy_mode == V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CAVLC) ?
 		HFI_H264_ENTROPY_CAVLC : HFI_H264_ENTROPY_CABAC;
+	entropy.cabac_model = HFI_H264_CABAC_MODEL_0;
 
 	return hfi_ops->session_set_property(inst, hfi_id,
 					 HFI_HOST_FLAGS_NONE,
 				     iris_get_port_info(inst, cap_id),
-				     HFI_PAYLOAD_U32,
-				     &hfi_val, sizeof(u32));
+				     HFI_PAYLOAD_STRUCTURE,
+				     &entropy, sizeof(entropy));
 }
 
 int iris_set_entropy_mode_gen2(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
@@ -1051,6 +1092,10 @@ int iris_set_qp_range(struct iris_inst *inst, enum platform_inst_fw_cap_type cap
 	struct hfi_quantization_range_v2 range;
 	u32 hfi_id = inst->fw_caps[cap_id].hfi_id;
 
+	if (cap_id != (inst->codec == V4L2_PIX_FMT_HEVC ? MIN_FRAME_QP_HEVC :
+		       MIN_FRAME_QP_H264))
+		return 0;
+
 	if (inst->codec == V4L2_PIX_FMT_HEVC) {
 		range.min_qp.qp_packed = inst->fw_caps[MIN_FRAME_QP_HEVC].value;
 		range.max_qp.qp_packed = inst->fw_caps[MAX_FRAME_QP_HEVC].value;
@@ -1058,6 +1103,8 @@ int iris_set_qp_range(struct iris_inst *inst, enum platform_inst_fw_cap_type cap
 		range.min_qp.qp_packed = inst->fw_caps[MIN_FRAME_QP_H264].value;
 		range.max_qp.qp_packed = inst->fw_caps[MAX_FRAME_QP_H264].value;
 	}
+	if (range.min_qp.qp_packed > range.max_qp.qp_packed)
+		return -EINVAL;
 
 	return hfi_ops->session_set_property(inst, hfi_id,
 					 HFI_HOST_FLAGS_NONE,
@@ -1125,7 +1172,7 @@ int iris_set_ir_period_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_ty
 	struct hfi_intra_refresh hfi_val;
 
 	if (!ir_period)
-		return -EINVAL;
+		return 0;
 
 	if (inst->fw_caps[IR_TYPE].value ==
 			V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_RANDOM) {
@@ -1186,7 +1233,7 @@ int iris_set_ltr_count_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_ty
 	struct hfi_ltr_mode ltr_mode;
 
 	if (!ltr_count)
-		return -EINVAL;
+		return 0;
 
 	ltr_mode.count = ltr_count;
 	ltr_mode.mode = HFI_LTR_MODE_MANUAL;
@@ -1209,7 +1256,7 @@ int iris_set_use_ltr(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_
 	struct hfi_ltr_use ltr_use;
 
 	if (!vb2_is_streaming(sq) && !vb2_is_streaming(dq))
-		return -EINVAL;
+		return 0;
 
 	if (!ltr_count)
 		return -EINVAL;
@@ -1235,7 +1282,7 @@ int iris_set_mark_ltr(struct iris_inst *inst, enum platform_inst_fw_cap_type cap
 	struct hfi_ltr_mark ltr_mark;
 
 	if (!vb2_is_streaming(sq) && !vb2_is_streaming(dq))
-		return -EINVAL;
+		return 0;
 
 	if (!ltr_count)
 		return -EINVAL;
@@ -1389,7 +1436,7 @@ int iris_set_layer_count_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_
 	u32 hfi_id, ret;
 
 	if (!layer_enable || !layer_count)
-		return -EINVAL;
+		return 0;
 
 	inst->hfi_layer_count = layer_count;
 
@@ -1534,8 +1581,16 @@ int iris_set_properties(struct iris_inst *inst, u32 plane)
 		if (!iris_valid_cap_id(cap->cap_id))
 			continue;
 
-		if (cap->cap_id && cap->set)
-			cap->set(inst, i);
+		if (cap->cap_id && cap->set) {
+			if (i == REQUEST_SYNC_FRAME || i == USE_LTR || i == MARK_LTR)
+				continue;
+			ret = cap->set(inst, i);
+			if (ret && inst->core->iris_firmware_data->hfi_4xx) {
+				dev_err(inst->core->dev, "failed to set capability %u: %d\n",
+					i, ret);
+				return ret;
+			}
+		}
 	}
 
 	return 0;

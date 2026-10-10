@@ -104,6 +104,16 @@
 #define HFI_COLOR_FORMAT_NV12				0x02
 #define HFI_COLOR_FORMAT_NV12_UBWC			0x8002
 
+#define HFI_H264_PROFILE_BASELINE			BIT(0)
+#define HFI_H264_PROFILE_MAIN				BIT(1)
+#define HFI_H264_PROFILE_HIGH				BIT(2)
+#define HFI_H264_PROFILE_STEREO_HIGH			BIT(3)
+#define HFI_H264_PROFILE_MULTIVIEW_HIGH			BIT(4)
+#define HFI_H264_PROFILE_CONSTRAINED_BASE			BIT(5)
+#define HFI_HEVC_PROFILE_MAIN				BIT(0)
+#define HFI_HEVC_PROFILE_MAIN10				BIT(1)
+#define HFI_HEVC_PROFILE_MAIN_STILL_PIC			BIT(2)
+
 #define HFI_MSG_SYS_INIT				0x20001
 #define HFI_MSG_SYS_SESSION_INIT			0x20006
 #define HFI_MSG_SYS_SESSION_END				0x20007
@@ -158,6 +168,7 @@
 #define HFI_LTR_MODE_PERIODIC			0x2
 
 #define HFI_PROPERTY_PARAM_VENC_LTRMODE				0x200501c
+#define HFI_PROPERTY_PARAM_VENC_VUI_TIMING_INFO			0x200501e
 #define HFI_PROPERTY_PARAM_VENC_MAX_NUM_B_FRAMES		0x2005020
 #define HFI_PROPERTY_PARAM_VENC_HIER_P_MAX_NUM_ENH_LAYER	0x2005026
 #define HFI_PROPERTY_CONFIG_VENC_TARGET_BITRATE			0x2006001
@@ -465,6 +476,12 @@ struct hfi_bitrate {
 struct hfi_h264_entropy_control {
 	u32 entropy_mode;
 	u32 cabac_model;
+};
+
+struct hfi_vui_timing_info {
+	u32 enable;
+	u32 fixed_frame_rate;
+	u32 time_scale;
 };
 
 struct hfi_quantization_v2 {

@@ -138,7 +138,7 @@ static u64 iris_vpu1_calc_freq(struct iris_inst *inst, size_t data_size)
 	u64 vsp_freq = mbs * caps->mb_cycles_vsp;
 	u64 fw_freq = (u64)inst->frame_rate * caps->mb_cycles_fw;
 	u64 fw_vpp_freq = (u64)inst->frame_rate * caps->mb_cycles_fw_vpp;
-	u32 pipes = inst->domain == DECODER ? inst->fw_caps[PIPE].value : 1;
+	u32 pipes = inst->fw_caps[PIPE].value;
 
 	vpp_freq = div_u64(vpp_freq, pipes);
 	if (inst->domain == DECODER)
@@ -149,8 +149,12 @@ static u64 iris_vpu1_calc_freq(struct iris_inst *inst, size_t data_size)
 	vsp_freq += max(div_u64(vsp_freq, 20),
 			mul_u64_u64_div_u64(vsp_freq, fw_vpp_freq, vpp_freq));
 	vpp_freq += max(div_u64(vpp_freq, 20), fw_vpp_freq);
-	if (pipes > 1)
-		vpp_freq += div_u64(vpp_freq, 17);
+	if (pipes > 1) {
+		if (inst->domain == DECODER)
+			vpp_freq += div_u64(vpp_freq, 17);
+		else
+			vpp_freq += div_u64(vpp_freq * 14, 1000);
+	}
 
 	return max3(vpp_freq, vsp_freq, fw_freq);
 }

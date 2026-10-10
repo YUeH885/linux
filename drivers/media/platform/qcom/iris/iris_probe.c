@@ -14,6 +14,7 @@
 
 #include "iris_core.h"
 #include "iris_ctrls.h"
+#include "iris_secure_buffer.h"
 #include "iris_vidc.h"
 
 static int iris_init_icc(struct iris_core *core)
@@ -272,6 +273,10 @@ static int iris_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	ret = iris_secure_buffer_init(core);
+	if (ret)
+		return ret;
+
 	ret = v4l2_device_register(dev, &core->v4l2_dev);
 	if (ret)
 		return ret;
@@ -409,6 +414,26 @@ static struct platform_driver qcom_iris_driver = {
 	},
 };
 
-module_platform_driver(qcom_iris_driver);
+static int __init iris_init(void)
+{
+	int ret;
+
+	ret = platform_driver_register(&iris_cp_driver);
+	if (ret)
+		return ret;
+
+	ret = platform_driver_register(&qcom_iris_driver);
+	if (ret)
+		platform_driver_unregister(&iris_cp_driver);
+	return ret;
+}
+module_init(iris_init);
+
+static void __exit iris_exit(void)
+{
+	platform_driver_unregister(&qcom_iris_driver);
+	platform_driver_unregister(&iris_cp_driver);
+}
+module_exit(iris_exit);
 MODULE_DESCRIPTION("Qualcomm iris video driver");
 MODULE_LICENSE("GPL");
