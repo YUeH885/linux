@@ -204,6 +204,32 @@ int iris_vdec_try_fmt(struct iris_inst *inst, struct v4l2_format *f)
 	return 0;
 }
 
+void iris_vdec_set_output_format(struct iris_inst *inst, u32 width, u32 height)
+{
+	struct v4l2_pix_format_mplane *pixmp = &inst->fmt_dst->fmt.pix_mp;
+
+	switch (pixmp->pixelformat) {
+	case V4L2_PIX_FMT_P010:
+		pixmp->width = ALIGN(width, 128);
+		pixmp->height = ALIGN(height, 32);
+		pixmp->plane_fmt[0].bytesperline = ALIGN(width * 2, 256);
+		break;
+	case V4L2_PIX_FMT_QC10C:
+		pixmp->width = roundup(width, 192);
+		pixmp->height = ALIGN(height, 16);
+		pixmp->plane_fmt[0].bytesperline = ALIGN(pixmp->width * 4 / 3, 256);
+		break;
+	case V4L2_PIX_FMT_NV12:
+	case V4L2_PIX_FMT_QC08C:
+		pixmp->width = ALIGN(width, 128);
+		pixmp->height = ALIGN(height, 32);
+		pixmp->plane_fmt[0].bytesperline = ALIGN(width, 128);
+		break;
+	}
+	pixmp->plane_fmt[0].sizeimage = iris_get_buffer_size(inst, BUF_OUTPUT);
+	inst->buffers[BUF_OUTPUT].size = pixmp->plane_fmt[0].sizeimage;
+}
+
 int iris_vdec_s_fmt(struct iris_inst *inst, struct v4l2_format *f)
 {
 	struct v4l2_format *fmt, *output_fmt;
@@ -273,30 +299,8 @@ int iris_vdec_s_fmt(struct iris_inst *inst, struct v4l2_format *f)
 		fmt->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 		fmt->fmt.pix_mp.pixelformat = f->fmt.pix_mp.pixelformat;
 		fmt->fmt.pix_mp.num_planes = 1;
-		switch (f->fmt.pix_mp.pixelformat) {
-		case V4L2_PIX_FMT_P010:
-			fmt->fmt.pix_mp.width = ALIGN(f->fmt.pix_mp.width, 128);
-			fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 32);
-			fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				ALIGN(f->fmt.pix_mp.width * 2, 256);
-			break;
-		case V4L2_PIX_FMT_QC10C:
-			fmt->fmt.pix_mp.width = roundup(f->fmt.pix_mp.width, 192);
-			fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 16);
-			fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				ALIGN(f->fmt.pix_mp.width * 4 / 3, 256);
-			break;
-		case V4L2_PIX_FMT_NV12:
-		case V4L2_PIX_FMT_QC08C:
-			fmt->fmt.pix_mp.width = ALIGN(f->fmt.pix_mp.width, 128);
-			fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 32);
-			fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				ALIGN(f->fmt.pix_mp.width, 128);
-			break;
-		}
-		fmt->fmt.pix_mp.plane_fmt[0].sizeimage = iris_get_buffer_size(inst, BUF_OUTPUT);
+		iris_vdec_set_output_format(inst, f->fmt.pix_mp.width, f->fmt.pix_mp.height);
 		inst->buffers[BUF_OUTPUT].min_count = iris_vpu_buf_count(inst, BUF_OUTPUT);
-		inst->buffers[BUF_OUTPUT].size = fmt->fmt.pix_mp.plane_fmt[0].sizeimage;
 
 		inst->crop.top = 0;
 		inst->crop.left = 0;
@@ -404,7 +408,7 @@ int iris_vdec_streamon_output(struct iris_inst *inst)
 	if (ret)
 		return ret;
 
-	if (hfi_ops->session_get_buffer_requirements) {
+	if (hfi_ops->session_get_buffer_requirements && !inst->core->iris_firmware_data->hfi_4xx) {
 		ret = hfi_ops->session_get_buffer_requirements(inst);
 		if (ret)
 			return ret;

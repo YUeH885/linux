@@ -102,7 +102,9 @@
 #define HFI_PROPERTY_PARAM_VDEC_COLOUR_SPACE		0x100300a
 #define HFI_CORE_ID_1					1
 #define HFI_COLOR_FORMAT_NV12				0x02
+#define HFI_COLOR_FORMAT_P010				0x4003
 #define HFI_COLOR_FORMAT_NV12_UBWC			0x8002
+#define HFI_COLOR_FORMAT_YUV420_TP10_UBWC		0xc002
 
 #define HFI_H264_PROFILE_BASELINE			BIT(0)
 #define HFI_H264_PROFILE_MAIN				BIT(1)
@@ -383,6 +385,10 @@ struct hfi_bit_depth {
 	u32 buffer_type;
 	u32 bit_depth;
 };
+
+#define HFI_BITDEPTH_8	0
+#define HFI_BITDEPTH_9	1
+#define HFI_BITDEPTH_10	2
 
 struct hfi_pic_struct {
 	u32 progressive_only;
