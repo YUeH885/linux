@@ -366,6 +366,12 @@ int iris_vdec_streamon_input(struct iris_inst *inst)
 	if (ret)
 		return ret;
 
+	if (inst->hfi_session_ops->session_get_buffer_requirements) {
+		ret = inst->hfi_session_ops->session_get_buffer_requirements(inst);
+		if (ret)
+			return ret;
+	}
+
 	ret = iris_alloc_and_queue_persist_bufs(inst, BUF_PERSIST);
 	if (ret)
 		return ret;
@@ -397,6 +403,12 @@ int iris_vdec_streamon_output(struct iris_inst *inst)
 	ret = hfi_ops->session_set_config_params(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 	if (ret)
 		return ret;
+
+	if (hfi_ops->session_get_buffer_requirements) {
+		ret = hfi_ops->session_get_buffer_requirements(inst);
+		if (ret)
+			return ret;
+	}
 
 	iris_get_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 

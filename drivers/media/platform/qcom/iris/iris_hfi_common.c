@@ -105,12 +105,17 @@ irqreturn_t iris_hfi_isr_handler(int irq, void *data)
 		return IRQ_NONE;
 
 	mutex_lock(&core->lock);
+	if (!core->power_enabled) {
+		mutex_unlock(&core->lock);
+		goto reenable_irq;
+	}
 	pm_runtime_mark_last_busy(core->dev);
 	iris_vpu_clear_interrupt(core);
 	mutex_unlock(&core->lock);
 
 	core->hfi_sys_ops->sys_hfi_response_handler(core);
 
+reenable_irq:
 	if (!iris_vpu_watchdog(core, core->intr_status))
 		enable_irq(irq);
 
@@ -137,7 +142,10 @@ int iris_hfi_pm_suspend(struct iris_core *core)
 	return 0;
 
 error:
-	dev_err(core->dev, "failed to suspend\n");
+	if (ret == -EAGAIN)
+		dev_dbg(core->dev, "firmware is not ready to suspend\n");
+	else
+		dev_err(core->dev, "failed to suspend: %d\n", ret);
 
 	return ret;
 }

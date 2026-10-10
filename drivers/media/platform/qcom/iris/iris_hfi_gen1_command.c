@@ -3,10 +3,16 @@
  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
+#include <media/v4l2-mem2mem.h>
+
 #include "iris_hfi_gen1.h"
 #include "iris_hfi_gen1_defines.h"
 #include "iris_instance.h"
 #include "iris_vpu_buffer.h"
+
+static unsigned int fw_debug = BIT(3) | BIT(4);
+module_param(fw_debug, uint, 0444);
+MODULE_PARM_DESC(fw_debug, "HFI Gen1 firmware debug message mask");
 
 static u32 iris_hfi_gen1_buf_type_from_driver(enum iris_buffer_type buffer_type)
 {
@@ -25,20 +31,98 @@ static u32 iris_hfi_gen1_buf_type_from_driver(enum iris_buffer_type buffer_type)
 		return HFI_BUFFER_INTERNAL_SCRATCH_2;
 	case BUF_ARP:
 		return HFI_BUFFER_INTERNAL_PERSIST;
+	case BUF_RECON:
+		return HFI_BUFFER_INTERNAL_RECON;
 	default:
 		return -EINVAL;
 	}
 }
 
+u32 iris_hfi_gen1_get_buffer_size(struct iris_inst *inst, enum iris_buffer_type type)
+{
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
+	u32 hfi_type, size;
+
+	hfi_type = type == BUF_DPB ? HFI_BUFFER_OUTPUT : iris_hfi_gen1_buf_type_from_driver(type);
+	if (hfi_type > HFI_BUFFER_INTERNAL_RECON)
+		return 0;
+
+	size = inst_hfi->buffer_requirements[hfi_type].size;
+	if (type == BUF_DPB)
+		return max(size, iris_vpu_buf_size(inst, type));
+
+	return size;
+}
+
+u32 iris_hfi_gen1_get_buffer_count(struct iris_inst *inst, enum iris_buffer_type type)
+{
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
+	struct hfi_buffer_requirements *req;
+	u32 hfi_type, count;
+
+	hfi_type = type == BUF_DPB ? HFI_BUFFER_OUTPUT : iris_hfi_gen1_buf_type_from_driver(type);
+	if (hfi_type > HFI_BUFFER_INTERNAL_RECON)
+		return 0;
+
+	req = &inst_hfi->buffer_requirements[hfi_type];
+	/* HFI 4XX uses the old hold-count word for the firmware minimum. */
+	count = max3(req->hold_count, req->count_min, req->count_actual);
+	if (type == BUF_DPB)
+		return max_t(u32, count, iris_vpu_buf_count(inst, type));
+
+	return count;
+}
+
+static int iris_hfi_gen1_session_get_buffer_requirements(struct iris_inst *inst)
+{
+	struct hfi_session_get_property_pkt pkt = {
+		.shdr.hdr.size = sizeof(pkt),
+		.shdr.hdr.pkt_type = HFI_CMD_SESSION_GET_PROPERTY,
+		.shdr.session_id = inst->session_id,
+		.num_properties = 1,
+		.property = HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS,
+	};
+	int ret;
+
+	if (!inst->core->iris_firmware_data->hfi_4xx)
+		return 0;
+
+	reinit_completion(&inst->completion);
+	ret = iris_hfi_queue_cmd_write(inst->core, &pkt, sizeof(pkt));
+	if (ret)
+		return ret;
+
+	return iris_wait_for_session_response(inst, false);
+}
+
 static int iris_hfi_gen1_sys_init(struct iris_core *core)
 {
 	struct hfi_sys_init_pkt sys_init_pkt;
+	struct {
+		struct hfi_pkt_hdr hdr;
+		u32 num_properties;
+		u32 property;
+		u32 mask;
+		u32 mode;
+	} debug_pkt = {
+		.hdr.size = sizeof(debug_pkt),
+		.hdr.pkt_type = HFI_CMD_SYS_SET_PROPERTY,
+		.num_properties = 1,
+		.property = HFI_PROPERTY_SYS_DEBUG_CONFIG,
+		.mask = fw_debug,
+		.mode = 1,
+	};
+	int ret;
 
 	sys_init_pkt.hdr.size = sizeof(sys_init_pkt);
 	sys_init_pkt.hdr.pkt_type = HFI_CMD_SYS_INIT;
 	sys_init_pkt.arch_type = HFI_VIDEO_ARCH_OX;
 
-	return iris_hfi_queue_cmd_write_locked(core, &sys_init_pkt, sys_init_pkt.hdr.size);
+	ret = iris_hfi_queue_cmd_write_locked(core, &sys_init_pkt, sys_init_pkt.hdr.size);
+	if (ret)
+		return ret;
+
+	return iris_hfi_queue_cmd_write_locked(core, &debug_pkt, sizeof(debug_pkt));
 }
 
 static int iris_hfi_gen1_sys_image_version(struct iris_core *core)
@@ -265,6 +349,19 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 static int iris_hfi_gen1_session_continue(struct iris_inst *inst, u32 plane)
 {
 	struct hfi_session_pkt packet;
+	int ret;
+
+	if (inst->core->iris_firmware_data->hfi_4xx) {
+		/* HFI 4xx resumes both output streams with one command. */
+		if (V4L2_TYPE_IS_CAPTURE(plane))
+			return 0;
+
+		if (inst->sub_state & IRIS_INST_SUB_DRC_LAST) {
+			ret = iris_queue_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+			if (ret)
+				return ret;
+		}
+	}
 
 	iris_hfi_gen1_packet_session_cmd(inst, &packet, HFI_CMD_SESSION_CONTINUE);
 
@@ -385,6 +482,7 @@ static int iris_hfi_gen1_session_queue_buffer(struct iris_inst *inst, struct iri
 	case BUF_SCRATCH_1:
 	case BUF_SCRATCH_2:
 	case BUF_ARP:
+	case BUF_RECON:
 		return iris_hfi_gen1_queue_internal_buffer(inst, buf);
 	default:
 		return -EINVAL;
@@ -910,8 +1008,20 @@ static int iris_hfi_gen1_set_num_bufs(struct iris_inst *inst, u32 plane)
 				return ret;
 
 			buf_count.type = HFI_BUFFER_OUTPUT2;
-			buf_count.count_actual = iris_vpu_buf_count(inst, BUF_DPB);
-			buf_count.count_min_host = iris_vpu_buf_count(inst, BUF_DPB);
+			if (inst->core->iris_firmware_data->hfi_4xx) {
+				struct vb2_queue *q = v4l2_m2m_get_dst_vq(inst->m2m_ctx);
+				struct iris_inst_hfi_gen1 *hfi = to_iris_inst_hfi_gen1(inst);
+				u32 minimum = inst->fw_min_count ? inst->fw_min_count :
+					hfi->buffer_requirements[HFI_BUFFER_OUTPUT2].hold_count;
+
+				buf_count.count_actual = V4L2_TYPE_IS_OUTPUT(plane) ?
+					VIDEO_MAX_FRAME : vb2_get_num_buffers(q);
+				if (buf_count.count_actual < minimum)
+					return -EINVAL;
+			} else {
+				buf_count.count_actual = iris_vpu_buf_count(inst, BUF_DPB);
+			}
+			buf_count.count_min_host = buf_count.count_actual;
 
 			ret = hfi_gen1_set_property(inst, ptype, &buf_count, sizeof(buf_count));
 		} else {
@@ -1096,6 +1206,9 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
 			handler = vdec_prop_type_handle_inp_arr;
 			handler_size = ARRAY_SIZE(vdec_prop_type_handle_inp_arr);
 		} else if (V4L2_TYPE_IS_CAPTURE(plane)) {
+			config_params = core->iris_firmware_data->dec_output_config_params;
+			config_params_size =
+				core->iris_firmware_data->dec_output_config_params_size;
 			handler = vdec_prop_type_handle_out_arr;
 			handler_size = ARRAY_SIZE(vdec_prop_type_handle_out_arr);
 		}
@@ -1121,6 +1234,7 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
 }
 
 static const struct iris_hfi_session_ops iris_hfi_gen1_session_ops = {
+	.session_get_buffer_requirements = iris_hfi_gen1_session_get_buffer_requirements,
 	.session_open = iris_hfi_gen1_session_open,
 	.session_set_config_params = iris_hfi_gen1_session_set_config_params,
 	.session_set_property = iris_hfi_gen1_session_set_property,
@@ -1135,15 +1249,15 @@ static const struct iris_hfi_session_ops iris_hfi_gen1_session_ops = {
 
 static struct iris_inst *iris_hfi_gen1_get_instance(void)
 {
-	struct iris_inst *out;
+	struct iris_inst_hfi_gen1 *out;
 
 	out = kzalloc_obj(*out);
 	if (!out)
 		return NULL;
 
-	out->hfi_session_ops = &iris_hfi_gen1_session_ops;
+	out->inst.hfi_session_ops = &iris_hfi_gen1_session_ops;
 
-	return out;
+	return &out->inst;
 }
 
 static const struct iris_hfi_sys_ops iris_hfi_gen1_sys_ops = {

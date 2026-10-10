@@ -133,7 +133,7 @@ int iris_open(struct file *filp)
 	struct iris_core *core = video_drvdata(filp);
 	struct video_device *vdev;
 	struct iris_inst *inst;
-	u32 session_type;
+	u32 session_type, i;
 	int ret;
 
 	vdev = video_devdata(filp);
@@ -169,17 +169,8 @@ int iris_open(struct file *filp)
 	mutex_init(&inst->lock);
 	mutex_init(&inst->ctx_q_lock);
 
-	INIT_LIST_HEAD(&inst->buffers[BUF_BIN].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_ARP].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_COMV].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_NON_COMV].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_LINE].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_DPB].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_PERSIST].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_SCRATCH_1].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_SCRATCH_2].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_VPSS].list);
-	INIT_LIST_HEAD(&inst->buffers[BUF_PARTIAL].list);
+	for (i = 0; i < BUF_TYPE_MAX; i++)
+		INIT_LIST_HEAD(&inst->buffers[i].list);
 	init_completion(&inst->completion);
 	init_completion(&inst->flush_completion);
 
