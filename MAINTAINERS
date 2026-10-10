@@ -22585,6 +22585,7 @@ L:	linux-media@vger.kernel.org
 L:	linux-arm-msm@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/qcom,*-iris.yaml
+F:	Documentation/devicetree/bindings/media/qcom,sm8150-iris-cp-nonpixel.yaml
 F:	drivers/media/platform/qcom/iris/
 
 QUALCOMM NAND CONTROLLER DRIVER
