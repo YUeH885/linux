@@ -3883,6 +3883,11 @@
 
 			status = "disabled";
 
+			cp-nonpixel {
+				compatible = "qcom,sm8150-iris-cp-nonpixel";
+				iommus = <&apps_smmu 0x2304 0x60>;
+			};
+
 			iris_opp_table: opp-table {
 				compatible = "operating-points-v2";
 
