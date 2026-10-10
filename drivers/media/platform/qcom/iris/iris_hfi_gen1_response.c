@@ -263,6 +263,7 @@ static void iris_hfi_gen1_event_seq_changed(struct iris_inst *inst,
 		iris_vb2_queue_error(inst);
 		return;
 	}
+	complete_all(&to_iris_inst_hfi_gen1(inst)->initial_src_change);
 
 	/* CAPTURE may already be streaming when the first header is parsed. */
 	if (early_capture &&
@@ -332,6 +333,7 @@ iris_hfi_gen1_sys_event_notify(struct iris_core *core, void *packet)
 		iris_vb2_queue_error(instance);
 		complete(&instance->completion);
 		complete(&instance->flush_completion);
+		complete_all(&to_iris_inst_hfi_gen1(instance)->initial_src_change);
 	}
 	mutex_unlock(&core->lock);
 
@@ -793,6 +795,8 @@ static void iris_hfi_gen1_handle_response(struct iris_core *core, void *response
 		if (inst) {
 			mutex_lock(&inst->lock);
 			iris_hfi_gen1_session_event_notify(inst, hdr);
+			if (inst->state == IRIS_INST_ERROR)
+				complete_all(&to_iris_inst_hfi_gen1(inst)->initial_src_change);
 			mutex_unlock(&inst->lock);
 		} else {
 			iris_hfi_gen1_sys_event_notify(core, hdr);
@@ -834,6 +838,8 @@ static void iris_hfi_gen1_handle_response(struct iris_core *core, void *response
 				complete(&inst->completion);
 			}
 		}
+		if (inst->state == IRIS_INST_ERROR)
+			complete_all(&to_iris_inst_hfi_gen1(inst)->initial_src_change);
 		mutex_unlock(&inst->lock);
 
 		break;

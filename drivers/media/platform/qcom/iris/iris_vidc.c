@@ -560,6 +560,7 @@ static int iris_dec_cmd(struct file *filp, void *fh,
 	struct iris_inst *inst = iris_get_inst(filp);
 	int ret = 0;
 
+	mutex_lock(&inst->ctx_q_lock);
 	mutex_lock(&inst->lock);
 
 	if (dec->cmd != V4L2_DEC_CMD_STOP && dec->cmd != V4L2_DEC_CMD_START) {
@@ -584,6 +585,7 @@ static int iris_dec_cmd(struct file *filp, void *fh,
 
 unlock:
 	mutex_unlock(&inst->lock);
+	mutex_unlock(&inst->ctx_q_lock);
 
 	return ret;
 }
