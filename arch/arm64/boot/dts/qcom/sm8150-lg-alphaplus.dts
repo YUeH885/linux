@@ -1368,3 +1368,8 @@
 		flash-max-timeout-us = <500000>;
 	};
 };
+
+&videodec {
+	status = "okay";
+	firmware-name = "qcom/sm8150/lmg820n/venus.mdt";
+};
