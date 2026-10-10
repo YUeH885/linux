@@ -310,7 +310,8 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
 		goto exit;
 	}
 
-	if (!inst->last_buffer_dequeued && V4L2_TYPE_IS_CAPTURE(vb2->vb2_queue->type)) {
+	if (!inst->last_buffer_dequeued && vb2_is_streaming(vb2->vb2_queue) &&
+	    V4L2_TYPE_IS_CAPTURE(vb2->vb2_queue->type)) {
 		if ((inst->sub_state & IRIS_INST_SUB_DRC &&
 		     inst->sub_state & IRIS_INST_SUB_DRC_LAST) ||
 		    (inst->sub_state & IRIS_INST_SUB_DRAIN &&
@@ -320,7 +321,7 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
 			vbuf->field = V4L2_FIELD_NONE;
 			vb2_set_plane_payload(vb2, 0, 0);
 			v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_DONE);
-			if (!v4l2_m2m_has_stopped(m2m_ctx)) {
+			if (iris_drain_pending(inst) && !v4l2_m2m_has_stopped(m2m_ctx)) {
 				v4l2_event_queue_fh(&inst->fh, &eos);
 				v4l2_m2m_mark_stopped(m2m_ctx);
 			}
