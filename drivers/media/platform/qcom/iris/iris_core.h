@@ -31,6 +31,7 @@ enum domain_type {
 };
 
 struct qcom_ubwc_cfg_data;
+struct iris_cp_context;
 
 /**
  * struct iris_core - holds core parameters valid for all instances
@@ -57,6 +58,7 @@ struct qcom_ubwc_cfg_data;
  * @iris_firmware_data: a pointer to the firmware (or HFI) specific data
  * @iris_firmware_desc: a pointer to the firmware-specific descriptive data
  * @ubwc_cfg: UBWC configuration for the platform
+ * @cp_context: protected non-pixel buffer allocation and mapping context
  * @state: current state of core
  * @iface_q_table_daddr: device address for interface queue table memory
  * @sfr_daddr: device address for SFR (Sub System Failure Reason) register memory
@@ -103,6 +105,7 @@ struct iris_core {
 	const struct iris_firmware_data		*iris_firmware_data;
 	const struct iris_firmware_desc		*iris_firmware_desc;
 	const struct qcom_ubwc_cfg_data		*ubwc_cfg;
+	struct iris_cp_context			*cp_context;
 	enum iris_core_state			state;
 	dma_addr_t				iface_q_table_daddr;
 	dma_addr_t				sfr_daddr;
