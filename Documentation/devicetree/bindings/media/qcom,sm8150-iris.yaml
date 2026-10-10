@@ -1,0 +1,196 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/qcom,sm8150-iris.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm SM8150 Iris video encode and decode accelerators
+
+maintainers:
+  - Dikshita Agarwal <dikshita.agarwal@oss.qualcomm.com>
+
+description:
+  The Iris v1.xx IP is a video encode and decode accelerator present on
+  Qualcomm SM8150 platforms.
+
+properties:
+  compatible:
+    const: qcom,sm8150-iris
+
+  reg:
+    maxItems: 1
+
+  power-domains:
+    items:
+      - description: Venus controller GDSC
+      - description: VCODEC0 core GDSC
+      - description: VCODEC1 CVP GDSC
+      - description: MX performance domain
+      - description: MMCX performance domain
+
+  power-domain-names:
+    items:
+      - const: venus
+      - const: vcodec0
+      - const: vcodec1
+      - const: mx
+      - const: mmcx
+
+  clocks:
+    items:
+      - description: Video AXIC clock
+      - description: Video codec0 AXI clock
+      - description: Video codec1 AXI clock
+      - description: Video core clock
+      - description: Video AHB clock
+      - description: Video codec0 core clock
+      - description: Video codec1 core clock
+
+  clock-names:
+    items:
+      - const: iface
+      - const: vcodec0_axi
+      - const: vcodec1_axi
+      - const: core
+      - const: ahb
+      - const: vcodec0_core
+      - const: vcodec1_core
+
+  interrupts:
+    maxItems: 1
+
+  interconnects:
+    items:
+      - description: CPU configuration bus
+      - description: Video memory bus
+
+  interconnect-names:
+    items:
+      - const: cpu-cfg
+      - const: video-mem
+
+  iommus:
+    maxItems: 1
+
+  memory-region:
+    maxItems: 1
+
+  firmware-name:
+    maxItems: 1
+
+  operating-points-v2: true
+
+  opp-table:
+    type: object
+
+  resets:
+    items:
+      - description: Video bus reset
+      - description: Video core reset
+      - description: Video codec0 AXI reset
+      - description: Video codec1 AXI reset
+
+  reset-names:
+    items:
+      - const: bus
+      - const: core
+      - const: vcodec0
+      - const: vcodec1
+
+required:
+  - compatible
+  - reg
+  - power-domains
+  - power-domain-names
+  - clocks
+  - clock-names
+  - interrupts
+  - interconnects
+  - interconnect-names
+  - iommus
+  - memory-region
+  - operating-points-v2
+  - resets
+  - reset-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/clock/qcom,gcc-sm8150.h>
+    #include <dt-bindings/clock/qcom,videocc-sm8150.h>
+    #include <dt-bindings/interconnect/qcom,sm8150.h>
+    #include <dt-bindings/power/qcom,rpmhpd.h>
+
+    video-codec@aa00000 {
+        compatible = "qcom,sm8150-iris";
+        reg = <0x0aa00000 0x100000>;
+        interrupts = <GIC_SPI 174 IRQ_TYPE_LEVEL_HIGH>;
+
+        power-domains = <&videocc VENUS_GDSC>,
+                        <&videocc VCODEC0_GDSC>,
+                        <&videocc VCODEC1_GDSC>,
+                        <&rpmhpd SM8150_MX>,
+                        <&rpmhpd SM8150_MMCX>;
+        power-domain-names = "venus", "vcodec0", "vcodec1", "mx", "mmcx";
+
+        clocks = <&gcc GCC_VIDEO_AXIC_CLK>,
+                 <&gcc GCC_VIDEO_AXI0_CLK>,
+                 <&gcc GCC_VIDEO_AXI1_CLK>,
+                 <&videocc VIDEO_CC_MVSC_CORE_CLK>,
+                 <&videocc VIDEO_CC_IRIS_AHB_CLK>,
+                 <&videocc VIDEO_CC_MVS0_CORE_CLK>,
+                 <&videocc VIDEO_CC_MVS1_CORE_CLK>;
+        clock-names = "iface", "vcodec0_axi", "vcodec1_axi", "core",
+                      "ahb", "vcodec0_core", "vcodec1_core";
+
+        interconnects = <&gem_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_VENUS_CFG 0>,
+                        <&mmss_noc MASTER_VIDEO_P0 0 &mc_virt SLAVE_EBI_CH0 0>;
+        interconnect-names = "cpu-cfg", "video-mem";
+
+        iommus = <&apps_smmu 0x2300 0x60>;
+        memory-region = <&venus_mem>;
+
+        resets = <&gcc GCC_VIDEO_AXIC_CLK_BCR>,
+                 <&videocc VIDEO_CC_MVSC_CORE_CLK_BCR>,
+                 <&gcc GCC_VIDEO_AXI0_CLK_BCR>,
+                 <&gcc GCC_VIDEO_AXI1_CLK_BCR>;
+        reset-names = "bus", "core", "vcodec0", "vcodec1";
+
+        operating-points-v2 = <&iris_opp_table>;
+
+        iris_opp_table: opp-table {
+            compatible = "operating-points-v2";
+
+            opp-240000000 {
+                opp-hz = /bits/ 64 <240000000>;
+                required-opps = <&rpmhpd_opp_low_svs>,
+                                <&rpmhpd_opp_low_svs>;
+            };
+
+            opp-338000000 {
+                opp-hz = /bits/ 64 <338000000>;
+                required-opps = <&rpmhpd_opp_svs>,
+                                <&rpmhpd_opp_svs>;
+            };
+
+            opp-365000000 {
+                opp-hz = /bits/ 64 <365000000>;
+                required-opps = <&rpmhpd_opp_svs_l1>,
+                                <&rpmhpd_opp_svs_l1>;
+            };
+
+            opp-444000000 {
+                opp-hz = /bits/ 64 <444000000>;
+                required-opps = <&rpmhpd_opp_nom>,
+                                <&rpmhpd_opp_nom>;
+            };
+
+            opp-533000000 {
+                opp-hz = /bits/ 64 <533000000>;
+                required-opps = <&rpmhpd_opp_turbo>,
+                                <&rpmhpd_opp_turbo>;
+            };
+        };
+    };
