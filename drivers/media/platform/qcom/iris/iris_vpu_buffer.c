@@ -2056,6 +2056,10 @@ static int output_min_count(struct iris_inst *inst)
 
 	/* fw_min_count > 0 indicates reconfig event has already arrived */
 	if (inst->fw_min_count) {
+		/* HFI 4XX also requires the sequence minimum on OUTPUT2. */
+		if (inst->core->iris_firmware_data->hfi_4xx)
+			return inst->fw_min_count;
+
 		if (iris_split_mode_enabled(inst) &&
 		    (inst->codec == V4L2_PIX_FMT_VP9 ||
 		     inst->codec == V4L2_PIX_FMT_AV1))

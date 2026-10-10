@@ -112,6 +112,11 @@ int iris_process_streamon_output(struct iris_inst *inst)
 
 	/* Input internal buffer reconfiguration required in case of resolution change */
 	if (first_ipsc || drc_active) {
+		if (inst->core->iris_firmware_data->hfi_4xx) {
+			ret = iris_alloc_and_queue_persist_bufs(inst, BUF_PERSIST);
+			if (ret)
+				return ret;
+		}
 		ret = iris_alloc_and_queue_input_int_bufs(inst);
 		if (ret)
 			return ret;
