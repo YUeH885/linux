@@ -137,8 +137,8 @@ static int iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
 	}
 
 	if (!event.width || !event.height ||
-	    event.width > core->iris_platform_data->inst_caps->max_frame_width ||
-	    event.height > core->iris_platform_data->inst_caps->max_frame_height ||
+	    event.width > iris_get_inst_caps(inst)->max_frame_width ||
+	    event.height > iris_get_inst_caps(inst)->max_frame_height ||
 	    event.buf_count > VIDEO_MAX_FRAME)
 		return -EINVAL;
 
@@ -386,8 +386,15 @@ static void iris_hfi_gen1_sys_init_done(struct iris_core *core, void *packet)
 {
 	struct hfi_msg_sys_init_done_pkt *pkt = packet;
 
-	if (pkt->error_type != HFI_ERR_NONE)
+	int ret = 0;
+
+	if (pkt->error_type == HFI_ERR_NONE && core->iris_firmware_data->hfi_4xx)
+		ret = iris_hfi_gen1_parse_caps(core, pkt);
+	if (pkt->error_type != HFI_ERR_NONE || ret) {
+		dev_err(core->dev, "invalid system initialization response: %#x, %d\n",
+			pkt->error_type, ret);
 		core->state = IRIS_CORE_ERROR;
+	}
 
 	complete(&core->core_init_done);
 }

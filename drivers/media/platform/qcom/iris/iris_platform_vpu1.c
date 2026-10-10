@@ -85,6 +85,6 @@ const struct iris_platform_data sm8150_data = {
 	.tz_cp_config_data_size = ARRAY_SIZE(tz_cp_config_vpu1),
 	.num_vpp_pipe = 2,
 	.max_session_count = 16,
-	.max_core_mbpf = ((4096 * 2176) / 256) * 2,
+	.max_core_mbpf = 138240,
 	.max_core_mbps = 3916800,
 };

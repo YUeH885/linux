@@ -774,7 +774,7 @@ static u32 iris_vpu_dec_persist_size(struct iris_inst *inst)
 	else if (inst->codec == V4L2_PIX_FMT_VP9)
 		return hfi_buffer_persist_vp9d();
 	else if (inst->codec == V4L2_PIX_FMT_AV1) {
-		caps = inst->core->iris_platform_data->inst_caps;
+		caps = iris_get_inst_caps(inst);
 		if (inst->fw_caps[DRAP].value)
 			return hfi_buffer_persist_av1d(caps->max_frame_width,
 			caps->max_frame_height, 16);
