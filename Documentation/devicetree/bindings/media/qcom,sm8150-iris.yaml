@@ -73,7 +73,9 @@ properties:
     maxItems: 1
 
   memory-region:
-    maxItems: 1
+    items:
+      - description: Firmware memory
+      - description: Reserved low IOVA range for protected video buffers
 
   firmware-name:
     maxItems: 1
@@ -154,12 +156,7 @@ examples:
         interconnect-names = "cpu-cfg", "video-mem";
 
         iommus = <&apps_smmu 0x2300 0x60>;
-        memory-region = <&venus_mem>;
-
-        cp-nonpixel {
-            compatible = "qcom,sm8150-iris-cp-nonpixel";
-            iommus = <&apps_smmu 0x2304 0x60>;
-        };
+        memory-region = <&venus_mem>, <&video_iova_reserved>;
 
         resets = <&gcc GCC_VIDEO_AXIC_CLK_BCR>,
                  <&videocc VIDEO_CC_MVSC_CORE_CLK_BCR>,
@@ -168,6 +165,11 @@ examples:
         reset-names = "bus", "core", "vcodec0", "vcodec1";
 
         operating-points-v2 = <&iris_opp_table>;
+
+        cp-nonpixel {
+            compatible = "qcom,sm8150-iris-cp-nonpixel";
+            iommus = <&apps_smmu 0x2304 0x60>;
+        };
 
         iris_opp_table: opp-table {
             compatible = "operating-points-v2";
