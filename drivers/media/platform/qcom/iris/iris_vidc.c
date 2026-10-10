@@ -9,6 +9,7 @@
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
 
+#include "iris_common.h"
 #include "iris_ctrls.h"
 #include "iris_vidc.h"
 #include "iris_instance.h"
@@ -214,25 +215,6 @@ fail_v4l2_fh_deinit:
 	kfree(inst);
 
 	return ret;
-}
-
-static void iris_session_close(struct iris_inst *inst)
-{
-	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
-	bool wait_for_response = true;
-	int ret;
-
-	if (inst->state == IRIS_INST_DEINIT)
-		return;
-
-	reinit_completion(&inst->completion);
-
-	ret = hfi_ops->session_close(inst);
-	if (ret)
-		wait_for_response = false;
-
-	if (wait_for_response)
-		iris_wait_for_session_response(inst, false);
 }
 
 static void iris_check_num_queued_internal_buffers(struct iris_inst *inst, u32 plane)
