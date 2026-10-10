@@ -10,6 +10,7 @@
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <dt-bindings/firmware/qcom,scm.h>
 
 #include "arm-smmu.h"
 #include "arm-smmu-qcom.h"
@@ -430,6 +431,55 @@ static const struct of_device_id qcom_smmu_client_of_match[] __maybe_unused = {
 	{ }
 };
 
+static void *qcom_smmu_cp_nonpixel_alloc(void *cookie, size_t size, gfp_t gfp)
+{
+	struct arm_smmu_domain *domain = cookie;
+	struct qcom_scm_vmperm perms[] = {
+		{ QCOM_SCM_VMID_HLOS, QCOM_SCM_PERM_RW },
+		{ QCOM_SCM_VMID_CP_NON_PIXEL, QCOM_SCM_PERM_READ },
+	};
+	u64 owner = BIT_ULL(QCOM_SCM_VMID_HLOS);
+	void *pages;
+	int ret;
+
+	/* This context is mapped explicitly with GFP_KERNEL by the Iris driver. */
+	if (!gfpflags_allow_blocking(gfp))
+		return NULL;
+
+	pages = alloc_pages_exact(PAGE_ALIGN(size), gfp | __GFP_ZERO);
+	if (!pages)
+		return NULL;
+
+	ret = qcom_scm_assign_mem(virt_to_phys(pages), PAGE_ALIGN(size),
+				  &owner, perms, ARRAY_SIZE(perms));
+	if (ret) {
+		dev_err(domain->smmu->dev, "failed to share CP page table: %d\n", ret);
+		free_pages_exact(pages, PAGE_ALIGN(size));
+		return NULL;
+	}
+
+	return pages;
+}
+
+static void qcom_smmu_cp_nonpixel_free(void *cookie, void *pages, size_t size)
+{
+	struct arm_smmu_domain *domain = cookie;
+	struct qcom_scm_vmperm perm = {
+		QCOM_SCM_VMID_HLOS, QCOM_SCM_PERM_RWX,
+	};
+	u64 owner = BIT_ULL(QCOM_SCM_VMID_HLOS) | BIT_ULL(QCOM_SCM_VMID_CP_NON_PIXEL);
+	int ret;
+
+	ret = qcom_scm_assign_mem(virt_to_phys(pages), PAGE_ALIGN(size), &owner, &perm, 1);
+	if (ret) {
+		/* Protected pages must never return to the normal page allocator. */
+		dev_err(domain->smmu->dev, "failed to reclaim CP page table: %d\n", ret);
+		return;
+	}
+
+	free_pages_exact(pages, PAGE_ALIGN(size));
+}
+
 static int qcom_smmu_init_context(struct arm_smmu_domain *smmu_domain,
 		struct io_pgtable_cfg *pgtbl_cfg, struct device *dev)
 {
@@ -444,6 +494,15 @@ static int qcom_smmu_init_context(struct arm_smmu_domain *smmu_domain,
 
 	if (client_match)
 		qcom_smmu_set_actlr_dev(dev, smmu, cbndx, client_match);
+
+	if (of_device_is_compatible(dev->of_node, "qcom,sm8150-iris-cp-nonpixel")) {
+		if (!qcom_scm_is_available())
+			return -EPROBE_DEFER;
+
+		/* CP non-pixel transactions require CP-readable translation tables. */
+		pgtbl_cfg->alloc = qcom_smmu_cp_nonpixel_alloc;
+		pgtbl_cfg->free = qcom_smmu_cp_nonpixel_free;
+	}
 
 	return 0;
 }
