@@ -15,6 +15,13 @@
 
 static struct platform_inst_fw_cap inst_fw_cap_sm8250_dec[] = {
 	{
+		.cap_id = BIT_DEPTH,
+		.min = BIT_DEPTH_8,
+		.max = BIT_DEPTH_10,
+		.value = BIT_DEPTH_8,
+		.hfi_id = HFI_PROPERTY_PARAM_VDEC_PIXEL_BITDEPTH,
+	},
+	{
 		.cap_id = PIPE,
 		/* .max, .min and .value are set via platform data */
 		.step_or_mask = 1,
@@ -466,8 +473,10 @@ static const u32 sm8150_venc_input_config_params[] = {
 };
 
 static const u32 sm8150_vdec_output_config_params[] = {
-	/* HFI 4XX fixes raw formats and multistream selection before loading resources. */
+	/* HFI 4XX requires updating raw format and constraints on capture start/DRC. */
 	HFI_PROPERTY_PARAM_FRAME_SIZE,
+	HFI_PROPERTY_PARAM_UNCOMPRESSED_FORMAT_SELECT,
+	HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO,
 	HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL,
 	HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL,
 };

@@ -566,7 +566,7 @@ static int iris_create_internal_buffer(struct iris_inst *inst,
 	buffer->kvaddr = dma_alloc_attrs(core->dev, buffer->buffer_size,
 					 &buffer->device_addr, GFP_KERNEL, buffer->dma_attrs);
 	if (!buffer->kvaddr) {
-		dev_err(core->dev, "failed to allocate internal buffer: type=%u size=%u index=%u\n",
+		dev_err(core->dev, "failed to allocate internal buffer: type=%u size=%zu index=%u\n",
 			buffer_type, buffer->buffer_size, index);
 		kfree(buffer);
 		return -ENOMEM;
@@ -773,11 +773,31 @@ int iris_alloc_and_queue_persist_bufs(struct iris_inst *inst, enum iris_buffer_t
 {
 	struct iris_buffers *buffers = &inst->buffers[buffer_type];
 	struct iris_buffer *buffer, *next;
+	u32 count = 0, i;
+	bool reusable = true;
 	int ret;
-	u32 i;
 
-	if (!list_empty(&buffers->list))
-		return 0;
+	if (!list_empty(&buffers->list)) {
+		/* Other HFI generations release internal buffers asynchronously. */
+		if (!inst->core->iris_firmware_data->hfi_4xx)
+			return 0;
+
+		iris_fill_internal_buf_info(inst, buffer_type);
+		list_for_each_entry(buffer, &buffers->list, list) {
+			reusable &= buffer->buffer_size >= buffers->size;
+			count++;
+		}
+
+		if (reusable && count >= buffers->min_count)
+			return 0;
+
+		ret = iris_release_internal_buffers(inst, buffer_type);
+		if (ret)
+			return ret;
+
+		list_for_each_entry_safe(buffer, next, &buffers->list, list)
+			iris_destroy_internal_buffer(inst, buffer);
+	}
 
 	iris_fill_internal_buf_info(inst, buffer_type);
 
