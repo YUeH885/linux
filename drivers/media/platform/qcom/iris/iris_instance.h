@@ -127,4 +127,27 @@ struct iris_inst {
 	u32				hfi_layer_count;
 };
 
+static inline struct platform_inst_caps *iris_get_codec_caps(struct iris_inst *inst, u32 codec)
+{
+	u32 domain = inst->domain;
+	unsigned int i;
+
+	if (codec == V4L2_PIX_FMT_NV12 || codec == V4L2_PIX_FMT_P010 ||
+	    codec == V4L2_PIX_FMT_QC08C || codec == V4L2_PIX_FMT_QC10C)
+		codec = inst->codec;
+
+	for (i = 0; i < ARRAY_SIZE(inst->core->codec_caps); i++) {
+		struct iris_codec_caps *caps = &inst->core->codec_caps[i];
+
+		if (caps->codec == codec && caps->domain == domain)
+			return &caps->limits;
+	}
+	return inst->core->iris_platform_data->inst_caps;
+}
+
+static inline struct platform_inst_caps *iris_get_inst_caps(struct iris_inst *inst)
+{
+	return iris_get_codec_caps(inst, inst->codec);
+}
+
 #endif

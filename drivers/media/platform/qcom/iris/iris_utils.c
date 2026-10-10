@@ -125,12 +125,20 @@ int iris_check_core_mbps(struct iris_inst *inst)
 {
 	struct iris_core *core = inst->core;
 	struct iris_inst *instance;
-	u32 total_mbps = 0, fps = 0;
+	u64 total_mbps = 0, mbps;
+	u32 fps;
 
 	mutex_lock(&core->lock);
 	list_for_each_entry(instance, &core->instances, list) {
+		struct platform_inst_caps *caps = iris_get_inst_caps(instance);
+
 		fps = max(instance->frame_rate, instance->operating_rate);
-		total_mbps += iris_get_mbpf(instance) * fps;
+		mbps = (u64)iris_get_mbpf(instance) * fps;
+		if (caps->max_mbps && mbps > caps->max_mbps) {
+			mutex_unlock(&core->lock);
+			return -ENOMEM;
+		}
+		total_mbps += mbps;
 	}
 	mutex_unlock(&core->lock);
 

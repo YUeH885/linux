@@ -393,7 +393,7 @@ static u32 iris_yuv_buffer_size_qc10c(struct iris_inst *inst)
 
 static u32 iris_dec_bitstream_buffer_size(struct iris_inst *inst)
 {
-	struct platform_inst_caps *caps = inst->core->iris_platform_data->inst_caps;
+	struct platform_inst_caps *caps = iris_get_inst_caps(inst);
 	u32 base_res_mbs = NUM_MBS_4K;
 	u32 frame_size, num_mbs;
 	u32 div_factor = 2;

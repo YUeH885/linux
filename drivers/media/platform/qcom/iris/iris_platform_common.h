@@ -97,15 +97,29 @@ struct tz_cp_config {
 struct platform_inst_caps {
 	u32 min_frame_width;
 	u32 max_frame_width;
+	u32 frame_width_step;
 	u32 min_frame_height;
 	u32 max_frame_height;
+	u32 frame_height_step;
 	u32 max_mbpf;
+	u32 max_mbps;
+	u32 max_b_frames;
 	u32 mb_cycles_vsp;
 	u32 mb_cycles_vpp;
 	u32 mb_cycles_fw;
 	u32 mb_cycles_fw_vpp;
 	u32 max_frame_rate;
 	u32 max_operating_rate;
+};
+
+#define IRIS_CODEC_CAP_COUNT 5
+
+struct iris_codec_caps {
+	u32 codec;
+	u32 hfi_codec;
+	u32 domain;
+	u32 profiles;
+	struct platform_inst_caps limits;
 };
 
 enum platform_inst_fw_cap_type {

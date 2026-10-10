@@ -78,11 +78,13 @@ struct iris_cp_context;
  * @power_enabled: hardware resources are enabled, protected by the core lock
  * @sys_error_handler: a delayed work for handling system fatal error
  * @instances: a list_head of all instances
+ * @codec_caps: per-codec firmware limits for HFI 4XX
  * @inst_fw_caps_dec: an array of supported instance capabilities by decoder
  * @inst_fw_caps_enc: an array of supported instance capabilities by encoder
  */
 
 struct iris_core {
+	struct iris_codec_caps codec_caps[IRIS_CODEC_CAP_COUNT];
 	struct device				*dev;
 	void __iomem				*reg_base;
 	int					irq;

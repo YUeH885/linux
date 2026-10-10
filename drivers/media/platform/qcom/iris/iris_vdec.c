@@ -10,6 +10,7 @@
 #include "iris_common.h"
 #include "iris_ctrls.h"
 #include "iris_instance.h"
+#include "iris_hfi_gen1.h"
 #include "iris_power.h"
 #include "iris_vdec.h"
 #include "iris_vpu_buffer.h"
@@ -58,6 +59,8 @@ int iris_vdec_inst_init(struct iris_inst *inst)
 
 	memcpy(&inst->fw_caps[0], &core->inst_fw_caps_dec[0],
 	       INST_FW_CAP_MAX * sizeof(struct platform_inst_fw_cap));
+
+	iris_hfi_gen1_init_inst_caps(inst);
 
 	return iris_ctrls_init(inst);
 }

@@ -19,7 +19,7 @@ static int iris_check_inst_mbpf(struct iris_inst *inst)
 	struct platform_inst_caps *caps;
 	u32 mbpf, max_mbpf;
 
-	caps = inst->core->iris_platform_data->inst_caps;
+	caps = iris_get_inst_caps(inst);
 	max_mbpf = caps->max_mbpf;
 	mbpf = iris_get_mbpf(inst);
 	if (mbpf > max_mbpf)
@@ -33,7 +33,7 @@ static int iris_check_resolution_supported(struct iris_inst *inst)
 	u32 width, height, min_width, min_height, max_width, max_height;
 	struct platform_inst_caps *caps;
 
-	caps = inst->core->iris_platform_data->inst_caps;
+	caps = iris_get_inst_caps(inst);
 	width = inst->fmt_src->fmt.pix_mp.width;
 	height = inst->fmt_src->fmt.pix_mp.height;
 

@@ -383,15 +383,17 @@ static int iris_enum_framesizes(struct file *filp, void *fh,
 	if (ret)
 		return ret;
 
-	caps = inst->core->iris_platform_data->inst_caps;
+	caps = iris_get_codec_caps(inst, fsize->pixel_format);
 
 	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
 	fsize->stepwise.min_width = caps->min_frame_width;
-	fsize->stepwise.max_width = caps->max_frame_width;
-	fsize->stepwise.step_width = STEP_WIDTH;
+	fsize->stepwise.max_width = inst->core->iris_firmware_data->hfi_4xx &&
+		fsize->pixel_format == V4L2_PIX_FMT_P010 ?
+		min(caps->max_frame_width, 4096U) : caps->max_frame_width;
+	fsize->stepwise.step_width = caps->frame_width_step ?: STEP_WIDTH;
 	fsize->stepwise.min_height = caps->min_frame_height;
 	fsize->stepwise.max_height = caps->max_frame_height;
-	fsize->stepwise.step_height = STEP_HEIGHT;
+	fsize->stepwise.step_height = caps->frame_height_step ?: STEP_HEIGHT;
 
 	return ret;
 }
@@ -419,20 +421,26 @@ static int iris_enum_frameintervals(struct file *filp, void *fh,
 	if (!fival->width || !fival->height)
 		return -EINVAL;
 
-	caps = inst->core->iris_platform_data->inst_caps;
+	caps = iris_get_codec_caps(inst, fival->pixel_format);
 	if (fival->width > caps->max_frame_width ||
 	    fival->width < caps->min_frame_width ||
 	    fival->height > caps->max_frame_height ||
 	    fival->height < caps->min_frame_height)
 		return -EINVAL;
 
+	if (core->iris_firmware_data->hfi_4xx &&
+	    fival->pixel_format == V4L2_PIX_FMT_P010 && fival->width > 4096)
+		return -EINVAL;
+
 	mbpf = NUM_MBS_PER_FRAME(fival->height, fival->width);
-	fps = DIV_ROUND_UP(core->iris_platform_data->max_core_mbps, mbpf);
+	if (mbpf > caps->max_mbpf)
+		return -EINVAL;
+	fps = (caps->max_mbps ? caps->max_mbps : core->iris_platform_data->max_core_mbps) / mbpf;
 
 	fival->type = V4L2_FRMIVAL_TYPE_STEPWISE;
 	fival->stepwise.min.numerator = 1;
 	fival->stepwise.min.denominator =
-			min_t(u32, fps, MAXIMUM_FPS);
+			min_t(u32, fps, caps->max_frame_rate);
 	fival->stepwise.max.numerator = 1;
 	fival->stepwise.max.denominator = 1;
 	fival->stepwise.step.numerator = 1;
