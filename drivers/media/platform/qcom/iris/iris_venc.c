@@ -90,12 +90,16 @@ static const u32 iris_venc_formats_cap[] = {
 static const u32 iris_venc_formats_out[] = {
 	[IRIS_FMT_NV12] = V4L2_PIX_FMT_NV12,
 	[IRIS_FMT_QC08C] = V4L2_PIX_FMT_QC08C,
+	[IRIS_FMT_TP10] = V4L2_PIX_FMT_P010,
 };
 
 static bool check_format(struct iris_inst *inst, u32 pixfmt, u32 type)
 {
 	unsigned int size, i;
 	const u32 *fmt;
+
+	if (pixfmt == V4L2_PIX_FMT_P010 && !inst->core->iris_firmware_data->hfi_4xx)
+		return false;
 
 	switch (type) {
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
@@ -137,6 +141,9 @@ static u32 find_format_by_index(struct iris_inst *inst, u32 index, u32 type)
 	}
 
 	if (index >= size)
+		return 0;
+
+	if (fmt[index] == V4L2_PIX_FMT_P010 && !inst->core->iris_firmware_data->hfi_4xx)
 		return 0;
 
 	return fmt[index];
@@ -267,7 +274,9 @@ static int iris_venc_s_fmt_input(struct iris_inst *inst, struct v4l2_format *f)
 	fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 32);
 	fmt->fmt.pix_mp.num_planes = 1;
 	fmt->fmt.pix_mp.pixelformat = f->fmt.pix_mp.pixelformat;
-	fmt->fmt.pix_mp.plane_fmt[0].bytesperline = ALIGN(f->fmt.pix_mp.width, 128);
+	fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
+		f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_P010 ?
+		ALIGN(f->fmt.pix_mp.width * 2, 256) : ALIGN(f->fmt.pix_mp.width, 128);
 	fmt->fmt.pix_mp.plane_fmt[0].sizeimage = iris_get_buffer_size(inst, BUF_INPUT);
 
 	fmt->fmt.pix_mp.colorspace = f->fmt.pix_mp.colorspace;
@@ -466,6 +475,15 @@ int iris_venc_g_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
 static int iris_venc_prepare_input(struct iris_inst *inst)
 {
 	int ret;
+
+	if (inst->core->iris_firmware_data->hfi_4xx) {
+		bool p010 = inst->fmt_src->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_P010;
+		bool main10 = inst->codec == V4L2_PIX_FMT_HEVC &&
+			inst->fw_caps[PROFILE_HEVC].value == V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10;
+
+		if (p010 != main10 || inst->fmt_src->fmt.pix_mp.plane_fmt[0].bytesperline > 8192)
+			return -EINVAL;
+	}
 
 	ret = iris_set_properties(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
 	if (ret)
