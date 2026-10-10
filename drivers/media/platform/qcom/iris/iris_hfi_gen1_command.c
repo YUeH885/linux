@@ -560,7 +560,10 @@ exit:
 static int iris_hfi_gen1_session_drain(struct iris_inst *inst, u32 plane)
 {
 	if (inst->domain == DECODER) {
+		struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
 		struct hfi_session_empty_buffer_compressed_pkt ip_pkt = {0};
+		unsigned long completed, timeout = msecs_to_jiffies(HW_RESPONSE_TIMEOUT_VALUE);
+		int ret;
 
 		ip_pkt.shdr.hdr.size = sizeof(struct hfi_session_empty_buffer_compressed_pkt);
 		ip_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
@@ -568,7 +571,24 @@ static int iris_hfi_gen1_session_drain(struct iris_inst *inst, u32 plane)
 		ip_pkt.flags = HFI_BUFFERFLAG_EOS;
 		ip_pkt.packet_buffer = 0xdeadb000;
 
-		return iris_hfi_queue_cmd_write(inst->core, &ip_pkt, ip_pkt.shdr.hdr.size);
+		ret = iris_hfi_queue_cmd_write(inst->core, &ip_pkt, ip_pkt.shdr.hdr.size);
+		if (ret || !inst->core->iris_firmware_data->hfi_4xx || inst->fw_min_count)
+			return ret;
+
+		/* EOS can remain pending if the initial header cannot be parsed. */
+		mutex_unlock(&inst->lock);
+		completed = wait_for_completion_timeout(&inst_hfi->initial_src_change, timeout);
+		mutex_lock(&inst->lock);
+		if (inst->state == IRIS_INST_ERROR)
+			return -EIO;
+		if (!completed) {
+			dev_err(inst->core->dev, "drain timed out waiting for the initial sequence header\n");
+			iris_inst_change_state(inst, IRIS_INST_ERROR);
+			iris_vb2_queue_error(inst);
+			return -ETIMEDOUT;
+		}
+
+		return 0;
 	}
 
 	if (inst->domain == ENCODER) {
@@ -1337,6 +1357,7 @@ static struct iris_inst *iris_hfi_gen1_get_instance(void)
 		return NULL;
 
 	out->inst.hfi_session_ops = &iris_hfi_gen1_session_ops;
+	init_completion(&out->initial_src_change);
 
 	return &out->inst;
 }

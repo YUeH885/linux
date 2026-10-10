@@ -557,9 +557,13 @@ int iris_vdec_stop_cmd(struct iris_inst *inst)
 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
 	int ret;
 
-	ret = hfi_ops->session_drain(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	ret = iris_inst_change_sub_state(inst, 0, IRIS_INST_SUB_DRAIN);
 	if (ret)
 		return ret;
 
-	return iris_inst_change_sub_state(inst, 0, IRIS_INST_SUB_DRAIN);
+	ret = hfi_ops->session_drain(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	if (ret)
+		iris_inst_change_sub_state(inst, IRIS_INST_SUB_DRAIN, 0);
+
+	return ret;
 }
