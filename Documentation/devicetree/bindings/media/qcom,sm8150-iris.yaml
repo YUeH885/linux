@@ -83,6 +83,9 @@ properties:
   opp-table:
     type: object
 
+  cp-nonpixel:
+    $ref: qcom,sm8150-iris-cp-nonpixel.yaml#
+
   resets:
     items:
       - description: Video bus reset
@@ -112,6 +115,7 @@ required:
   - operating-points-v2
   - resets
   - reset-names
+  - cp-nonpixel
 
 additionalProperties: false
 
@@ -151,6 +155,11 @@ examples:
 
         iommus = <&apps_smmu 0x2300 0x60>;
         memory-region = <&venus_mem>;
+
+        cp-nonpixel {
+            compatible = "qcom,sm8150-iris-cp-nonpixel";
+            iommus = <&apps_smmu 0x2304 0x60>;
+        };
 
         resets = <&gcc GCC_VIDEO_AXIC_CLK_BCR>,
                  <&videocc VIDEO_CC_MVSC_CORE_CLK_BCR>,
