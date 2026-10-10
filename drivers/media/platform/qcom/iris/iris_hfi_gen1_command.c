@@ -1006,15 +1006,16 @@ static int iris_hfi_gen1_set_format_constraints(struct iris_inst *inst, u32 plan
 	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO;
 	struct hfi_uncompressed_plane_actual_constraints_info pconstraint;
 	u32 stride_multiples = 128;
+	u32 pixelformat = inst->domain == DECODER ? inst->fmt_dst->fmt.pix_mp.pixelformat :
+		inst->fmt_src->fmt.pix_mp.pixelformat;
 
-	if (inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC08C ||
-	    inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC10C)
+	if (pixelformat == V4L2_PIX_FMT_QC08C || pixelformat == V4L2_PIX_FMT_QC10C)
 		return 0;
 
-	if (inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_P010)
+	if (pixelformat == V4L2_PIX_FMT_P010)
 		stride_multiples = 256;
 
-	pconstraint.buffer_type = HFI_BUFFER_OUTPUT2;
+	pconstraint.buffer_type = inst->domain == DECODER ? HFI_BUFFER_OUTPUT2 : HFI_BUFFER_INPUT;
 	pconstraint.num_planes = 2;
 	pconstraint.plane_format[0].stride_multiples = stride_multiples;
 	pconstraint.plane_format[0].max_stride = 8192;
@@ -1209,11 +1210,11 @@ static int iris_hfi_gen1_set_stride(struct iris_inst *inst, u32 plane)
 	plane_actual_info.buffer_type = HFI_BUFFER_INPUT;
 	plane_actual_info.num_planes = 2;
 	plane_actual_info.plane_format[0].actual_stride =
-		ALIGN(inst->fmt_src->fmt.pix_mp.width, 128);
+		inst->fmt_src->fmt.pix_mp.plane_fmt[0].bytesperline;
 	plane_actual_info.plane_format[0].actual_plane_buffer_height =
 		ALIGN(inst->fmt_src->fmt.pix_mp.height, 32);
 	plane_actual_info.plane_format[1].actual_stride =
-		ALIGN(inst->fmt_src->fmt.pix_mp.width, 128);
+		inst->fmt_src->fmt.pix_mp.plane_fmt[0].bytesperline;
 	plane_actual_info.plane_format[1].actual_plane_buffer_height =
 		(ALIGN(inst->fmt_src->fmt.pix_mp.height, 32)) / 2;
 
@@ -1262,6 +1263,8 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
 	};
 
 	static const struct iris_hfi_prop_type_handle venc_prop_type_handle_inp_arr[] = {
+		{HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO,
+			iris_hfi_gen1_set_format_constraints},
 		{HFI_PROPERTY_CONFIG_FRAME_RATE,
 			iris_hfi_gen1_set_frame_rate},
 		{HFI_PROPERTY_PARAM_VENC_VUI_TIMING_INFO,
