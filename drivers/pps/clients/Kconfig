@@ -43,4 +43,15 @@ config PPS_CLIENT_IRQ
 	  Capture PPS events from an interrupt controller. This supports
 	  signals routed directly to an interrupt without a GPIO consumer.
 	  Select a single rising or falling edge in the device tree.
+	  Configure the expected assert period and allowed phase jitter.
 	  The driver is called pps-irq when built as a module.
+
+config PPS_CLIENT_IRQ_KUNIT_TEST
+	tristate "PPS interrupt phase qualification tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Test phase acquisition, comparator wraparound pulses, missing
+	  pulses, jitter limits and recovery after an output interruption.
+	  The tests run without PPS hardware or an interrupt controller.
+	  This suite is called pps-irq-phase.
