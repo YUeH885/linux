@@ -35,3 +35,12 @@ config PPS_CLIENT_GPIO
 	  GPIO. To be useful you must also register a platform device
 	  specifying the GPIO pin and other options, usually in your board
 	  setup.
+
+config PPS_CLIENT_IRQ
+	tristate "PPS client using an interrupt"
+	depends on OF
+	help
+	  Capture PPS events from an interrupt controller. This supports
+	  signals routed directly to an interrupt without a GPIO consumer.
+	  Select a single rising or falling edge in the device tree.
+	  The driver is called pps-irq when built as a module.
