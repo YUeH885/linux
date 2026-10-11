@@ -30,6 +30,14 @@
 		serial0 = &uart13;
 	};
 
+	pps-nav {
+		compatible = "pps-irq";
+		interrupt-parent = <&pdc>;
+		interrupts = <60 IRQ_TYPE_EDGE_RISING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&nav_pps_default>;
+	};
+
 	chosen {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -622,6 +630,11 @@
 	 */
 	gpio-reserved-ranges = <93 3>, <97 16>, <114 5>, <120 3>, <124 1>,
 			       <136 7>, <144 4>, <149 3>, <153 22>;
+
+	nav_pps_default: nav-pps-default-state {
+		pins = "gpio60";
+		function = "nav_pps";
+	};
 
 	sbu_mux_default: sbu-mux-default-state {
 		sbu-switch-pins {
