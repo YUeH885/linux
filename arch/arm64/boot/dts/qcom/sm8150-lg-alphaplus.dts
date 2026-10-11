@@ -32,6 +32,8 @@
 
 	pps-nav {
 		compatible = "pps-irq";
+		assert-period-ns = <1000000000>;
+		max-jitter-ns = <2000000>;
 		interrupt-parent = <&pdc>;
 		interrupts = <60 IRQ_TYPE_EDGE_RISING>;
 		pinctrl-names = "default";
