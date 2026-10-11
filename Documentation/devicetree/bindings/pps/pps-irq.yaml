@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pps/pps-irq.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: PPS Signal via an Interrupt Controller
+
+maintainers:
+  - yuzu <yuzu23234@gmail.com>
+
+description:
+  A PPS signal routed to an interrupt controller. The selected interrupt edge
+  is reported as a PPS assert event. Pin multiplexing is configured separately
+  from interrupt delivery.
+  Assert events are qualified against the configured period and jitter limit.
+  Two consecutive edges matching the period and jitter limit establish the
+  assert phase. Later edges must match that phase, including after missing
+  pulses. A gap longer than two periods plus the jitter limit restarts phase
+  acquisition. An out-of-phase edge arriving more than two periods plus the
+  jitter limit after the last accepted assert also restarts acquisition.
+  Acquisition qualifies the period; absolute phase requires a time reference.
+
+properties:
+  compatible:
+    const: pps-irq
+
+  interrupts:
+    maxItems: 1
+
+  assert-period-ns:
+    minimum: 1
+    description: Expected interval between assert edges, in nanoseconds.
+
+  max-jitter-ns:
+    minimum: 1
+    description:
+      Maximum deviation from the established assert phase, in nanoseconds.
+      Must be less than half the assert period.
+
+required:
+  - compatible
+  - interrupts
+  - assert-period-ns
+  - max-jitter-ns
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    pps {
+        compatible = "pps-irq";
+        interrupt-parent = <&pdc>;
+        interrupts = <60 IRQ_TYPE_EDGE_RISING>;
+        assert-period-ns = <1000000000>;
+        max-jitter-ns = <2000000>;
+    };
