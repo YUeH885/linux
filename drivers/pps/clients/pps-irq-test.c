@@ -149,6 +149,45 @@ static void pps_irq_duplicate_edge(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, pps_irq_filter_assert(&filter, now));
 }
 
+static void pps_irq_phase_change_reacquire(struct kunit *test)
+{
+	struct pps_irq_filter filter = pps_irq_test_filter();
+	u64 now = 10ULL * PERIOD_NS;
+
+	KUNIT_ASSERT_FALSE(test, pps_irq_filter_assert(&filter, now));
+	now += PERIOD_NS;
+	KUNIT_ASSERT_TRUE(test, pps_irq_filter_assert(&filter, now));
+	now += 2ULL * PERIOD_NS - WRAP_NS;
+	KUNIT_EXPECT_FALSE(test, pps_irq_filter_assert(&filter, now));
+	now += PERIOD_NS;
+	KUNIT_EXPECT_FALSE(test, pps_irq_filter_assert(&filter, now));
+	now += PERIOD_NS;
+	KUNIT_EXPECT_TRUE(test, pps_irq_filter_assert(&filter, now));
+	now += PERIOD_NS;
+	KUNIT_EXPECT_TRUE(test, pps_irq_filter_assert(&filter, now));
+}
+
+static void pps_irq_rejected_traffic_reacquire(struct kunit *test)
+{
+	struct pps_irq_filter filter = pps_irq_test_filter();
+	u64 now = 10ULL * PERIOD_NS;
+	int i;
+
+	KUNIT_ASSERT_FALSE(test, pps_irq_filter_assert(&filter, now));
+	now += PERIOD_NS;
+	KUNIT_ASSERT_TRUE(test, pps_irq_filter_assert(&filter, now));
+	for (i = 0; i < 4; i++) {
+		now += WRAP_NS;
+		KUNIT_EXPECT_FALSE(test, pps_irq_filter_assert(&filter, now));
+	}
+	now = 15ULL * PERIOD_NS;
+	KUNIT_EXPECT_FALSE(test, pps_irq_filter_assert(&filter, now));
+	now += PERIOD_NS;
+	KUNIT_EXPECT_TRUE(test, pps_irq_filter_assert(&filter, now));
+	now += PERIOD_NS;
+	KUNIT_EXPECT_TRUE(test, pps_irq_filter_assert(&filter, now));
+}
+
 static void pps_irq_resume_reacquire(struct kunit *test)
 {
 	struct pps_irq_filter filter = pps_irq_test_filter();
@@ -175,6 +214,8 @@ static struct kunit_case pps_irq_cases[] = {
 	KUNIT_CASE(pps_irq_missing_pulse),
 	KUNIT_CASE(pps_irq_outage_reacquire),
 	KUNIT_CASE(pps_irq_duplicate_edge),
+	KUNIT_CASE(pps_irq_phase_change_reacquire),
+	KUNIT_CASE(pps_irq_rejected_traffic_reacquire),
 	KUNIT_CASE(pps_irq_resume_reacquire),
 	{}
 };
