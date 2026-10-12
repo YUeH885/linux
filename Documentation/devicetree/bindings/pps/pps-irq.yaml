@@ -17,7 +17,9 @@ description:
   Two consecutive edges matching the period and jitter limit establish the
   assert phase. Later edges must match that phase, including after missing
   pulses. A gap longer than two periods plus the jitter limit restarts phase
-  acquisition.
+  acquisition. An out-of-phase edge arriving more than two periods plus the
+  jitter limit after the last accepted assert also restarts acquisition.
+  Acquisition qualifies the period; absolute phase requires a time reference.
 
 properties:
   compatible:
