@@ -47,8 +47,13 @@ static inline bool pps_irq_filter_assert(struct pps_irq_filter *filter, u64 now)
 		/* Missing pulses preserve the phase of the last valid assert. */
 		div_u64_rem(interval, filter->period_ns, &phase);
 		if (phase > filter->max_jitter_ns &&
-		    filter->period_ns - phase > filter->max_jitter_ns)
+		    filter->period_ns - phase > filter->max_jitter_ns) {
+			/* Rejected traffic must not keep an expired phase locked. */
+			if (interval > 2ULL * filter->period_ns +
+			    filter->max_jitter_ns)
+				filter->state = PPS_IRQ_ACQUIRING;
 			return false;
+		}
 	}
 
 	filter->last_assert = now;

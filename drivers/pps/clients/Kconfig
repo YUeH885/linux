@@ -52,6 +52,7 @@ config PPS_CLIENT_IRQ_KUNIT_TEST
 	default KUNIT_ALL_TESTS
 	help
 	  Test phase acquisition, comparator wraparound pulses, missing
-	  pulses, jitter limits and recovery after an output interruption.
+	  pulses, jitter limits and recovery after an output interruption
+	  or a phase change with continuous rejected edges.
 	  The tests run without PPS hardware or an interrupt controller.
 	  This suite is called pps-irq-phase.
