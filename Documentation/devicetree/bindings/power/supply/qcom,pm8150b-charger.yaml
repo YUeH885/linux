@@ -13,10 +13,16 @@ description: |
   PM8150B integrates an SMB5 charger and a Gen4 fuel gauge. The driver keeps the
   battery temperature thresholds programmed by the bootloader and exposes
   telemetry through the standard battery and usb power supplies.
+  The AlphaPlus variant uses XO and skin thermistors and the display backlight
+  state to derate the total charging current with board calibration data.
 
 properties:
   compatible:
-    const: qcom,pm8150b-charger
+    oneOf:
+      - const: qcom,pm8150b-charger
+      - items:
+          - const: lg,alphaplus-charger
+          - const: qcom,pm8150b-charger
 
   reg:
     maxItems: 1
@@ -39,14 +45,26 @@ properties:
       - const: mem-attn
 
   io-channels:
+    minItems: 2
     items:
       - description: USB input current sense
       - description: MID_CHG voltage on the USB input path
+      - description: XO thermistor for the AlphaPlus board-temperature model
+      - description: Skin thermistor for the AlphaPlus board-temperature model
 
   io-channel-names:
+    minItems: 2
     items:
       - const: usbin_i
       - const: mid_chg
+      - const: xo_therm
+      - const: skin_therm
+
+  backlight:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Display backlight used to select the display-on offset in the
+      AlphaPlus wired-charging temperature model.
 
   monitored-battery: true
 
@@ -122,6 +140,26 @@ required:
 
 allOf:
   - $ref: power-supply.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: lg,alphaplus-charger
+    then:
+      properties:
+        io-channels:
+          minItems: 4
+        io-channel-names:
+          minItems: 4
+      required:
+        - backlight
+    else:
+      properties:
+        io-channels:
+          maxItems: 2
+        io-channel-names:
+          maxItems: 2
+        backlight: false
 
 additionalProperties: false
 
