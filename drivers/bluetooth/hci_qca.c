@@ -620,6 +620,7 @@ static int qca_open(struct hci_uart *hu)
 
 	if (hu->serdev) {
 		qcadev = serdev_device_get_drvdata(hu->serdev);
+		set_bit(QCA_BT_OFF, &qca->flags);
 
 		switch (qcadev->btsoc_type) {
 		case QCA_WCN3950:
@@ -1239,7 +1240,8 @@ static int qca_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
 	 * received we store dump into a file before closing hci. This
 	 * dump will help in triaging the issues.
 	 */
-	if (skb->data[0] == HCI_EV_VENDOR &&
+	if (skb->len >= HCI_EVENT_HDR_SIZE + sizeof(__be16) &&
+	    skb->data[0] == HCI_EV_VENDOR &&
 	    get_unaligned_be16(skb->data + 2) == QCA_SSR_DUMP_HANDLE)
 		return qca_controller_memdump_event(hdev, skb);
 
@@ -1283,6 +1285,10 @@ static int qca_recv(struct hci_uart *hu, const void *data, int count)
 
 	if (!test_bit(HCI_UART_REGISTERED, &hu->flags))
 		return -EUNATCH;
+
+	/* Power pulses can produce bytes before the H4 transport is ready. */
+	if (test_bit(QCA_BT_OFF, &qca->flags))
+		return count;
 
 	qca->rx_skb = h4_recv_buf(hu, qca->rx_skb, data, count,
 				  qca_recv_pkts, ARRAY_SIZE(qca_recv_pkts));
@@ -1747,6 +1753,26 @@ static bool qca_wakeup(struct hci_dev *hdev)
 	return wakeup;
 }
 
+static void qca_port_close(struct hci_uart *hu)
+{
+	if (test_and_clear_bit(HCI_UART_PROTO_READY, &hu->flags))
+		serdev_device_close(hu->serdev);
+}
+
+static int qca_port_open(struct hci_uart *hu)
+{
+	int ret;
+
+	ret = serdev_device_open(hu->serdev);
+	if (ret) {
+		bt_dev_err(hu->hdev, "failed to open port");
+		return ret;
+	}
+
+	set_bit(HCI_UART_PROTO_READY, &hu->flags);
+	return 0;
+}
+
 static int qca_port_reopen(struct hci_uart *hu)
 {
 	int ret;
@@ -1756,12 +1782,10 @@ static int qca_port_reopen(struct hci_uart *hu)
 	 * Without this, we will have RTS and CTS synchronization
 	 * issues.
 	 */
-	serdev_device_close(hu->serdev);
-	ret = serdev_device_open(hu->serdev);
-	if (ret) {
-		bt_dev_err(hu->hdev, "failed to open port");
+	qca_port_close(hu);
+	ret = qca_port_open(hu);
+	if (ret)
 		return ret;
-	}
 
 	hci_uart_set_flow_control(hu, false);
 
@@ -1781,16 +1805,14 @@ static int qca_regulator_init(struct hci_uart *hu)
 	qcadev = serdev_device_get_drvdata(hu->serdev);
 
 	if (!qcadev->bt_power->vregs_on) {
-		serdev_device_close(hu->serdev);
+		qca_port_close(hu);
 		ret = qca_regulator_enable(qcadev);
 		if (ret)
 			return ret;
 
-		ret = serdev_device_open(hu->serdev);
-		if (ret) {
-			bt_dev_err(hu->hdev, "failed to open port");
+		ret = qca_port_open(hu);
+		if (ret)
 			return ret;
-		}
 	}
 
 	switch (soc_type) {
@@ -1878,7 +1900,8 @@ static int qca_power_on(struct hci_dev *hdev)
 		}
 	}
 
-	clear_bit(QCA_BT_OFF, &qca->flags);
+	if (!ret)
+		clear_bit(QCA_BT_OFF, &qca->flags);
 	return ret;
 }
 
@@ -2062,12 +2085,9 @@ out:
 		if (retries < MAX_INIT_RETRIES) {
 			bt_dev_warn(hdev, "Retry BT power ON:%d", retries);
 			if (hu->serdev) {
-				serdev_device_close(hu->serdev);
-				ret = serdev_device_open(hu->serdev);
-				if (ret) {
-					bt_dev_err(hdev, "failed to open port");
+				ret = qca_port_reopen(hu);
+				if (ret)
 					return ret;
-				}
 			}
 			retries++;
 			goto retry;
@@ -2236,6 +2256,8 @@ static void qca_power_off(struct hci_uart *hu)
 	 */
 	spin_lock_irqsave(&qca->hci_ibs_lock, flags);
 	set_bit(QCA_IBS_DISABLED, &qca->flags);
+	if (hu->serdev)
+		set_bit(QCA_BT_OFF, &qca->flags);
 	qca_flush(hu);
 	spin_unlock_irqrestore(&qca->hci_ibs_lock, flags);
 
@@ -2268,7 +2290,6 @@ static void qca_power_off(struct hci_uart *hu)
 
 	if (power && power->pwrseq) {
 		pwrseq_disable(power->pwrseq);
-		set_bit(QCA_BT_OFF, &qca->flags);
 		return;
         }
 
@@ -2294,8 +2315,6 @@ static void qca_power_off(struct hci_uart *hu)
 	default:
 		gpiod_set_value_cansleep(qcadev->bt_en, 0);
 	}
-
-	set_bit(QCA_BT_OFF, &qca->flags);
 }
 
 static int qca_hci_shutdown(struct hci_dev *hdev)
@@ -2581,22 +2600,6 @@ static int qca_serdev_probe(struct serdev_device *serdev)
 static void qca_serdev_remove(struct serdev_device *serdev)
 {
 	struct qca_serdev *qcadev = serdev_device_get_drvdata(serdev);
-	struct qca_power *power = qcadev->bt_power;
-
-	switch (qcadev->btsoc_type) {
-	case QCA_WCN3988:
-	case QCA_WCN3990:
-	case QCA_WCN3991:
-	case QCA_WCN3998:
-	case QCA_WCN6750:
-	case QCA_WCN6855:
-	case QCA_WCN7850:
-		if (power->vregs_on)
-			qca_power_off(&qcadev->serdev_hu);
-		break;
-	default:
-		break;
-	}
 
 	hci_uart_unregister_device(&qcadev->serdev_hu);
 }
@@ -2851,3 +2854,7 @@ int __exit qca_deinit(void)
 
 	return hci_uart_unregister_proto(&qca_proto);
 }
+
+#if IS_ENABLED(CONFIG_BT_HCIUART_QCA_KUNIT_TEST)
+#include "hci_qca_test.c"
+#endif
