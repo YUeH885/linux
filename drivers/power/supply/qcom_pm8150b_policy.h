@@ -5,6 +5,69 @@
 #include <linux/math64.h>
 #include <linux/minmax.h>
 
+struct pm8150b_board_thermal_trip {
+	int temperature_mc;
+	int clear_mc;
+	int fcc_ua;
+};
+
+struct pm8150b_board_thermal_profile {
+	int xo_coefficient;
+	int skin_coefficient;
+	int offset;
+	int denominator;
+	int display_offset_mc;
+	const struct pm8150b_board_thermal_trip *trips;
+	unsigned int num_trips;
+};
+
+static const struct pm8150b_board_thermal_trip pm8150b_alphaplus_thermal_trips[] = {
+	{ 10000, 9000, 2600000 },
+	{ 38500, 37500, 1500000 },
+	{ 39000, 38000, 700000 },
+	{ 40000, 39000, 500000 },
+	{ 43000, 42000, 300000 },
+};
+
+static const struct pm8150b_board_thermal_profile pm8150b_alphaplus_thermal = {
+	.xo_coefficient = 410,
+	.skin_coefficient = 446,
+	.offset = 2640000,
+	.denominator = 1000,
+	.display_offset_mc = 4000,
+	.trips = pm8150b_alphaplus_thermal_trips,
+	.num_trips = ARRAY_SIZE(pm8150b_alphaplus_thermal_trips),
+};
+
+static inline int
+pm8150b_board_temperature(const struct pm8150b_board_thermal_profile *profile,
+			  int xo_mc, int skin_mc, bool wired, bool display_on)
+{
+	s64 temperature = (s64)xo_mc * profile->xo_coefficient +
+			  (s64)skin_mc * profile->skin_coefficient + profile->offset;
+	int temperature_mc = div_s64(temperature, profile->denominator);
+
+	/* The stock VTS interface reports tenths of a degree. */
+	temperature_mc = temperature_mc / 100 * 100;
+	if (wired && display_on)
+		temperature_mc += profile->display_offset_mc;
+
+	return temperature_mc;
+}
+
+static inline int
+pm8150b_board_fcc(const struct pm8150b_board_thermal_profile *profile,
+		  unsigned int *level, int temperature_mc)
+{
+	while (*level < profile->num_trips &&
+	       temperature_mc >= profile->trips[*level].temperature_mc)
+		(*level)++;
+	while (*level && temperature_mc < profile->trips[*level - 1].clear_mc)
+		(*level)--;
+
+	return *level ? profile->trips[*level - 1].fcc_ua : 0;
+}
+
 enum pm8150b_temp_zone {
 	PM8150B_TEMP_COLD,
 	PM8150B_TEMP_COOL,
