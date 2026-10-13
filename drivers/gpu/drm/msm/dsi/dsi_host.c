@@ -2698,7 +2698,7 @@ static void msm_dsi_sfpb_config(struct msm_dsi_host *msm_host, bool enable)
 
 int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
-			bool is_bonded_dsi, struct msm_dsi_phy *phy, bool ulps_enabled)
+			bool is_bonded_dsi, struct msm_dsi_phy *phy)
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
@@ -2745,16 +2745,6 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 	dsi_timing_setup(msm_host, is_bonded_dsi);
 	dsi_sw_reset(msm_host);
 	dsi_ctrl_enable(msm_host, phy_shared_timings, phy);
-
-	/* ULPS exit must clear the PHY HS request set by controller setup. */
-	if (ulps_enabled) {
-		ret = msm_dsi_phy_set_ulps(phy, false);
-		if (ret) {
-			pr_err("%s: failed to exit ULPS, %d\n", __func__, ret);
-			dsi_ctrl_disable(msm_host);
-			goto fail_disable_clk;
-		}
-	}
 
 	msm_host->phy = phy;
 	msm_host->idle_requested = false;

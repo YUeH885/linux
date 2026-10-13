@@ -135,8 +135,6 @@ static void dsi_mgr_phy_disable(int id)
 	 * first controller only when the second controller is disabled.
 	 */
 	msm_dsi->phy_enabled = false;
-	msm_dsi->ulps_enabled = false;
-	msm_dsi->phy_clk_req = (struct msm_dsi_phy_clk_request) { 0 };
 	if (IS_BONDED_DSI() && mdsi && sdsi) {
 		if (!mdsi->phy_enabled && !sdsi->phy_enabled) {
 			msm_dsi_phy_disable(sdsi->phy);
@@ -155,30 +153,13 @@ static int enable_phy(struct msm_dsi *msm_dsi,
 	int ret;
 
 	ret = msm_dsi_host_get_phy_clk_req(msm_dsi->host, &clk_req, is_bonded_dsi);
-	if (ret) {
-		if (!is_bonded_dsi)
-			dsi_mgr_phy_disable(msm_dsi->id);
+	if (ret)
 		return ret;
-	}
 
-	if (!is_bonded_dsi) {
-		if (msm_dsi->phy_enabled) {
-			/* Reuse retained PHY timings only for the same clock request. */
-			if (clk_req.bitclk_rate == msm_dsi->phy_clk_req.bitclk_rate &&
-			    clk_req.escclk_rate == msm_dsi->phy_clk_req.escclk_rate) {
-				msm_dsi_phy_get_shared_timings(msm_dsi->phy, shared_timings);
-				return 0;
-			}
-			dsi_mgr_phy_disable(msm_dsi->id);
-		}
+	if (!is_bonded_dsi)
 		msm_dsi_host_reset_phy(msm_dsi->host);
-	}
 
-	ret = msm_dsi_phy_enable(msm_dsi->phy, &clk_req, shared_timings);
-	if (!ret && !is_bonded_dsi)
-		msm_dsi->phy_clk_req = clk_req;
-
-	return ret;
+	return msm_dsi_phy_enable(msm_dsi->phy, &clk_req, shared_timings);
 }
 
 static int
@@ -254,17 +235,15 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 		goto phy_en_fail;
 
 	ret = msm_dsi_host_power_on(host, &phy_shared_timings[id], is_bonded_dsi,
-				    msm_dsi->phy, msm_dsi->ulps_enabled);
+				    msm_dsi->phy);
 	if (ret) {
 		pr_err("%s: power on host %d failed, %d\n", __func__, id, ret);
 		goto host_on_fail;
 	}
 
-	msm_dsi->ulps_enabled = false;
-
 	if (is_bonded_dsi && msm_dsi1) {
 		ret = msm_dsi_host_power_on(msm_dsi1->host,
-				&phy_shared_timings[DSI_1], is_bonded_dsi, msm_dsi1->phy, false);
+				&phy_shared_timings[DSI_1], is_bonded_dsi, msm_dsi1->phy);
 		if (ret) {
 			pr_err("%s: power on host1 failed, %d\n",
 							__func__, ret);
@@ -372,7 +351,6 @@ static void dsi_mgr_bridge_post_disable(struct drm_bridge *bridge,
 	struct msm_dsi *msm_dsi1 = dsi_mgr_get_dsi(DSI_1);
 	struct mipi_dsi_host *host = msm_dsi->host;
 	bool is_bonded_dsi = IS_BONDED_DSI();
-	bool keep_phy = false;
 	int ret;
 
 	DBG("id=%d", id);
@@ -403,17 +381,6 @@ static void dsi_mgr_bridge_post_disable(struct drm_bridge *bridge,
 	if (is_bonded_dsi && msm_dsi1)
 		msm_dsi_host_disable_irq(msm_dsi1->host);
 
-	if (msm_dsi->ulps_suspend_enabled && !is_bonded_dsi) {
-		ret = msm_dsi_phy_set_ulps(msm_dsi->phy, true);
-		if (ret) {
-			dev_err(&msm_dsi->pdev->dev,
-				"failed to enter ULPS: %d\n", ret);
-		} else {
-			msm_dsi->ulps_enabled = true;
-			keep_phy = true;
-		}
-	}
-
 	/* Save PHY status if it is a clock source */
 	msm_dsi_phy_pll_save_state(msm_dsi->phy);
 
@@ -429,8 +396,7 @@ static void dsi_mgr_bridge_post_disable(struct drm_bridge *bridge,
 	}
 
 disable_phy:
-	if (!keep_phy)
-		dsi_mgr_phy_disable(id);
+	dsi_mgr_phy_disable(id);
 }
 
 static void dsi_mgr_bridge_mode_set(struct drm_bridge *bridge,
@@ -622,9 +588,6 @@ int msm_dsi_manager_register(struct msm_dsi *msm_dsi)
 	}
 
 	msm_dsim->dsi[id] = msm_dsi;
-	msm_dsi->ulps_suspend_enabled =
-		of_property_read_bool(msm_dsi->pdev->dev.of_node,
-				      "qcom,suspend-ulps-enabled");
 	msm_dsi->ulps_idle_enabled =
 		of_property_read_bool(msm_dsi->pdev->dev.of_node,
 				      "qcom,idle-ulps-enabled");
@@ -655,9 +618,6 @@ void msm_dsi_manager_unregister(struct msm_dsi *msm_dsi)
 
 	if (msm_dsi->host)
 		msm_dsi_host_unregister(msm_dsi->host);
-
-	if (msm_dsi->ulps_enabled)
-		dsi_mgr_phy_disable(msm_dsi->id);
 
 	if (msm_dsi->id >= 0)
 		msm_dsim->dsi[msm_dsi->id] = NULL;

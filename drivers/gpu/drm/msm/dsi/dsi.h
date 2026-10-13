@@ -47,10 +47,7 @@ struct msm_dsi {
 
 	struct device *phy_dev;
 	bool phy_enabled;
-	bool ulps_suspend_enabled;
 	bool ulps_idle_enabled;
-	bool ulps_enabled;
-	struct msm_dsi_phy_clk_request phy_clk_req;
 
 	int id;
 };
@@ -82,7 +79,7 @@ void msm_dsi_host_enable_irq(struct mipi_dsi_host *host);
 void msm_dsi_host_disable_irq(struct mipi_dsi_host *host);
 int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
-			bool is_bonded_dsi, struct msm_dsi_phy *phy, bool ulps_enabled);
+			bool is_bonded_dsi, struct msm_dsi_phy *phy);
 int msm_dsi_host_power_off(struct mipi_dsi_host *host);
 int msm_dsi_host_set_idle(struct mipi_dsi_host *host, bool idle);
 int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
@@ -149,8 +146,6 @@ int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
 			struct msm_dsi_phy_clk_request *clk_req,
 			struct msm_dsi_phy_shared_timings *shared_timings);
 void msm_dsi_phy_disable(struct msm_dsi_phy *phy);
-void msm_dsi_phy_get_shared_timings(struct msm_dsi_phy *phy,
-				    struct msm_dsi_phy_shared_timings *shared_timings);
 int msm_dsi_phy_set_ulps(struct msm_dsi_phy *phy, bool enable);
 void msm_dsi_phy_set_usecase(struct msm_dsi_phy *phy,
 			     enum msm_dsi_phy_usecase uc);
