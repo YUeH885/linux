@@ -7,6 +7,7 @@
 
 #include <linux/aperture.h>
 #include <linux/kthread.h>
+#include <linux/of_address.h>
 #include <linux/sched/mm.h>
 #include <uapi/linux/sched/types.h>
 
@@ -177,6 +178,39 @@ static int msm_kms_fault_handler(void *arg, unsigned long iova, int flags, void 
 	return -ENOSYS;
 }
 
+/*
+ * The bootloader hands the firmware framebuffer to the display controller
+ * and keeps scanning it out by physical address until the first commit
+ * installs a buffer of our own.  Map it one-to-one into the display's IOMMU
+ * domain so the ongoing scanout does not fault until then.
+ */
+static void msm_kms_boot_fb_region(phys_addr_t *base, size_t *size)
+{
+	struct device_node *np, *mem;
+	struct resource res;
+
+	*base = 0;
+	*size = 0;
+
+	np = of_find_compatible_node(NULL, NULL, "simple-framebuffer");
+	if (!np)
+		return;
+
+	mem = of_parse_phandle(np, "memory-region", 0);
+	if (mem) {
+		if (!of_address_to_resource(mem, 0, &res)) {
+			*base = res.start;
+			*size = resource_size(&res);
+		}
+		of_node_put(mem);
+	} else if (!of_address_to_resource(np, 0, &res)) {
+		*base = res.start;
+		*size = resource_size(&res);
+	}
+
+	of_node_put(np);
+}
+
 struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_dev)
 {
 	struct drm_gpuvm *vm;
@@ -185,6 +219,9 @@ struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_de
 	struct msm_drm_private *priv = dev->dev_private;
 	struct msm_kms *kms = priv->kms;
 	struct device *iommu_dev;
+	phys_addr_t fb_base;
+	size_t fb_size;
+	int ret;
 
 	/*
 	 * IOMMUs can be a part of MDSS device tree binding, or the
@@ -199,7 +236,9 @@ struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_de
 		return ERR_PTR(-ENODEV);
 	}
 
-	mmu = msm_iommu_disp_new(iommu_dev, 0);
+	msm_kms_boot_fb_region(&fb_base, &fb_size);
+
+	mmu = msm_iommu_disp_new(iommu_dev, 0, fb_base, fb_size);
 	if (IS_ERR(mmu))
 		return ERR_CAST(mmu);
 
@@ -209,6 +248,20 @@ struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_de
 		dev_err(mdp_dev, "vm create, error %pe\n", vm);
 		mmu->funcs->destroy(mmu);
 		return vm;
+	}
+
+	/*
+	 * Keep the VA allocator away from the firmware framebuffer that the
+	 * display maps one-to-one, so a scanout buffer can never be placed on
+	 * top of it.
+	 */
+	if (fb_size) {
+		ret = msm_gem_vm_reserve(vm, fb_base, fb_size);
+		if (ret) {
+			dev_err(mdp_dev, "reserve boot fb region, error %d\n", ret);
+			drm_gpuvm_put(vm);
+			return ERR_PTR(ret);
+		}
 	}
 
 	msm_mmu_set_fault_handler(to_msm_vm(vm)->mmu, kms, msm_kms_fault_handler);
