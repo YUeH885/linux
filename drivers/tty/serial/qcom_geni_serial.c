@@ -1534,14 +1534,22 @@ static void qcom_geni_serial_set_termios(struct uart_port *uport,
 	u32 rx_trans_cfg;
 	u32 rx_parity_cfg;
 	u32 stop_bit_len;
+	bool rx_active;
 	int ret = 0;
 
 	/* baud rate */
 	baud = uart_get_baud_rate(uport, termios, old, 300, 8000000);
 
+	/* Clock changes can be sampled as data by an active RX sequencer. */
+	scoped_guard(uart_port_lock_irqsave, uport) {
+		rx_active = qcom_geni_serial_secondary_active(uport);
+		if (rx_active)
+			qcom_geni_serial_stop_rx(uport);
+	}
+
 	ret = port->dev_data->set_rate(&port->se, baud);
 	if (ret)
-		return;
+		goto out_restart_rx;
 
 	/* parity */
 	tx_trans_cfg = readl(uport->membase + SE_UART_TX_TRANS_CFG);
@@ -1624,6 +1632,12 @@ static void qcom_geni_serial_set_termios(struct uart_port *uport,
 	trace_geni_serial_set_termios(uport->dev, baud, bits_per_char,
 				      tx_trans_cfg, tx_parity_cfg, rx_trans_cfg,
 				      rx_parity_cfg, stop_bit_len);
+
+out_restart_rx:
+	if (rx_active) {
+		guard(uart_port_lock_irqsave)(uport);
+		qcom_geni_serial_start_rx(uport);
+	}
 }
 
 #ifdef CONFIG_SERIAL_QCOM_GENI_CONSOLE
