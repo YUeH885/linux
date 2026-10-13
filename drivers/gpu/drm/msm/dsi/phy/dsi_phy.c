@@ -809,13 +809,6 @@ void msm_dsi_phy_disable(struct msm_dsi_phy *phy)
 	pm_runtime_put(&phy->pdev->dev);
 }
 
-void msm_dsi_phy_get_shared_timings(struct msm_dsi_phy *phy,
-				    struct msm_dsi_phy_shared_timings *shared_timings)
-{
-	memcpy(shared_timings, &phy->timing.shared_timings,
-	       sizeof(*shared_timings));
-}
-
 int msm_dsi_phy_set_ulps(struct msm_dsi_phy *phy, bool enable)
 {
 	if (!phy || !phy->cfg->ops.set_ulps)
