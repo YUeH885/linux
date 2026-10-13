@@ -101,11 +101,11 @@ static int hci_uart_flush(struct hci_dev *hdev)
 		kfree_skb(hu->tx_skb); hu->tx_skb = NULL;
 	}
 
-	/* Flush any pending characters in the driver and discipline. */
-	serdev_device_write_flush(hu->serdev);
-
-	if (test_bit(HCI_UART_PROTO_READY, &hu->flags))
+	if (test_bit(HCI_UART_PROTO_READY, &hu->flags)) {
+		/* Setup may have failed with the port already closed. */
+		serdev_device_write_flush(hu->serdev);
 		hu->proto->flush(hu);
+	}
 
 	return 0;
 }
@@ -150,9 +150,11 @@ static int hci_uart_close(struct hci_dev *hdev)
 
 	/* When QUIRK HCI_QUIRK_NON_PERSISTENT_SETUP is set by driver,
 	 * BT SOC is completely powered OFF during BT OFF, holding port
-	 * open may drain the battery.
+	 * open may drain the battery. During removal, keep the port open
+	 * until the protocol has completed its cleanup.
 	 */
-	if (hci_test_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP)) {
+	if (hci_test_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP) &&
+	    !hci_dev_test_flag(hdev, HCI_UNREGISTER)) {
 		clear_bit(HCI_UART_PROTO_READY, &hu->flags);
 		serdev_device_close(hu->serdev);
 	}
@@ -275,24 +277,29 @@ static size_t hci_uart_receive_buf(struct serdev_device *serdev,
 				   const u8 *data, size_t count)
 {
 	struct hci_uart *hu = serdev_device_get_drvdata(serdev);
+	size_t received = 0;
 
 	if (!hu || serdev != hu->serdev) {
 		WARN_ON(1);
 		return 0;
 	}
 
-	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags))
+	/* Removal keeps the port open for protocol cleanup. */
+	if (!percpu_down_read_trylock(&hu->proto_lock))
 		return 0;
 
-	/* It does not need a lock here as it is already protected by a mutex in
-	 * tty caller
-	 */
+	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags))
+		goto unlock;
+
 	hu->proto->recv(hu, data, count);
 
 	if (hu->hdev)
 		hu->hdev->stat.byte_rx += count;
 
-	return count;
+	received = count;
+unlock:
+	percpu_up_read(&hu->proto_lock);
+	return received;
 }
 
 static const struct serdev_device_ops hci_serdev_client_ops = {
@@ -399,8 +406,8 @@ void hci_uart_unregister_device(struct hci_uart *hu)
 	cancel_work_sync(&hu->init_ready);
 	if (test_bit(HCI_UART_REGISTERED, &hu->flags))
 		hci_unregister_dev(hdev);
-	hci_free_dev(hdev);
 
+	percpu_down_write(&hu->proto_lock);
 	cancel_work_sync(&hu->write_work);
 
 	hu->proto->close(hu);
@@ -409,6 +416,8 @@ void hci_uart_unregister_device(struct hci_uart *hu)
 		clear_bit(HCI_UART_PROTO_READY, &hu->flags);
 		serdev_device_close(hu->serdev);
 	}
+	percpu_up_write(&hu->proto_lock);
 	percpu_free_rwsem(&hu->proto_lock);
+	hci_free_dev(hdev);
 }
 EXPORT_SYMBOL_GPL(hci_uart_unregister_device);
