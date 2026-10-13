@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/backlight.h>
 #include <linux/bitops.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
@@ -221,6 +222,7 @@ struct pm8150b_policy_snapshot {
 	int source_current_max_ua;
 	int battery_temp_decic;
 	int battery_voltage_uv;
+	int board_temperature_mc;
 	bool aicl_max_reached;
 	int phase;
 	bool present;
@@ -244,6 +246,11 @@ struct pm8150b_charger {
 	struct regmap *regmap;
 	struct iio_channel *usb_in_i;
 	struct iio_channel *mid_chg;
+	struct iio_channel *xo_therm;
+	struct iio_channel *skin_therm;
+	struct backlight_device *backlight;
+	const struct pm8150b_board_thermal_profile *board_thermal;
+	unsigned int board_thermal_level;
 	struct power_supply *battery;
 	struct power_supply *parallel;
 	struct power_supply *usb;
@@ -578,6 +585,24 @@ static int pm8150b_read_adc(struct pm8150b_charger *chip,
 	mutex_unlock(&chip->adc_lock);
 
 	return ret;
+}
+
+static int pm8150b_read_board_temperature(struct pm8150b_charger *chip,
+					  bool wired, int *temperature_mc)
+{
+	bool display_on = backlight_get_brightness(chip->backlight) > 0;
+	int xo_mc, skin_mc, ret;
+
+	ret = pm8150b_read_adc(chip, chip->xo_therm, &xo_mc);
+	if (ret)
+		return ret;
+	ret = pm8150b_read_adc(chip, chip->skin_therm, &skin_mc);
+	if (ret)
+		return ret;
+	*temperature_mc = pm8150b_board_temperature(chip->board_thermal,
+						    xo_mc, skin_mc, wired, display_on);
+
+	return 0;
 }
 
 static int pm8150b_read_mid_voltage(struct pm8150b_charger *chip, int *value)
@@ -1306,6 +1331,15 @@ static int pm8150b_read_policy_snapshot(struct pm8150b_charger *chip,
 	ret = pm8150b_fg_voltage(chip, &s->battery_voltage_uv);
 	if (ret)
 		return ret;
+	if (chip->board_thermal && s->present) {
+		bool wired = s->usb_type == POWER_SUPPLY_USB_TYPE_DCP ||
+			     s->usb_type == POWER_SUPPLY_USB_TYPE_CDP ||
+			     s->usb_type == POWER_SUPPLY_USB_TYPE_PD;
+
+		ret = pm8150b_read_board_temperature(chip, wired, &s->board_temperature_mc);
+		if (ret)
+			return ret;
+	}
 
 	s->aicl_max_reached = chip->aicl_max_reached;
 
@@ -1385,6 +1419,19 @@ static void pm8150b_calculate_policy(struct pm8150b_charger *chip,
 		target->fcc_ua = min(target->fcc_ua,
 				     s->battery_voltage_uv >= 4000000 ? 1000000 :
 				     chip->charge_full_design_uah / 2);
+	if (chip->board_thermal) {
+		int board_fcc_ua;
+
+		if (!s->present) {
+			chip->board_thermal_level = 0;
+		} else {
+			board_fcc_ua = pm8150b_board_fcc(chip->board_thermal,
+							 &chip->board_thermal_level,
+							 s->board_temperature_mc);
+			if (board_fcc_ua)
+				target->fcc_ua = min(target->fcc_ua, board_fcc_ua);
+		}
+	}
 	if (chip->bvp_next_step &&
 	    time_after_eq(jiffies, chip->bvp_next_step)) {
 		batvolt_threshold_ua = chip->charge_full_design_uah *
@@ -1813,6 +1860,8 @@ static enum power_supply_property pm8150b_battery_properties[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
 };
 
 static int pm8150b_battery_get_property(struct power_supply *psy,
@@ -1880,6 +1929,12 @@ static int pm8150b_battery_get_property(struct power_supply *psy,
 		if (!ret)
 			val->intval = PM8150B_FV_MIN_UV + reg * PM8150B_FV_STEP_UV;
 		return ret;
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+		val->intval = READ_ONCE(chip->policy_fcc_ua);
+		return 0;
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
+		val->intval = chip->constant_charge_current_max_ua;
+		return 0;
 	default:
 		return -EINVAL;
 	}
@@ -2400,6 +2455,35 @@ static void pm8150b_stop(void *data)
 	mutex_unlock(&chip->usb_lock);
 }
 
+static int pm8150b_init_board_thermal(struct pm8150b_charger *chip)
+{
+	if (!chip->board_thermal)
+		return 0;
+	if (!IS_REACHABLE(CONFIG_BACKLIGHT_CLASS_DEVICE))
+		return dev_err_probe(chip->dev, -ENODEV, "Backlight support is required\n");
+
+	chip->xo_therm = devm_iio_channel_get(chip->dev, "xo_therm");
+	if (IS_ERR(chip->xo_therm))
+		return dev_err_probe(chip->dev, PTR_ERR(chip->xo_therm),
+				     "Failed to get XO thermistor\n");
+	chip->skin_therm = devm_iio_channel_get(chip->dev, "skin_therm");
+	if (IS_ERR(chip->skin_therm))
+		return dev_err_probe(chip->dev, PTR_ERR(chip->skin_therm),
+				     "Failed to get skin thermistor\n");
+	chip->backlight = devm_of_find_backlight(chip->dev);
+	if (IS_ERR(chip->backlight))
+		return dev_err_probe(chip->dev, PTR_ERR(chip->backlight),
+				     "Failed to get display backlight\n");
+	if (!chip->backlight)
+		return dev_err_probe(chip->dev, -ENODEV, "Display backlight is required\n");
+
+	if (!device_link_add(chip->dev, chip->backlight->dev.parent,
+			     DL_FLAG_AUTOREMOVE_CONSUMER))
+		return -ENOMEM;
+
+	return 0;
+}
+
 static int pm8150b_probe(struct platform_device *pdev)
 {
 	struct power_supply_config config = {};
@@ -2411,6 +2495,7 @@ static int pm8150b_probe(struct platform_device *pdev)
 	if (!chip)
 		return -ENOMEM;
 	chip->dev = &pdev->dev;
+	chip->board_thermal = of_device_get_match_data(chip->dev);
 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chip->regmap)
 		return dev_err_probe(chip->dev, -ENODEV, "PMIC regmap not found\n");
@@ -2461,6 +2546,9 @@ static int pm8150b_probe(struct platform_device *pdev)
 	if (IS_ERR(chip->mid_chg))
 		return dev_err_probe(chip->dev, PTR_ERR(chip->mid_chg),
 				     "Failed to get mid_chg IIO channel\n");
+	ret = pm8150b_init_board_thermal(chip);
+	if (ret)
+		return ret;
 	chip->parallel = devm_power_supply_get_by_reference(chip->dev,
 							    "qcom,parallel-charger");
 	if (IS_ERR(chip->parallel))
@@ -2650,6 +2738,7 @@ static const struct dev_pm_ops pm8150b_pm_ops = {
 };
 
 static const struct of_device_id pm8150b_match_table[] = {
+	{ .compatible = "lg,alphaplus-charger", .data = &pm8150b_alphaplus_thermal },
 	{ .compatible = "qcom,pm8150b-charger" },
 	{}
 };
