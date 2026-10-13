@@ -110,6 +110,13 @@ struct msm_gem_vm {
 	/** @va_alignment: Alignment for kernel managed VA allocations */
 	u64 va_alignment;
 
+	/**
+	 * @reserved: A VA range in @mm that the kernel managed allocator
+	 * must not hand out, for example the firmware framebuffer that the
+	 * bootloader keeps scanning out.
+	 */
+	struct drm_mm_node reserved;
+
 	/** @mmu: The mmu object which manages the pgtables */
 	struct msm_mmu *mmu;
 
@@ -162,6 +169,8 @@ struct msm_gem_vm {
 struct drm_gpuvm *
 msm_gem_vm_create(struct drm_device *drm, struct msm_mmu *mmu, const char *name,
 		  u64 va_start, u64 va_size, u64 va_alignment, bool managed);
+
+int msm_gem_vm_reserve(struct drm_gpuvm *gpuvm, u64 start, u64 size);
 
 void msm_gem_vm_close(struct drm_gpuvm *gpuvm);
 void msm_gem_vm_unusable(struct drm_gpuvm *gpuvm);

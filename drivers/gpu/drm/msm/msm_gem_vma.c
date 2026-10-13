@@ -160,6 +160,9 @@ msm_gem_vm_free(struct drm_gpuvm *gpuvm)
 {
 	struct msm_gem_vm *vm = container_of(gpuvm, struct msm_gem_vm, base);
 
+	if (vm->reserved.mm)
+		drm_mm_remove_node(&vm->reserved);
+
 	drm_mm_takedown(&vm->mm);
 	if (vm->mmu)
 		vm->mmu->funcs->destroy(vm->mmu);
@@ -894,6 +897,28 @@ err_free_dummy:
 err_free_vm:
 	kfree(vm);
 	return ERR_PTR(ret);
+}
+
+/**
+ * msm_gem_vm_reserve() - Reserve a VA range in a kernel managed VM
+ * @gpuvm: the VM
+ * @start: start of the range to reserve
+ * @size: size of the range to reserve
+ *
+ * Keep the kernel managed VA allocator from handing out @start..@start+@size,
+ * for example the firmware framebuffer mapped one-to-one by the display.
+ *
+ * Returns: 0 on success or a negative error code on failure.
+ */
+int
+msm_gem_vm_reserve(struct drm_gpuvm *gpuvm, u64 start, u64 size)
+{
+	struct msm_gem_vm *vm = to_msm_vm(gpuvm);
+
+	vm->reserved.start = start;
+	vm->reserved.size = size;
+
+	return drm_mm_reserve_node(&vm->mm, &vm->reserved);
 }
 
 /**

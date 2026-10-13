@@ -737,11 +737,10 @@ static const struct msm_mmu_funcs funcs = {
 		.set_stall = msm_iommu_set_stall,
 };
 
-struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
+static struct msm_iommu *msm_iommu_create(struct device *dev, unsigned long quirks)
 {
 	struct iommu_domain *domain;
 	struct msm_iommu *iommu;
-	int ret;
 
 	if (!device_iommu_mapped(dev))
 		return ERR_PTR(-ENODEV);
@@ -776,29 +775,69 @@ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
 		}
 	}
 
+	return iommu;
+}
+
+static void msm_iommu_free(struct msm_iommu *iommu)
+{
+	iommu_domain_free(iommu->domain);
+	kfree(iommu);
+}
+
+struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
+{
+	struct msm_iommu *iommu;
+	int ret;
+
+	iommu = msm_iommu_create(dev, quirks);
+	if (IS_ERR(iommu))
+		return ERR_CAST(iommu);
+
 	ret = iommu_attach_device(iommu->domain, dev);
 	if (ret) {
-		iommu_domain_free(domain);
-		kfree(iommu);
+		msm_iommu_free(iommu);
 		return ERR_PTR(ret);
 	}
 
 	return &iommu->base;
 }
 
-struct msm_mmu *msm_iommu_disp_new(struct device *dev, unsigned long quirks)
+struct msm_mmu *msm_iommu_disp_new(struct device *dev, unsigned long quirks,
+				   phys_addr_t fb_base, size_t fb_size)
 {
 	struct msm_iommu *iommu;
-	struct msm_mmu *mmu;
+	int ret;
 
-	mmu = msm_iommu_new(dev, quirks);
-	if (IS_ERR(mmu))
-		return mmu;
+	iommu = msm_iommu_create(dev, quirks);
+	if (IS_ERR(iommu))
+		return ERR_CAST(iommu);
 
-	iommu = to_msm_iommu(mmu);
+	ret = iommu_attach_device(iommu->domain, dev);
+	if (ret) {
+		msm_iommu_free(iommu);
+		return ERR_PTR(ret);
+	}
+
+	/*
+	 * The bootloader hands the firmware framebuffer to the display
+	 * controller and keeps scanning it out by physical address until the
+	 * first commit installs a buffer of our own.  Map it one-to-one right
+	 * after attaching, so the ongoing scanout keeps working instead of
+	 * faulting until then.
+	 */
+	if (fb_size) {
+		ret = iommu_map(iommu->domain, fb_base, fb_base, fb_size,
+				IOMMU_READ | IOMMU_NOEXEC, GFP_KERNEL);
+		if (ret) {
+			iommu_detach_device(iommu->domain, dev);
+			msm_iommu_free(iommu);
+			return ERR_PTR(ret);
+		}
+	}
+
 	iommu_set_fault_handler(iommu->domain, msm_disp_fault_handler, iommu);
 
-	return mmu;
+	return &iommu->base;
 }
 
 struct msm_mmu *msm_iommu_gpu_new(struct device *dev, struct msm_gpu *gpu, unsigned long quirks)
