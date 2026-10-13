@@ -1328,12 +1328,6 @@
 	status = "okay";
 };
 
-&spi8 {
-	/delete-property/ reg-names;
-	/delete-property/ spi-max-frequency;
-	status = "okay";
-};
-
 &wifi {
 	status = "okay";
 	qcom,mac-address-file = "ath10k/WCN3990/hw1.0/wlan_mac.bin";
