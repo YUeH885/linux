@@ -1157,7 +1157,6 @@
 &mdss_dsi0 {
 	status = "okay";
 	vdda-supply = <&vreg_l3c_1p2>;
-	qcom,suspend-ulps-enabled;
 	qcom,idle-ulps-enabled;
 
 	display_panel: panel@0 {
