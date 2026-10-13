@@ -252,6 +252,16 @@ config BT_HCIUART_QCA
 
 	  Say Y here to compile support for QCA protocol.
 
+config BT_HCIUART_QCA_KUNIT_TEST
+	bool "KUnit tests for QCA UART lifecycle" if !KUNIT_ALL_TESTS
+	depends on BT_HCIUART_QCA && KUNIT=y
+	default KUNIT_ALL_TESTS
+	help
+	  Test QCA UART initialization failures, shutdown and removal with
+	  an in-memory serial controller. Verify cleanup after failed port
+	  opens, and that fragmented baudrate events complete only after
+	  reassembly. Also cover short vendor events.
+
 config BT_HCIUART_AG6XX
 	bool "Intel AG6XX protocol support"
 	depends on BT_HCIUART
