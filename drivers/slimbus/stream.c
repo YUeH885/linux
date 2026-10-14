@@ -420,7 +420,7 @@ int slim_stream_disable(struct slim_stream_runtime *stream)
 		return -EINVAL;
 
 	if (ctrl->disable_stream)
-		ctrl->disable_stream(stream);
+		return ctrl->disable_stream(stream);
 
 	ret = slim_do_transfer(ctrl, &txn);
 	if (ret)
