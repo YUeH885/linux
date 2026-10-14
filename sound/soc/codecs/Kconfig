@@ -308,6 +308,7 @@ config SND_SOC_ALL_CODECS
 	imply SND_SOC_WCD937X_SDW
 	imply SND_SOC_WCD938X_SDW
 	imply SND_SOC_WCD939X_SDW
+	imply SND_SOC_WCN399X
 	imply SND_SOC_LPASS_MACRO_COMMON
 	imply SND_SOC_LPASS_RX_MACRO
 	imply SND_SOC_LPASS_TX_MACRO
@@ -2565,6 +2566,15 @@ config SND_SOC_WCD939X_SDW
 	help
 	  The WCD9390/9395 is a audio codec IC Integrated in
 	  Qualcomm SoCs like SM8650.
+
+config SND_SOC_WCN399X
+	tristate "Qualcomm WCN399x SLIMbus SCO audio"
+	depends on SLIMBUS
+	help
+	  Support the SLIMbus voice audio interface of Qualcomm WCN399x
+	  Bluetooth controllers. This interface carries mono SCO audio at
+	  8 kHz or 16 kHz between the Bluetooth controller and the audio DSP.
+	  To compile this driver as a module, choose M here.
 
 config SND_SOC_WM0010
 	tristate
