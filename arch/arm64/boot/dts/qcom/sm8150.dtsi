@@ -4654,6 +4654,31 @@
 			status = "disabled";
 		};
 
+		slim_bt: slim-ngd@17240000 {
+			compatible = "qcom,slim-ngd-v2.1.0";
+			reg = <0 0x17240000 0 0x2c000>;
+			interrupts = <GIC_SPI 291 IRQ_TYPE_LEVEL_HIGH>;
+			dmas = <&slim_bt_bam 3>, <&slim_bt_bam 4>;
+			dma-names = "rx", "tx";
+			iommus = <&apps_smmu 0x1b53 0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		slim_bt_bam: dma-controller@17204000 {
+			compatible = "qcom,bam-v1.7.4", "qcom,bam-v1.7.0";
+			qcom,controlled-remotely;
+			reg = <0 0x17204000 0 0x20000>;
+			/* The Apps NGD uses message pipes 3 and 4. */
+			num-channels = <5>;
+			interrupts = <GIC_SPI 292 IRQ_TYPE_LEVEL_HIGH>;
+			#dma-cells = <1>;
+			qcom,ee = <1>;
+			qcom,num-ees = <3>;
+			iommus = <&apps_smmu 0x1b53 0>;
+		};
+
 		intc: interrupt-controller@17a00000 {
 			compatible = "arm,gic-v3";
 			interrupt-controller;
