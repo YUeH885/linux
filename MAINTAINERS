@@ -22167,6 +22167,7 @@ F:	sound/soc/codecs/pm4125.*
 F:	sound/soc/codecs/wcd-clsh-v2.*
 F:	sound/soc/codecs/wcd-mbhc-v2.*
 F:	sound/soc/codecs/wcd93*.*
+F:	sound/soc/codecs/wcn399x.c
 F:	sound/soc/codecs/wsa88*.*
 F:	sound/soc/qcom/
 
