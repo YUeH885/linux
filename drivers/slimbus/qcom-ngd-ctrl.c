@@ -67,6 +67,7 @@
 
 /* User defined commands */
 #define SLIM_USR_MC_GENERIC_ACK	0x25
+#define SLIM_USR_ACK_SUCCESS	BIT(5)
 #define SLIM_USR_MC_MASTER_CAPABILITY	0x0
 #define SLIM_USR_MC_REPORT_SATELLITE	0x1
 #define SLIM_USR_MC_ADDR_QUERY		0xD
@@ -743,7 +744,23 @@ rel_tx:
 
 static int qcom_slim_ngd_init_dma(struct qcom_slim_ngd_ctrl *ctrl)
 {
-	int ret = 0;
+	struct of_phandle_args dma;
+	u32 pipe = (readl_relaxed(ctrl->ngd->base + NGD_STATUS) & GENMASK(9, 2)) >> 2;
+	int i, ret;
+
+	/* The ADSP assigns adjacent RX/TX message pipes to each NGD. */
+	for (i = 0; i < 2; i++) {
+		ret = of_parse_phandle_with_args(ctrl->dev->of_node, "dmas", "#dma-cells",
+						 i, &dma);
+		if (ret)
+			return ret;
+		of_node_put(dma.np);
+		if (dma.args[0] != pipe + i) {
+			dev_err(ctrl->dev, "%s DMA pipe %u does not match ADSP pipe %u\n",
+				i ? "TX" : "RX", dma.args[0], pipe + i);
+			return -EINVAL;
+		}
+	}
 
 	ret = qcom_slim_ngd_init_rx_msgq(ctrl);
 	if (ret) {
@@ -786,8 +803,10 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 				  struct slim_msg_txn *txn)
 {
 	struct qcom_slim_ngd_ctrl *ctrl = dev_get_drvdata(sctrl->dev);
+	struct qcom_slim_ngd_dma_desc *tx_desc;
 	DECLARE_COMPLETION_ONSTACK(tx_sent);
 	DECLARE_COMPLETION_ONSTACK(done);
+	unsigned long flags;
 	int ret, i;
 	unsigned long time_left;
 	u8 wbuf[SLIM_MSGQ_BUF_LEN];
@@ -816,6 +835,8 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 		dev_err(ctrl->dev, "Message buffer unavailable\n");
 		return -ENOMEM;
 	}
+	tx_desc = &ctrl->txdesc[((u8 *)pbuf - (u8 *)ctrl->tx_base) /
+				SLIM_MSGQ_BUF_LEN];
 
 	if (txn->mt == SLIM_MSG_MT_CORE &&
 		(txn->mc == SLIM_MSG_MC_CONNECT_SOURCE ||
@@ -895,6 +916,11 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 	if (!time_left) {
 		dev_err(sctrl->dev, "TX timed out:MC:0x%x,mt:0x%x", txn->mc,
 					txn->mt);
+		/* A late DMA callback must not complete the expired stack completion. */
+		spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+		if (tx_desc->comp == &tx_sent)
+			tx_desc->comp = NULL;
+		spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
 		mutex_unlock(&ctrl->tx_lock);
 		return -ETIMEDOUT;
 	}
@@ -993,13 +1019,51 @@ static int qcom_slim_calc_coef(struct slim_stream_runtime *rt, int *exp)
 	return coef;
 }
 
+static int qcom_slim_ngd_stream_result(struct slim_stream_runtime *rt, u8 mc, u8 ack)
+{
+	if (ack & SLIM_USR_ACK_SUCCESS)
+		return 0;
+	dev_err(&rt->dev->dev,
+		"Stream command %#x rejected: ack %#x, address %#x, rate %u\n",
+		mc, ack, rt->dev->laddr, rt->rate);
+	return -EREMOTEIO;
+}
+
+static int qcom_slim_ngd_reconfigure_stream(struct slim_stream_runtime *rt)
+{
+	struct slim_controller *ctrl = rt->dev->ctrl;
+	u8 wbuf[2], rbuf[2] = {};
+	struct slim_val_inf msg = {0, sizeof(wbuf), rbuf, wbuf, NULL};
+	struct slim_msg_txn txn = {
+		.mt = SLIM_MSG_MT_DEST_REFERRED_USER,
+		.dt = SLIM_MSG_DEST_LOGICALADDR,
+		.la = SLIM_LA_MGR,
+		.mc = SLIM_USR_MC_RECONFIG_NOW,
+		.rl = sizeof(wbuf) + 4,
+		.msg = &msg,
+	};
+	int ret;
+
+	ret = slim_alloc_txn_tid(ctrl, &txn);
+	if (ret)
+		return ret;
+	wbuf[0] = txn.tid;
+	wbuf[1] = rt->dev->laddr;
+	ret = qcom_slim_ngd_xfer_msg_sync(ctrl, &txn);
+	if (ret) {
+		slim_free_txn_tid(ctrl, &txn);
+		return ret;
+	}
+	return qcom_slim_ngd_stream_result(rt, txn.mc, rbuf[0]);
+}
+
 static int qcom_slim_ngd_enable_stream(struct slim_stream_runtime *rt)
 {
 	struct slim_device *sdev = rt->dev;
 	struct slim_controller *ctrl = sdev->ctrl;
 	struct slim_val_inf msg =  {0};
 	u8 wbuf[SLIM_MSGQ_BUF_LEN];
-	u8 rbuf[SLIM_MSGQ_BUF_LEN];
+	u8 rbuf[SLIM_MSGQ_BUF_LEN] = {};
 	struct slim_msg_txn txn = {0,};
 	int i, ret;
 
@@ -1063,27 +1127,48 @@ static int qcom_slim_ngd_enable_stream(struct slim_stream_runtime *rt)
 				txn.mt);
 		return ret;
 	}
+	ret = qcom_slim_ngd_stream_result(rt, txn.mc, rbuf[0]);
+	if (ret)
+		return ret;
+	return qcom_slim_ngd_reconfigure_stream(rt);
+}
 
-	txn.mc = SLIM_USR_MC_RECONFIG_NOW;
-	txn.msg->num_bytes = 2;
-	wbuf[1] = sdev->laddr;
-	txn.rl = txn.msg->num_bytes + 4;
+static int qcom_slim_ngd_disable_stream(struct slim_stream_runtime *rt)
+{
+	struct slim_controller *ctrl = rt->dev->ctrl;
+	u8 wbuf[SLIM_MSGQ_BUF_LEN], rbuf[2] = {};
+	struct slim_val_inf msg = {
+		.num_bytes = rt->num_ports + 2,
+		.wbuf = wbuf,
+		.rbuf = rbuf,
+	};
+	struct slim_msg_txn txn = {
+		.mt = SLIM_MSG_MT_DEST_REFERRED_USER,
+		.dt = SLIM_MSG_DEST_LOGICALADDR,
+		.la = SLIM_LA_MGR,
+		.mc = SLIM_USR_MC_CHAN_CTRL,
+		.rl = rt->num_ports + 6,
+		.msg = &msg,
+	};
+	int i, ret;
 
 	ret = slim_alloc_txn_tid(ctrl, &txn);
-	if (ret) {
-		dev_err(ctrl->dev, "Fail to allocate TID\n");
+	if (ret)
 		return ret;
-	}
-
-	wbuf[0] = txn.tid;
+	/* Channel-control operation 2 removes the channels from the ADSP. */
+	wbuf[0] = (2 << 6) | (rt->dev->laddr & 0x1f);
+	wbuf[1] = txn.tid;
+	for (i = 0; i < rt->num_ports; i++)
+		wbuf[i + 2] = rt->ports[i].ch.id;
 	ret = qcom_slim_ngd_xfer_msg_sync(ctrl, &txn);
 	if (ret) {
 		slim_free_txn_tid(ctrl, &txn);
-		dev_err(&sdev->dev, "TX timed out:MC:0x%x,mt:0x%x", txn.mc,
-				txn.mt);
+		return ret;
 	}
-
-	return ret;
+	ret = qcom_slim_ngd_stream_result(rt, txn.mc, rbuf[0]);
+	if (ret)
+		return ret;
+	return qcom_slim_ngd_reconfigure_stream(rt);
 }
 
 static int qcom_slim_ngd_get_laddr(struct slim_controller *ctrl,
@@ -1146,13 +1231,17 @@ static int qcom_slim_ngd_exit_dma(struct qcom_slim_ngd_ctrl *ctrl)
 	return 0;
 }
 
-static void qcom_slim_ngd_setup(struct qcom_slim_ngd_ctrl *ctrl)
+static int qcom_slim_ngd_setup(struct qcom_slim_ngd_ctrl *ctrl)
 {
 	u32 cfg = readl_relaxed(ctrl->ngd->base);
+	int ret;
 
 	if (ctrl->state == QCOM_SLIM_NGD_CTRL_DOWN ||
-		ctrl->state == QCOM_SLIM_NGD_CTRL_ASLEEP)
-		qcom_slim_ngd_init_dma(ctrl);
+	    ctrl->state == QCOM_SLIM_NGD_CTRL_ASLEEP) {
+		ret = qcom_slim_ngd_init_dma(ctrl);
+		if (ret)
+			return ret;
+	}
 
 	/* By default enable message queues */
 	cfg |= NGD_CFG_RX_MSGQ_EN;
@@ -1163,6 +1252,7 @@ static void qcom_slim_ngd_setup(struct qcom_slim_ngd_ctrl *ctrl)
 		cfg |= NGD_CFG_ENABLE;
 
 	writel_relaxed(cfg, ctrl->ngd->base);
+	return 0;
 }
 
 static int qcom_slim_ngd_power_up(struct qcom_slim_ngd_ctrl *ctrl)
@@ -1203,8 +1293,7 @@ static int qcom_slim_ngd_power_up(struct qcom_slim_ngd_ctrl *ctrl)
 			dev_info(ctrl->dev, "Subsys restart: ADSP active framer\n");
 			return 0;
 		}
-		qcom_slim_ngd_setup(ctrl);
-		return 0;
+		return qcom_slim_ngd_setup(ctrl);
 	}
 
 	/*
@@ -1218,7 +1307,9 @@ static int qcom_slim_ngd_power_up(struct qcom_slim_ngd_ctrl *ctrl)
 
 	writel_relaxed(rx_msgq|SLIM_RX_MSGQ_TIMEOUT_VAL,
 				ngd->base + NGD_RX_MSGQ_CFG);
-	qcom_slim_ngd_setup(ctrl);
+	ret = qcom_slim_ngd_setup(ctrl);
+	if (ret)
+		return ret;
 
 	time_left = wait_for_completion_timeout(&ctrl->reconf, HZ);
 	if (!time_left) {
@@ -1322,7 +1413,7 @@ static int qcom_slim_ngd_runtime_resume(struct device *dev)
 		ctrl->state = QCOM_SLIM_NGD_CTRL_AWAKE;
 	}
 
-	return 0;
+	return ret;
 }
 
 static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
@@ -1511,7 +1602,7 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 	const struct ngd_reg_offset_data *data;
 	struct qcom_slim_ngd *ngd;
 	const struct of_device_id *match;
-	u32 id;
+	u32 id, index;
 	int ret;
 
 	match = of_match_node(qcom_slim_ngd_dt_match, parent->of_node);
@@ -1548,8 +1639,10 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 			kfree(ngd);
 			return ret;
 		}
-		ngd->base = ctrl->base + ngd->id * data->offset +
-					(ngd->id - 1) * data->size;
+		/* Register banks repeat for each ADSP bus instance. */
+		index = (ngd->id - 1) % 2 + 1;
+		ngd->base = ctrl->base + index * data->offset +
+					(index - 1) * data->size;
 
 		return 0;
 	}
@@ -1625,6 +1718,7 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 	ctrl->ctrl.clkgear = SLIM_MAX_CLK_GEAR;
 	ctrl->ctrl.get_laddr = qcom_slim_ngd_get_laddr;
 	ctrl->ctrl.enable_stream = qcom_slim_ngd_enable_stream;
+	ctrl->ctrl.disable_stream = qcom_slim_ngd_disable_stream;
 	ctrl->ctrl.xfer_msg = qcom_slim_ngd_xfer_msg;
 	ctrl->ctrl.wakeup = NULL;
 	ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
