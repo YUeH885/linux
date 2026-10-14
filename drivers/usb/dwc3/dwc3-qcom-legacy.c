@@ -429,18 +429,26 @@ static void dwc3_qcom_enable_interrupts(struct dwc3_qcom *qcom)
 		dwc3_qcom_enable_port_interrupts(&qcom->ports[i]);
 }
 
-static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup)
+static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup, pm_message_t msg)
 {
+	struct dwc3 *dwc = platform_get_drvdata(qcom->dwc3);
 	u32 val;
 	int i, ret;
 
 	if (qcom->is_suspended)
 		return 0;
 
-	for (i = 0; i < qcom->num_ports; i++) {
-		val = readl(qcom->qscratch_base + pwr_evnt_irq_stat_reg[i]);
-		if (!(val & PWR_EVNT_LPM_IN_L2_MASK))
-			dev_err(qcom->dev, "port-%d HS-PHY not in L2\n", i + 1);
+	/* The device and full-reinit paths power off the PHYs before this callback. */
+	if (dwc3_qcom_is_host(qcom) && wakeup &&
+	    (PMSG_IS_AUTO(msg) || !dwc->needs_full_reinit)) {
+		for (i = 0; i < qcom->num_ports; i++) {
+			ret = readl_poll_timeout(qcom->qscratch_base + pwr_evnt_irq_stat_reg[i],
+						 val, val & PWR_EVNT_LPM_IN_L2_MASK, 10, 5000);
+			if (ret) {
+				dev_err(qcom->dev, "port-%d HS-PHY failed to enter L2\n", i + 1);
+				return ret;
+			}
+		}
 	}
 
 	for (i = qcom->num_clocks - 1; i >= 0; i--)
@@ -885,7 +893,7 @@ static int __maybe_unused dwc3_qcom_pm_suspend(struct device *dev)
 
 	/* The retained gadget can still DMA and must keep its clocks and votes. */
 	if (!dwc || !dwc->gadget_retained) {
-		ret = dwc3_qcom_suspend(qcom, wakeup);
+		ret = dwc3_qcom_suspend(qcom, wakeup, PMSG_SUSPEND);
 		if (ret)
 			return ret;
 	}
@@ -898,10 +906,24 @@ static int __maybe_unused dwc3_qcom_pm_suspend(struct device *dev)
 static int __maybe_unused dwc3_qcom_pm_resume(struct device *dev)
 {
 	struct dwc3_qcom *qcom = dev_get_drvdata(dev);
+	struct dwc3 *dwc = platform_get_drvdata(qcom->dwc3);
 	bool wakeup = device_may_wakeup(dev);
 	int ret;
 
+	if (pm_runtime_suspended(dev) && dwc &&
+	    dwc->current_dr_role == DWC3_GCTL_PRTCAP_DEVICE) {
+		qcom->pm_suspended = false;
+		return 0;
+	}
+
 	ret = dwc3_qcom_resume(qcom, wakeup);
+	if (ret)
+		return ret;
+
+	/* The child can only become active after its parent's PM state is restored. */
+	pm_runtime_disable(dev);
+	ret = pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
 	if (ret)
 		return ret;
 
@@ -914,7 +936,7 @@ static int __maybe_unused dwc3_qcom_runtime_suspend(struct device *dev)
 {
 	struct dwc3_qcom *qcom = dev_get_drvdata(dev);
 
-	return dwc3_qcom_suspend(qcom, true);
+	return dwc3_qcom_suspend(qcom, true, PMSG_AUTO_SUSPEND);
 }
 
 static int __maybe_unused dwc3_qcom_runtime_resume(struct device *dev)

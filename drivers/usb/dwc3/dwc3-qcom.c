@@ -338,18 +338,26 @@ static void dwc3_qcom_enable_interrupts(struct dwc3_qcom *qcom)
 		dwc3_qcom_enable_port_interrupts(&qcom->ports[i]);
 }
 
-static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup)
+static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup, pm_message_t msg)
 {
+	struct dwc3 *dwc = &qcom->dwc;
 	u32 val;
 	int i, ret;
 
 	if (qcom->is_suspended)
 		return 0;
 
-	for (i = 0; i < qcom->num_ports; i++) {
-		val = readl(qcom->qscratch_base + pwr_evnt_irq_stat_reg[i]);
-		if (!(val & PWR_EVNT_LPM_IN_L2_MASK))
-			dev_err(qcom->dev, "port-%d HS-PHY not in L2\n", i + 1);
+	/* The device and full-reinit paths power off the PHYs before this callback. */
+	if (dwc3_qcom_is_host(qcom) && wakeup &&
+	    (PMSG_IS_AUTO(msg) || !dwc->needs_full_reinit)) {
+		for (i = 0; i < qcom->num_ports; i++) {
+			ret = readl_poll_timeout(qcom->qscratch_base + pwr_evnt_irq_stat_reg[i],
+						 val, val & PWR_EVNT_LPM_IN_L2_MASK, 10, 5000);
+			if (ret) {
+				dev_err(qcom->dev, "port-%d HS-PHY failed to enter L2\n", i + 1);
+				return ret;
+			}
+		}
 	}
 	clk_bulk_disable_unprepare(qcom->num_clocks, qcom->clks);
 
@@ -757,9 +765,15 @@ static int dwc3_qcom_pm_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
-	ret = dwc3_qcom_suspend(qcom, wakeup);
-	if (ret)
+	ret = dwc3_qcom_suspend(qcom, wakeup, PMSG_SUSPEND);
+	if (ret) {
+		int resume_ret = dwc3_pm_resume(&qcom->dwc);
+
+		if (resume_ret)
+			dev_err(dev, "failed to restore core after suspend error: %d\n",
+				resume_ret);
 		return ret;
+	}
 
 	qcom->pm_suspended = true;
 
@@ -772,6 +786,11 @@ static int dwc3_qcom_pm_resume(struct device *dev)
 	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
 	bool wakeup = device_may_wakeup(dev);
 	int ret;
+
+	if (pm_runtime_suspended(dev) && dwc->current_dr_role == DWC3_GCTL_PRTCAP_DEVICE) {
+		qcom->pm_suspended = false;
+		return 0;
+	}
 
 	ret = dwc3_qcom_resume(qcom, wakeup);
 	if (ret)
@@ -810,7 +829,16 @@ static int dwc3_qcom_runtime_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
-	return dwc3_qcom_suspend(qcom, true);
+	ret = dwc3_qcom_suspend(qcom, true, PMSG_AUTO_SUSPEND);
+	if (ret) {
+		int resume_ret = dwc3_runtime_resume(&qcom->dwc);
+
+		if (resume_ret)
+			dev_err(dev, "failed to restore core after runtime suspend error: %d\n",
+				resume_ret);
+	}
+
+	return ret;
 }
 
 static int dwc3_qcom_runtime_resume(struct device *dev)
