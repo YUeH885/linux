@@ -2838,6 +2838,11 @@ int dwc3_pm_resume(struct dwc3 *dwc)
 
 	pinctrl_pm_select_default_state(dev);
 
+	/* Device-mode suspend leaves an already runtime-suspended core untouched. */
+	if (dwc->current_dr_role == DWC3_GCTL_PRTCAP_DEVICE &&
+	    pm_runtime_suspended(dev))
+		return 0;
+
 	pm_runtime_disable(dev);
 	ret = pm_runtime_set_active(dev);
 	if (ret)
