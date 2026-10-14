@@ -51,6 +51,7 @@ struct sm8150_snd_data {
 	struct q6afe_port *speaker_feedback;
 	bool jack_setup;
 	bool slim_port_setup;
+	bool has_bluetooth;
 	bool jack_notifier_registered;
 };
 
@@ -306,7 +307,7 @@ static int sm8150_late_probe(struct snd_soc_card *card)
 		return -ENODEV;
 
 	es_dai = snd_soc_card_get_codec_dai(card, "es9218-hifi");
-	if (data->speaker_feedback || data->dp_dai) {
+	if (data->speaker_feedback || data->dp_dai || data->has_bluetooth) {
 		/* Make the shared playback PCM usable before desktop port probing. */
 		ret = snd_soc_dapm_new_widgets(card);
 		if (ret)
@@ -314,6 +315,14 @@ static int sm8150_late_probe(struct snd_soc_card *card)
 	}
 	if (data->dp_dai) {
 		ret = sm8150_enable_route(card, "DISPLAY_PORT_RX Audio Mixer MultiMedia3", true);
+		if (ret)
+			return ret;
+	}
+	if (data->has_bluetooth) {
+		ret = sm8150_enable_route(card, "SLIMBUS_7_RX Audio Mixer MultiMedia4", true);
+		if (ret)
+			return ret;
+		ret = sm8150_enable_route(card, "MultiMedia5 Mixer SLIMBUS_7_TX", true);
 		if (ret)
 			return ret;
 	}
@@ -553,6 +562,10 @@ static int sm8150_dai_init(struct snd_soc_pcm_runtime *rtd)
 	}
 
 	switch (cpu_dai->id) {
+	case SLIMBUS_7_RX:
+	case SLIMBUS_7_TX:
+		pdata->has_bluetooth = true;
+		break;
 	case SECONDARY_MI2S_RX: {
 		struct snd_soc_dai *tfa_dai = codec_dai;
 		struct snd_soc_dai *dai;
@@ -721,11 +734,14 @@ static void sm8150_add_ops(struct snd_soc_card *card)
 {
 	struct snd_soc_dai_link *link;
 	int i;
-	bool has_dp = false;
+	bool has_dp = false, has_bluetooth = false;
 
-	for_each_card_prelinks(card, i, link)
+	for_each_card_prelinks(card, i, link) {
 		if (link->no_pcm && link->id == DISPLAY_PORT_RX)
 			has_dp = true;
+		if (link->no_pcm && link->id == SLIMBUS_7_RX)
+			has_bluetooth = true;
+	}
 	for_each_card_prelinks(card, i, link) {
 		if (link->no_pcm && link->id == DISPLAY_PORT_RX) {
 			link->init = sm8150_dp_init;
@@ -738,6 +754,14 @@ static void sm8150_add_ops(struct snd_soc_card *card)
 			link->dpcm_merged_format = 1;
 			link->dpcm_merged_chan = 1;
 			link->dpcm_merged_rate = 1;
+		} else if (has_bluetooth && link->dynamic &&
+			   (link->id == MSM_FRONTEND_DAI_MULTIMEDIA4 ||
+			    link->id == MSM_FRONTEND_DAI_MULTIMEDIA5)) {
+			link->dpcm_merged_format = 1;
+			link->dpcm_merged_chan = 1;
+			link->dpcm_merged_rate = 1;
+		} else if (link->id == SLIMBUS_7_RX || link->id == SLIMBUS_7_TX) {
+			link->ops = &sm8150_be_ops;
 		} else if (link->id == TERTIARY_MI2S_RX) {
 			link->ops = &sm8150_tert_mi2s_ops;
 			link->be_hw_params_fixup = sm8150_mi2s_be_hw_params_fixup;
