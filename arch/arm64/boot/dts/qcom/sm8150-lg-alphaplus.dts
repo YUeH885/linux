@@ -274,6 +274,46 @@
 			};
 		};
 
+		mm4-dai-link {
+			link-name = "MultiMedia4";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
+			};
+		};
+
+		mm5-dai-link {
+			link-name = "MultiMedia5";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA5>;
+			};
+		};
+
+		bluetooth-playback-dai-link {
+			link-name = "Bluetooth SCO Playback";
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_7_RX>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&wcn3998_codec>;
+			};
+		};
+
+		bluetooth-capture-dai-link {
+			link-name = "Bluetooth SCO Capture";
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_7_TX>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&wcn3998_codec>;
+			};
+		};
+
 		slim-dai-link {
 			link-name = "SLIM Playback";
 			cpu {
@@ -1386,6 +1426,16 @@
 	dai@2 {
 		direction = <Q6ASM_DAI_RX>;
 	};
+
+	dai@3 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>;
+		direction = <Q6ASM_DAI_RX>;
+	};
+
+	dai@4 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA5>;
+		direction = <Q6ASM_DAI_TX>;
+	};
 };
 
 &slim {
@@ -1453,6 +1503,28 @@
 				reg = <0x42 0x2>;
 				gpio-line-names = "", "", "", "HPH_HIFI", "HPH_SWITCH";
 			};
+		};
+	};
+};
+
+&slim_bt {
+	status = "okay";
+
+	slim@3 {
+		reg = <3>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		wcn3998_ifd: ifd@0,0 {
+			compatible = "slim217,220";
+			reg = <0 0>;
+		};
+
+		wcn3998_codec: codec@1,0 {
+			compatible = "slim217,220";
+			reg = <1 0>;
+			slim-ifc-dev = <&wcn3998_ifd>;
+			#sound-dai-cells = <0>;
 		};
 	};
 };
