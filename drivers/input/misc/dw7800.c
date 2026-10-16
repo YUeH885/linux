@@ -243,9 +243,8 @@ static int dw7800_probe(struct i2c_client *client)
 	return input_register_device(dw->input_dev);
 }
 
-static int dw7800_suspend(struct device *dev)
+static void dw7800_stop_work(struct dw7800_data *dw)
 {
-	struct dw7800_data *dw = dev_get_drvdata(dev);
 	unsigned long flags;
 
 	spin_lock_irqsave(&dw->lock, flags);
@@ -253,6 +252,13 @@ static int dw7800_suspend(struct device *dev)
 	spin_unlock_irqrestore(&dw->lock, flags);
 
 	cancel_work_sync(&dw->work);
+}
+
+static int dw7800_suspend(struct device *dev)
+{
+	struct dw7800_data *dw = dev_get_drvdata(dev);
+
+	dw7800_stop_work(dw);
 
 	return 0;
 }
@@ -262,6 +268,13 @@ static int dw7800_resume(struct device *dev)
 	struct dw7800_data *dw = dev_get_drvdata(dev);
 
 	return dw7800_init_hw(dw);
+}
+
+static void dw7800_remove(struct i2c_client *client)
+{
+	struct dw7800_data *dw = i2c_get_clientdata(client);
+
+	dw7800_stop_work(dw);
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(dw7800_pm_ops, dw7800_suspend, dw7800_resume);
@@ -285,6 +298,7 @@ static struct i2c_driver dw7800_driver = {
 		.of_match_table = dw7800_of_match,
 	},
 	.probe = dw7800_probe,
+	.remove = dw7800_remove,
 	.id_table = dw7800_i2c_id,
 };
 module_i2c_driver(dw7800_driver);
