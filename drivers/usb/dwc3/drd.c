@@ -497,9 +497,11 @@ static int dwc3_setup_role_switch(struct dwc3 *dwc)
 	dwc->role_switch_default_mode = usb_get_role_switch_default_mode(dwc->dev);
 	if (dwc->role_switch_default_mode == USB_DR_MODE_HOST) {
 		mode = DWC3_GCTL_PRTCAP_HOST;
+		dwc->role_switch_role = USB_ROLE_HOST;
 	} else {
 		dwc->role_switch_default_mode = USB_DR_MODE_PERIPHERAL;
 		mode = DWC3_GCTL_PRTCAP_DEVICE;
+		dwc->role_switch_role = USB_ROLE_DEVICE;
 	}
 	dwc3_set_mode(dwc, mode);
 
