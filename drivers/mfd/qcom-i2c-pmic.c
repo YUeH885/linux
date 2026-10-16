@@ -129,6 +129,8 @@ static void qcom_i2c_pmic_sync_enable(struct qcom_i2c_pmic_periph *periph)
 					    periph->base, disable, ret);
 			return;
 		}
+		/* Track the hardware state so a failed set can be retried. */
+		periph->applied[QCOM_I2C_PMIC_CFG_ENABLE] &= ~disable;
 	}
 
 	if (enable) {
@@ -141,10 +143,8 @@ static void qcom_i2c_pmic_sync_enable(struct qcom_i2c_pmic_periph *periph)
 					    periph->base, enable, ret);
 			return;
 		}
+		periph->applied[QCOM_I2C_PMIC_CFG_ENABLE] |= enable;
 	}
-
-	periph->applied[QCOM_I2C_PMIC_CFG_ENABLE] =
-		periph->desired[QCOM_I2C_PMIC_CFG_ENABLE];
 }
 
 static void qcom_i2c_pmic_irq_bus_sync_unlock(struct irq_data *data)
