@@ -1054,7 +1054,7 @@ static int qcom_slim_ngd_enable_stream(struct slim_stream_runtime *rt)
 	struct slim_controller *ctrl = sdev->ctrl;
 	struct slim_val_inf msg =  {0};
 	u8 wbuf[SLIM_MSGQ_BUF_LEN];
-	u8 rbuf[SLIM_MSGQ_BUF_LEN];
+	u8 rbuf[SLIM_MSGQ_BUF_LEN] = {};
 	struct slim_msg_txn txn = {0,};
 	int i, ret;
 
