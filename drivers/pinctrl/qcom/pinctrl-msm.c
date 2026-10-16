@@ -1344,7 +1344,6 @@ static int msm_gpio_irq_get_irqchip_state(struct irq_data *d,
 	if (which != IRQCHIP_STATE_PENDING)
 		return -EINVAL;
 
-	g = &pctrl->soc->groups[d->hwirq];
 	*val = msm_readl_intr_status(pctrl, g);
 
 	return 0;
