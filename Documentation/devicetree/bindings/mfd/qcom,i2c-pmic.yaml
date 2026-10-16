@@ -36,7 +36,7 @@ properties:
     const: 1
 
   "#size-cells":
-    const: 1
+    const: 0
 
   pinctrl-0: true
 
@@ -90,13 +90,13 @@ examples:
         interrupt-controller;
         #interrupt-cells = <3>;
         #address-cells = <1>;
-        #size-cells = <1>;
+        #size-cells = <0>;
         qcom,periph-map = <0x10 0x12 0x13 0x16>;
         wakeup-source;
 
         charger@1000 {
           compatible = "qcom,smb1355";
-          reg = <0x1000 0x700>;
+          reg = <0x1000>;
           interrupt-parent = <&i2c_pmic>;
           interrupts = <0x16 1 IRQ_TYPE_EDGE_RISING>,
                        <0x10 1 IRQ_TYPE_EDGE_RISING>,
