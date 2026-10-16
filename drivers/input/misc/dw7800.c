@@ -108,7 +108,6 @@ static void dw7800_worker(struct work_struct *work)
 		spin_unlock_irq(&dw->lock);
 		return;
 	}
-	mag = dw->magnitude;
 	duration_ms = dw->duration_ms;
 	spin_unlock_irq(&dw->lock);
 
