@@ -803,8 +803,10 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 				  struct slim_msg_txn *txn)
 {
 	struct qcom_slim_ngd_ctrl *ctrl = dev_get_drvdata(sctrl->dev);
+	struct qcom_slim_ngd_dma_desc *tx_desc;
 	DECLARE_COMPLETION_ONSTACK(tx_sent);
 	DECLARE_COMPLETION_ONSTACK(done);
+	unsigned long flags;
 	int ret, i;
 	unsigned long time_left;
 	u8 wbuf[SLIM_MSGQ_BUF_LEN];
@@ -833,6 +835,8 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 		dev_err(ctrl->dev, "Message buffer unavailable\n");
 		return -ENOMEM;
 	}
+	tx_desc = &ctrl->txdesc[((u8 *)pbuf - (u8 *)ctrl->tx_base) /
+				SLIM_MSGQ_BUF_LEN];
 
 	if (txn->mt == SLIM_MSG_MT_CORE &&
 		(txn->mc == SLIM_MSG_MC_CONNECT_SOURCE ||
@@ -912,6 +916,11 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 	if (!time_left) {
 		dev_err(sctrl->dev, "TX timed out:MC:0x%x,mt:0x%x", txn->mc,
 					txn->mt);
+		/* A late DMA callback must not complete the expired stack completion. */
+		spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+		if (tx_desc->comp == &tx_sent)
+			tx_desc->comp = NULL;
+		spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
 		mutex_unlock(&ctrl->tx_lock);
 		return -ETIMEDOUT;
 	}
