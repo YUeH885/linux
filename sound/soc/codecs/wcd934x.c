@@ -55,6 +55,7 @@
 #define WCD934X_SLIM_IRQ_OVERFLOW	BIT(0)
 #define WCD934X_SLIM_IRQ_UNDERFLOW	BIT(1)
 #define WCD934X_SLIM_IRQ_PORT_CLOSED	BIT(2)
+#define WCD934X_SLIM_OF_UF_MAX_RETRY_CNT	5
 
 #define WCD934X_MCLK_CLK_12P288MHZ	12288000
 #define WCD934X_MCLK_CLK_9P6MHZ		9600000
@@ -540,6 +541,7 @@ struct wcd934x_codec {
 	u32 hph_mode;
 	u32 tx_port_value[WCD934X_TX_MAX];
 	u32 rx_port_value[WCD934X_RX_MAX];
+	u16 tx_of_uf_cnt[WCD934X_TX_MAX][2];
 	int sido_input_src;
 	int dmic_0_1_clk_cnt;
 	int dmic_2_3_clk_cnt;
@@ -1900,6 +1902,7 @@ static int wcd934x_trigger(struct snd_pcm_substream *substream, int cmd,
 	struct wcd_slim_codec_dai_data *dai_data;
 	struct wcd934x_codec *wcd;
 	struct slim_stream_config *cfg;
+	struct wcd934x_slim_ch *ch;
 	int ret;
 
 	wcd = snd_soc_component_get_drvdata(dai->component);
@@ -1924,6 +1927,13 @@ static int wcd934x_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		/* Start the next stream with fresh per-port error counters. */
+		list_for_each_entry(ch, &dai_data->slim_ch_list, list) {
+			if (ch->port < WCD934X_TX_MAX) {
+				wcd->tx_of_uf_cnt[ch->port][0] = 0;
+				wcd->tx_of_uf_cnt[ch->port][1] = 0;
+			}
+		}
 		return wcd934x_stop_slim(dai_data);
 	default:
 		break;
@@ -2288,6 +2298,9 @@ static irqreturn_t wcd934x_slim_irq_handler(int irq, void *data)
 				reg = WCD934X_SLIM_PGD_PORT_INT_TX_EN0 +
 					(port_id / 8);
 			regmap_read(wcd->if_regmap, reg, &int_val);
+			/* Ignore interrupts of ports whose interrupt is not enabled. */
+			if (!(int_val & BIT(port_id % 8)))
+				continue;
 		}
 
 		if (val & WCD934X_SLIM_IRQ_OVERFLOW)
@@ -2300,23 +2313,38 @@ static irqreturn_t wcd934x_slim_irq_handler(int irq, void *data)
 					    "underflow error on %s port %d, value %x\n",
 					    (tx ? "TX" : "RX"), port_id, val);
 
+		if (tx) {
+			if (val & WCD934X_SLIM_IRQ_OVERFLOW)
+				wcd->tx_of_uf_cnt[port_id][0]++;
+			if (val & WCD934X_SLIM_IRQ_UNDERFLOW)
+				wcd->tx_of_uf_cnt[port_id][1]++;
+		}
+
 		if ((val & WCD934X_SLIM_IRQ_OVERFLOW) ||
 		    (val & WCD934X_SLIM_IRQ_UNDERFLOW)) {
-			if (!tx)
+			if (!tx) {
 				reg = WCD934X_SLIM_PGD_PORT_INT_EN0 +
 					(port_id / 8);
-			else
+			} else if (wcd->tx_of_uf_cnt[port_id][0] >
+				   WCD934X_SLIM_OF_UF_MAX_RETRY_CNT ||
+				   wcd->tx_of_uf_cnt[port_id][1] >
+				   WCD934X_SLIM_OF_UF_MAX_RETRY_CNT) {
 				reg = WCD934X_SLIM_PGD_PORT_INT_TX_EN0 +
 					(port_id / 8);
+			} else {
+				/* Tolerate transient errors while a port closes. */
+				goto skip_port_disable;
+			}
+
 			regmap_read(
 				wcd->if_regmap, reg, &int_val);
-			if (int_val & (1 << (port_id % 8))) {
-				int_val = int_val ^ (1 << (port_id % 8));
+			if (int_val & BIT(port_id % 8)) {
+				int_val = int_val ^ BIT(port_id % 8);
 				regmap_write(wcd->if_regmap,
 					     reg, int_val);
 			}
 		}
-
+skip_port_disable:
 		if (val & WCD934X_SLIM_IRQ_PORT_CLOSED)
 			dev_err_ratelimited(wcd->dev,
 					    "Port Closed %s port %d, value %x\n",
