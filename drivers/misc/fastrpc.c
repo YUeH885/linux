@@ -321,6 +321,7 @@ struct fastrpc_channel_ctx {
 	struct rpmsg_device *rpdev;
 	struct fastrpc_session_ctx session[FASTRPC_MAX_SESSIONS];
 	spinlock_t lock;
+	struct rw_semaphore rpdev_sem;
 	struct idr ctx_idr;
 	struct list_head users;
 	struct kref refcount;
@@ -1375,7 +1376,12 @@ static int fastrpc_invoke_send(struct fastrpc_session_ctx *sctx,
 	msg->size = roundup(ctx->msg_sz, PAGE_SIZE);
 	fastrpc_context_get(ctx);
 
-	ret = rpmsg_send(cctx->rpdev->ept, (void *)msg, sizeof(*msg));
+	down_read(&cctx->rpdev_sem);
+	if (cctx->rpdev)
+		ret = rpmsg_send(cctx->rpdev->ept, (void *)msg, sizeof(*msg));
+	else
+		ret = -EPIPE;
+	up_read(&cctx->rpdev_sem);
 
 	if (ret)
 		fastrpc_context_put(ctx);
@@ -1800,7 +1806,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 
 	sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_CREATE, 4, 0);
 	if (init.attrs)
-		sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_CREATE_ATTR, 4, 0);
+		sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_CREATE_ATTR, 6, 0);
 
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE,
 				      sc, args);
@@ -2265,7 +2271,7 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc,
 				      &args[0]);
 	if (err) {
-		dev_err(dev, "mmap error (len 0x%08llx)\n", buf->size);
+		dev_err(dev, "mmap error %d (len 0x%08llx)\n", err, buf->size);
 		fastrpc_buf_free(buf);
 		return err;
 	}
@@ -2783,6 +2789,7 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 	INIT_LIST_HEAD(&data->users);
 	INIT_LIST_HEAD(&data->invoke_interrupted_mmaps);
 	spin_lock_init(&data->lock);
+	init_rwsem(&data->rpdev_sem);
 	idr_init(&data->ctx_idr);
 	data->domain_id = domain_id;
 	data->rpdev = rpdev;
@@ -2825,8 +2832,10 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 	unsigned long flags;
 
 	/* No invocations past this point */
-	spin_lock_irqsave(&cctx->lock, flags);
+	down_write(&cctx->rpdev_sem);
 	cctx->rpdev = NULL;
+	up_write(&cctx->rpdev_sem);
+	spin_lock_irqsave(&cctx->lock, flags);
 	list_for_each_entry(user, &cctx->users, user)
 		fastrpc_notify_users(user);
 	spin_unlock_irqrestore(&cctx->lock, flags);
