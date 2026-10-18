@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/i2c/onnn,lc898219xi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: onsemi LC898219XI lens actuator
+
+maintainers:
+  - yuzu <yuzu23234@gmail.com>
+
+description:
+  I2C lens actuator with a 12-bit position register.
+
+properties:
+  compatible:
+    const: onnn,lc898219xi
+
+  reg:
+    maxItems: 1
+
+  vdd-supply:
+    description: Actuator power supply.
+
+  vio-supply:
+    description: I2C I/O supply.
+
+required:
+  - compatible
+  - reg
+  - vdd-supply
+  - vio-supply
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        lens@72 {
+            compatible = "onnn,lc898219xi";
+            reg = <0x72>;
+            vdd-supply = <&vreg_af>;
+            vio-supply = <&vreg_io>;
+        };
+    };
