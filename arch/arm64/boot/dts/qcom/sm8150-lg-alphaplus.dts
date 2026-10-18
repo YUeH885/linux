@@ -74,6 +74,58 @@
 		constant-charge-voltage-max-microvolt = <4430000>;
 	};
 
+	camera_rear_t_avdd: regulator-camera-rear-t-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_rear_t_avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&tlmm 115 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_sensor_rear_t_avdd_default>;
+		vin-supply = <&vreg_bob>;
+	};
+
+	camera_rear_t_dvdd: regulator-camera-rear-t-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_rear_t_dvdd";
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&pm8150_gpios 7 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&camera_rear_t_dvdd_default>;
+		vin-supply = <&vreg_s4a_1p8>;
+	};
+
+	camera_front_iovdd: regulator-camera-front-iovdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_front_iovdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&pm8150l_gpios 12 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&camera_front_iovdd_default>;
+		vin-supply = <&vreg_bob>;
+	};
+
+	camera_rear_t_afvdd: regulator-camera-rear-t-afvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_rear_t_afvdd";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&tlmm 165 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_sensor_rear_t_afvdd_default>;
+		vin-supply = <&vreg_bob>;
+	};
+
 	thermal-zones {
 		pa0-thermal {
 			thermal-sensors = <&pm8150_adc_tm 2>;
@@ -724,12 +776,14 @@
 	 * Reserve the eGPIO range except GPIO96 for SD card detect,
 	 * GPIO113 for NFC clock request, GPIO119 for SBU LDO/OE,
 	 * GPIO152 for touchscreen VDD, GPIO123 for the WCD9340 interrupt,
-	 * GPIO125 for the SMA6101 interrupt, GPIO126-135 for the secondary/
-	 * tertiary MI2S interfaces, GPIO143 for the codec reset and GPIO148
-	 * for DisplayPort AUX select. Touch IRQ uses PDC90, not TLMM122.
+	 * GPIO115 for the rear telephoto AVDD switch, GPIO125 for the SMA6101
+	 * interrupt, GPIO126-135 for the secondary/tertiary MI2S interfaces,
+	 * GPIO143 for the codec reset and GPIO148 for DisplayPort AUX select.
+	 * Touch IRQ uses PDC90, not TLMM122.
 	 */
-	gpio-reserved-ranges = <93 3>, <97 16>, <114 5>, <120 3>, <124 1>,
-			       <136 7>, <144 4>, <149 3>, <153 22>;
+	gpio-reserved-ranges = <93 3>, <97 16>, <114 1>, <116 3>, <120 3>,
+			       <124 1>, <136 7>, <144 4>, <149 3>, <153 12>,
+			       <166 9>;
 
 	nav_pps_default: nav-pps-default-state {
 		pins = "gpio60";
@@ -895,6 +949,198 @@
 		function = "gpio";
 		drive-strength = <2>;
 		bias-pull-down;
+	};
+
+	cam_mclk2_default: cam-mclk2-default-state {
+		pins = "gpio15";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+
+	cam_rear_t_reset_default: cam-rear-t-reset-default-state {
+		pins = "gpio25";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_sensor_rear_t_afvdd_default: cam-sensor-rear-t-afvdd-default-state {
+		pins = "gpio165";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
+	cam_rear_t_mclk_req: cam-rear-t-mclk-req-state {
+		pins = "gpio84";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_rear_t_mipi_sw: cam-rear-t-mipi-sw-state {
+		pins = "gpio29", "gpio49";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
+
+	cam_sensor_rear_t_avdd_default: cam-sensor-rear-t-avdd-default-state {
+		pins = "gpio115";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
+	cci0_i2c0_default: cci0-i2c0-default-state {
+		pins = "gpio17", "gpio18";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	cci0_i2c1_default: cci0-i2c1-default-state {
+		pins = "gpio19", "gpio20";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	cci0_i2c0_sleep: cci0-i2c0-sleep-state {
+		pins = "gpio17", "gpio18";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	cci0_i2c1_sleep: cci0-i2c1-sleep-state {
+		pins = "gpio19", "gpio20";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	cci1_i2c0_default: cci1-i2c0-default-state {
+		pins = "gpio31", "gpio32";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	cci1_i2c1_default: cci1-i2c1-default-state {
+		pins = "gpio33", "gpio34";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	cci1_i2c0_sleep: cci1-i2c0-sleep-state {
+		pins = "gpio31", "gpio32";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	cci1_i2c1_sleep: cci1-i2c1-sleep-state {
+		pins = "gpio33", "gpio34";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+};
+
+&cci0 {
+	status = "okay";
+	pinctrl-0 = <&cci0_i2c0_default>, <&cci0_i2c1_default>;
+	pinctrl-1 = <&cci0_i2c0_sleep>, <&cci0_i2c1_sleep>;
+};
+
+&cci1 {
+	status = "okay";
+	pinctrl-0 = <&cci1_i2c0_default>, <&cci1_i2c1_default>;
+	pinctrl-1 = <&cci1_i2c0_sleep>, <&cci1_i2c1_sleep>;
+};
+
+&camss {
+	status = "okay";
+	vdda-phy-supply = <&vreg_l3c_1p2>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
+
+	ports {
+		port@2 {
+			csiphy2_ep: endpoint {
+				clock-lanes = <4>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&s5k3m5_ep>;
+			};
+		};
+	};
+};
+
+&cci1_i2c1 {
+	lc898219xi: lens@72 {
+		compatible = "onnn,lc898219xi";
+		reg = <0x72>;
+		vdd-supply = <&camera_rear_t_afvdd>;
+		vio-supply = <&camera_front_iovdd>;
+	};
+
+	s5k3m5: camera@2d {
+		compatible = "samsung,s5k3m5";
+		reg = <0x2d>;
+
+		status = "okay";
+
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 25 GPIO_ACTIVE_LOW>;
+		mclk-request-gpios = <&tlmm 84 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk2_default &cam_rear_t_reset_default
+			     &cam_rear_t_mclk_req &cam_rear_t_mipi_sw>;
+
+		vdda-supply = <&camera_rear_t_avdd>;
+		vddd-supply = <&camera_rear_t_dvdd>;
+		vddio-supply = <&camera_front_iovdd>;
+		orientation = <1>;
+		rotation = <90>;
+		lens-focus = <&lc898219xi>;
+
+		port {
+			s5k3m5_ep: endpoint {
+				link-frequencies = /bits/ 64 <720000000 400000000>;
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
+};
+
+&pm8150l_gpios {
+	camera_front_iovdd_default: camera-front-iovdd-default-state {
+		pins = "gpio12";
+		function = "normal";
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		drive-push-pull;
+		output-high;
+	};
+};
+
+&pm8150_gpios {
+	camera_rear_t_dvdd_default: camera-rear-t-dvdd-default-state {
+		pins = "gpio7";
+		function = "normal";
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		drive-push-pull;
+		output-high;
 	};
 };
 
