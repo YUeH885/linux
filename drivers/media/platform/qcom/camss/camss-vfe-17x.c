@@ -12,6 +12,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
+#include <linux/minmax.h>
 
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
@@ -138,14 +139,16 @@
 #define VFE_COLOR_CORRECT_OFFSET_0		(0x784)
 #define VFE_COLOR_CORRECT_COEFF_Q		(0x790)
 
+#define VFE_RGB_LUT_CFG			(0x798)
+
 #define VFE_DMI_CFG				(0x0c24)
 #define VFE_DMI_ADDR				(0x0c28)
 #define VFE_DMI_DATA_HI			(0x0c2c)
 #define VFE_DMI_DATA_LO			(0x0c30)
 #define		DMI_CFG_AUTO_INCREMENT		(0x100)
-#define		DMI_GAMMA_R_BANK_0		(0x1a)
-#define		DMI_GAMMA_G_BANK_0		(0x1c)
-#define		DMI_GAMMA_B_BANK_0		(0x1e)
+#define		DMI_GAMMA_G_BANK_0		(0x1a)
+#define		DMI_GAMMA_B_BANK_0		(0x1c)
+#define		DMI_GAMMA_R_BANK_0		(0x1e)
 
 #define VFE_FULL_SCALE_Y_CFG			(0xa3c)
 #define VFE_FULL_SCALE_C_CFG			(0xa68)
@@ -387,26 +390,43 @@ static void vfe_ife_write_gamma(struct vfe_line *line,
 				bool reset_bank)
 {
 	struct vfe_device *vfe = to_vfe(line);
-	static const u8 bank_select[] = {
-		DMI_GAMMA_R_BANK_0,
-		DMI_GAMMA_G_BANK_0,
-		DMI_GAMMA_B_BANK_0,
+	static const struct {
+		u8 dmi_bank;
+		u8 payload_channel;
+	} channels[] = {
+		{ DMI_GAMMA_G_BANK_0, 1 },
+		{ DMI_GAMMA_B_BANK_0, 2 },
+		{ DMI_GAMMA_R_BANK_0, 0 },
 	};
 	u8 bank = reset_bank ? 0 : line->ife_gamma_bank ^ 1;
+	u32 rgb_lut_cfg;
 	unsigned int channel, entry;
 
-	for (channel = 0; channel < ARRAY_SIZE(bank_select); channel++) {
+	for (channel = 0; channel < ARRAY_SIZE(channels); channel++) {
+		const u16 *curve = config->gamma[channels[channel].payload_channel];
+
 		writel_relaxed(DMI_CFG_AUTO_INCREMENT |
-			       (bank_select[channel] + bank),
+			       (channels[channel].dmi_bank + bank),
 			       vfe->base + VFE_DMI_CFG);
 		writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
-		for (entry = 0; entry < V4L2_QCOM_CAMSS_IFE_GAMMA_ENTRIES;
-		     entry++)
-			writel_relaxed(config->gamma[channel][entry] & 0x3ff,
+		for (entry = 0; entry < V4L2_QCOM_CAMSS_IFE_GAMMA_ENTRIES - 1;
+		     entry++) {
+			unsigned int base = curve[entry];
+			int delta = (int)curve[entry + 1] - (int)base;
+
+			delta = clamp(delta, -512, 511);
+			writel_relaxed(base | ((delta & 0x3ff) << 10),
 				       vfe->base + VFE_DMI_DATA_LO);
+		}
 	}
 	writel_relaxed(0, vfe->base + VFE_DMI_CFG);
 	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+
+	/* Bits [2:0] select the read bank for B, G, and R channels. */
+	rgb_lut_cfg = ((bank & 1) << 0) |
+		      ((bank & 1) << 1) |
+		      ((bank & 1) << 2);
+	writel_relaxed(rgb_lut_cfg, vfe->base + VFE_RGB_LUT_CFG);
 	wmb();
 	line->ife_gamma_bank = bank;
 }

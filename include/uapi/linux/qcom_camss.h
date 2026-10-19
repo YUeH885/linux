@@ -10,7 +10,7 @@
 #define V4L2_CID_QCOM_CAMSS_IFE_CONFIG \
 	(V4L2_CID_USER_QCOM_CAMSS_BASE + 0)
 
-#define V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION	1
+#define V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION	2
 
 #define V4L2_QCOM_CAMSS_IFE_CONFIG_BLACK_LEVEL	(1U << 0)
 #define V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE	(1U << 1)
@@ -23,7 +23,7 @@
 	 V4L2_QCOM_CAMSS_IFE_CONFIG_GAMMA)
 
 #define V4L2_QCOM_CAMSS_IFE_GAMMA_CHANNELS	3
-#define V4L2_QCOM_CAMSS_IFE_GAMMA_ENTRIES	64
+#define V4L2_QCOM_CAMSS_IFE_GAMMA_ENTRIES	65
 
 /*
  * IFE tuning payload for VFE_LINE_PIX. frame_sequence is the sequence number
@@ -32,7 +32,9 @@
  * hardware encodes the compensation thresholds at 8-bit precision. White
  * balance gains use unsigned Q7, white balance offsets use signed 12-bit
  * values, CCM coefficients use signed Q7, CCM offsets use signed 12-bit
- * values, and gamma entries use 10-bit values.
+ * values, and gamma entries use 10-bit values. Gamma is supplied as 65
+ * samples per channel in R, G, B order; the driver derives the 64 hardware
+ * base/delta entries from consecutive samples.
  */
 struct v4l2_qcom_camss_ife_config {
 	__u32 version;
