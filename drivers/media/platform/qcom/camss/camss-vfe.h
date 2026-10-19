@@ -11,10 +11,13 @@
 #define QC_MSM_CAMSS_VFE_H
 
 #include <linux/clk.h>
+#include <linux/mutex.h>
 #include <linux/spinlock_types.h>
+#include <media/v4l2-ctrls.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
+#include <uapi/linux/qcom_camss.h>
 
 #include "camss-video.h"
 #include "camss-vfe-gen1.h"
@@ -87,6 +90,11 @@ struct vfe_output {
 struct vfe_line {
 	enum vfe_line_id id;
 	struct v4l2_subdev subdev;
+	struct v4l2_ctrl_handler ife_ctrls;
+	struct mutex ife_config_lock;
+	struct v4l2_qcom_camss_ife_config ife_config;
+	bool ife_ctrls_initialized;
+	u8 ife_gamma_bank;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
 	struct v4l2_mbus_framefmt fmt[MSM_VFE_PADS_NUM];
 	struct v4l2_rect compose;
@@ -186,6 +194,9 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 			      struct v4l2_device *v4l2_dev);
 
 void msm_vfe_unregister_entities(struct vfe_device *vfe);
+
+int vfe_ife_ctrl_init(struct vfe_line *line);
+void vfe_ife_ctrl_cleanup(struct vfe_line *line);
 
 /*
  * vfe_buf_add_pending - Add output buffer to list of pending

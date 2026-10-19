@@ -1302,7 +1302,6 @@ static int vfe_set_stream(struct v4l2_subdev *sd, int enable)
 	int ret;
 
 	if (enable) {
-		line->output.state = VFE_OUTPUT_RESERVED;
 		ret = vfe->res->hw_ops->vfe_enable(line);
 		if (ret < 0)
 			dev_err(vfe->camss->dev,
@@ -1986,6 +1985,7 @@ int msm_vfe_subdev_init(struct camss *camss, struct vfe_device *vfe,
 		l->id = i;
 		init_completion(&l->output.sof);
 		init_completion(&l->output.reg_update);
+		mutex_init(&l->ife_config_lock);
 
 		l->nformats = res->vfe.formats_rdi->nformats;
 		l->formats = res->vfe.formats_rdi->formats;
@@ -2192,6 +2192,16 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 			goto error_init;
 		}
 
+		if (i == VFE_LINE_PIX && !vfe->res->is_lite &&
+		    vfe->res->hw_ops == &vfe_ops_170) {
+			ret = vfe_ife_ctrl_init(&vfe->line[i]);
+			if (ret < 0) {
+				dev_err(dev, "Failed to initialize IFE controls: %d\n",
+					ret);
+				goto error_reg_subdev;
+			}
+		}
+
 		ret = v4l2_device_register_subdev(v4l2_dev, sd);
 		if (ret < 0) {
 			dev_err(dev, "Failed to register subdev: %d\n", ret);
@@ -2240,6 +2250,7 @@ error_reg_video:
 	v4l2_device_unregister_subdev(sd);
 
 error_reg_subdev:
+	vfe_ife_ctrl_cleanup(&vfe->line[i]);
 	media_entity_cleanup(&sd->entity);
 
 error_init:
@@ -2248,6 +2259,7 @@ error_init:
 		video_out = &vfe->line[i].video_out;
 
 		msm_video_unregister(video_out);
+		vfe_ife_ctrl_cleanup(&vfe->line[i]);
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
 	}
@@ -2271,8 +2283,10 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
 		struct camss_video *video_out = &vfe->line[i].video_out;
 
 		msm_video_unregister(video_out);
+		vfe_ife_ctrl_cleanup(&vfe->line[i]);
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
+		mutex_destroy(&vfe->line[i].ife_config_lock);
 	}
 }
 
