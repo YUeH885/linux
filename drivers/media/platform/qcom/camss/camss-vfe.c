@@ -273,6 +273,22 @@ const struct camss_formats vfe_formats_pix_8x96 = {
 	.formats = formats_pix_8x96
 };
 
+static const struct camss_format_info formats_pix_175[] = {
+	{ MEDIA_BUS_FMT_YUYV8_1_5X8, 8, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+};
+
+static const struct camss_format_info formats_pix_175_sink[] = {
+	{ MEDIA_BUS_FMT_SBGGR10_1X10, 10, V4L2_PIX_FMT_SBGGR10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SGBRG10_1X10, 10, V4L2_PIX_FMT_SGBRG10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SGRBG10_1X10, 10, V4L2_PIX_FMT_SGRBG10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SRGGB10_1X10, 10, V4L2_PIX_FMT_SRGGB10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+};
+
 const struct camss_formats vfe_formats_rdi_845 = {
 	.nformats = ARRAY_SIZE(formats_rdi_845),
 	.formats = formats_rdi_845
@@ -284,10 +300,35 @@ const struct camss_formats vfe_formats_pix_845 = {
 	.formats = formats_rdi_845
 };
 
+const struct camss_formats vfe_formats_pix_175 = {
+	.nformats = ARRAY_SIZE(formats_pix_175),
+	.formats = formats_pix_175
+};
+
+const struct camss_formats vfe_formats_pix_175_sink = {
+	.nformats = ARRAY_SIZE(formats_pix_175_sink),
+	.formats = formats_pix_175_sink
+};
+
+static bool vfe_is_pix_line(struct vfe_line *line)
+{
+	return line->id == VFE_LINE_PIX && !to_vfe(line)->res->is_lite;
+}
+
+static bool vfe_has_raw_isp(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+
+	return vfe_is_pix_line(line) && vfe->res->formats_pix_sink;
+}
+
 static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 			    unsigned int index, u32 src_req_code)
 {
 	struct vfe_device *vfe = to_vfe(line);
+
+	if (line->sink_formats != line->formats)
+		return index ? 0 : line->formats[0].code;
 
 	switch (vfe->camss->res->version) {
 	case CAMSS_8x16:
@@ -546,15 +587,19 @@ int vfe_enable_output_v2(struct vfe_line *line)
 	output->wait_reg_update = 0;
 	reinit_completion(&output->reg_update);
 
-	ops->vfe_wm_start(vfe, output->wm_idx[0], line);
+	for (i = 0; i < output->wm_num; i++)
+		ops->vfe_wm_start(vfe, output->wm_idx[i], line);
 
 	for (i = 0; i < CAMSS_INIT_BUF_COUNT; i++) {
+		unsigned int j;
+
 		output->buf[i] = vfe_buf_get_pending(output);
 		if (!output->buf[i])
 			break;
 		output->gen2.active_num++;
-		ops->vfe_wm_update(vfe, output->wm_idx[0],
-				   output->buf[i]->addr[0], line);
+		for (j = 0; j < output->wm_num; j++)
+			ops->vfe_wm_update(vfe, output->wm_idx[j],
+					   output->buf[i]->addr[j], line);
 		ops->reg_update(vfe, line->id);
 	}
 
@@ -588,9 +633,12 @@ int vfe_queue_buffer_v2(struct camss_video *vid,
 
 	if (output->state == VFE_OUTPUT_ON &&
 	    output->gen2.active_num < 2) {
+		unsigned int i;
+
 		output->buf[output->gen2.active_num++] = buf;
-		ops->vfe_wm_update(vfe, output->wm_idx[0],
-				   buf->addr[0], line);
+		for (i = 0; i < output->wm_num; i++)
+			ops->vfe_wm_update(vfe, output->wm_idx[i],
+					   buf->addr[i], line);
 		ops->reg_update(vfe, line->id);
 	} else {
 		vfe_buf_add_pending(output, buf);
@@ -977,17 +1025,16 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 			for (j = VFE_LINE_RDI0; j < vfe->res->line_num; j++) {
 				u32 tmp;
 				u8 bpp;
+				struct vfe_line *l = &vfe->line[j];
 
-				if (j == VFE_LINE_PIX) {
+				bpp = camss_format_get_bpp(l->sink_formats,
+							   l->nsink_formats,
+							   l->fmt[MSM_VFE_PAD_SINK].code);
+				if (vfe_is_pix_line(l) &&
+				    strcmp(clock->name, "camnoc_axi"))
 					tmp = pixel_clock[j];
-				} else {
-					struct vfe_line *l = &vfe->line[j];
-
-					bpp = camss_format_get_bpp(l->formats,
-								   l->nformats,
-								   l->fmt[MSM_VFE_PAD_SINK].code);
+				else
 					tmp = pixel_clock[j] * bpp / 64;
-				}
 
 				if (min_rate < tmp)
 					min_rate = tmp;
@@ -1058,17 +1105,16 @@ static int vfe_check_clock_rates(struct vfe_device *vfe)
 			for (j = VFE_LINE_RDI0; j < vfe->res->line_num; j++) {
 				u32 tmp;
 				u8 bpp;
+				struct vfe_line *l = &vfe->line[j];
 
-				if (j == VFE_LINE_PIX) {
+				bpp = camss_format_get_bpp(l->sink_formats,
+							   l->nsink_formats,
+							   l->fmt[MSM_VFE_PAD_SINK].code);
+				if (vfe_is_pix_line(l) &&
+				    strcmp(clock->name, "camnoc_axi"))
 					tmp = pixel_clock[j];
-				} else {
-					struct vfe_line *l = &vfe->line[j];
-
-					bpp = camss_format_get_bpp(l->formats,
-								   l->nformats,
-								   l->fmt[MSM_VFE_PAD_SINK].code);
+				else
 					tmp = pixel_clock[j] * bpp / 64;
-				}
 
 				if (min_rate < tmp)
 					min_rate = tmp;
@@ -1352,13 +1398,13 @@ static void vfe_try_format(struct vfe_line *line,
 	case MSM_VFE_PAD_SINK:
 		/* Set format on sink pad */
 
-		for (i = 0; i < line->nformats; i++)
-			if (fmt->code == line->formats[i].code)
+		for (i = 0; i < line->nsink_formats; i++)
+			if (fmt->code == line->sink_formats[i].code)
 				break;
 
-		/* If not found, use UYVY as default */
-		if (i >= line->nformats)
-			fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
+		/* Use the first supported format when the requested code is absent. */
+		if (i >= line->nsink_formats)
+			fmt->code = line->sink_formats[0].code;
 
 		fmt->width = clamp_t(u32, fmt->width, 1, 8191);
 		fmt->height = clamp_t(u32, fmt->height, 1, 8191);
@@ -1377,7 +1423,7 @@ static void vfe_try_format(struct vfe_line *line,
 
 		fmt->code = vfe_src_pad_code(line, fmt->code, 0, code);
 
-		if (line->id == VFE_LINE_PIX) {
+		if (vfe_is_pix_line(line)) {
 			struct v4l2_rect *rect;
 
 			rect = __vfe_get_crop(line, sd_state, which);
@@ -1390,6 +1436,10 @@ static void vfe_try_format(struct vfe_line *line,
 	}
 
 	fmt->colorspace = V4L2_COLORSPACE_SRGB;
+	if (vfe_has_raw_isp(line) && pad == MSM_VFE_PAD_SINK) {
+		fmt->width = clamp_t(u32, fmt->width, 16, 4096) & ~1;
+		fmt->height = clamp_t(u32, fmt->height, 4, 4096) & ~1;
+	}
 }
 
 /*
@@ -1429,6 +1479,11 @@ static void vfe_try_compose(struct vfe_line *line,
 
 	if (rect->height < 4)
 		rect->height = 4;
+	if (vfe_has_raw_isp(line)) {
+		rect->left = 0;
+		rect->top = 0;
+		rect->height &= ~1;
+	}
 }
 
 /*
@@ -1472,6 +1527,11 @@ static void vfe_try_crop(struct vfe_line *line,
 		rect->top = 0;
 		rect->height = 4;
 	}
+	if (vfe_has_raw_isp(line)) {
+		rect->left = max_t(s32, rect->left, 0) & ~1;
+		rect->top = max_t(s32, rect->top, 0) & ~1;
+		rect->height &= ~1;
+	}
 }
 
 /*
@@ -1489,10 +1549,10 @@ static int vfe_enum_mbus_code(struct v4l2_subdev *sd,
 	struct vfe_line *line = v4l2_get_subdevdata(sd);
 
 	if (code->pad == MSM_VFE_PAD_SINK) {
-		if (code->index >= line->nformats)
+		if (code->index >= line->nsink_formats)
 			return -EINVAL;
 
-		code->code = line->formats[code->index].code;
+		code->code = line->sink_formats[code->index].code;
 	} else {
 		struct v4l2_mbus_framefmt *sink_fmt;
 
@@ -1608,7 +1668,7 @@ static int vfe_set_format(struct v4l2_subdev *sd,
 		vfe_try_format(line, sd_state, MSM_VFE_PAD_SRC, format,
 			       fmt->which);
 
-		if (line->id != VFE_LINE_PIX)
+		if (!vfe_is_pix_line(line))
 			return 0;
 
 		/* Reset sink pad compose selection */
@@ -1642,7 +1702,7 @@ static int vfe_get_selection(struct v4l2_subdev *sd,
 	struct v4l2_rect *rect;
 	int ret;
 
-	if (line->id != VFE_LINE_PIX)
+	if (!vfe_is_pix_line(line))
 		return -EINVAL;
 
 	if (sel->pad == MSM_VFE_PAD_SINK)
@@ -1711,7 +1771,7 @@ static int vfe_set_selection(struct v4l2_subdev *sd,
 	struct v4l2_rect *rect;
 	int ret;
 
-	if (line->id != VFE_LINE_PIX)
+	if (!vfe_is_pix_line(line))
 		return -EINVAL;
 
 	if (sel->target == V4L2_SEL_TGT_COMPOSE &&
@@ -1927,12 +1987,17 @@ int msm_vfe_subdev_init(struct camss *camss, struct vfe_device *vfe,
 		init_completion(&l->output.sof);
 		init_completion(&l->output.reg_update);
 
-		if (i == VFE_LINE_PIX) {
+		l->nformats = res->vfe.formats_rdi->nformats;
+		l->formats = res->vfe.formats_rdi->formats;
+		if (i == VFE_LINE_PIX && !res->vfe.is_lite) {
 			l->nformats = res->vfe.formats_pix->nformats;
 			l->formats = res->vfe.formats_pix->formats;
-		} else {
-			l->nformats = res->vfe.formats_rdi->nformats;
-			l->formats = res->vfe.formats_rdi->formats;
+		}
+		l->nsink_formats = l->nformats;
+		l->sink_formats = l->formats;
+		if (i == VFE_LINE_PIX && res->vfe.formats_pix_sink) {
+			l->nsink_formats = res->vfe.formats_pix_sink->nformats;
+			l->sink_formats = res->vfe.formats_pix_sink->formats;
 		}
 	}
 
@@ -2134,7 +2199,7 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		}
 
 		video_out->ops = &vfe->video_ops;
-		if (i == VFE_LINE_PIX) {
+		if (vfe_is_pix_line(&vfe->line[i])) {
 			video_out->bpl_alignment = vfe_bpl_align_pix(vfe);
 			video_out->line_based = 1;
 		} else {

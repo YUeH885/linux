@@ -95,6 +95,8 @@ struct vfe_line {
 	struct vfe_output output;
 	const struct camss_format_info *formats;
 	unsigned int nformats;
+	const struct camss_format_info *sink_formats;
+	unsigned int nsink_formats;
 };
 
 struct vfe_device;
@@ -142,6 +144,7 @@ struct vfe_subdev_resources {
 	const struct vfe_hw_ops *hw_ops;
 	const struct camss_formats *formats_rdi;
 	const struct camss_formats *formats_pix;
+	const struct camss_formats *formats_pix_sink;
 };
 
 struct vfe_device {
@@ -241,6 +244,8 @@ extern const struct camss_formats vfe_formats_rdi_8x96;
 extern const struct camss_formats vfe_formats_pix_8x96;
 extern const struct camss_formats vfe_formats_rdi_845;
 extern const struct camss_formats vfe_formats_pix_845;
+extern const struct camss_formats vfe_formats_pix_175;
+extern const struct camss_formats vfe_formats_pix_175_sink;
 
 extern const struct vfe_hw_ops vfe_ops_4_1;
 extern const struct vfe_hw_ops vfe_ops_4_7;
@@ -314,5 +319,26 @@ int vfe_enable_output_v2(struct vfe_line *line);
  */
 int vfe_queue_buffer_v2(struct camss_video *vid,
 			struct camss_buffer *buf);
+
+/*
+ * vfe_calc_interp_reso - Calculate interpolation mode
+ * @input: Input resolution
+ * @output: Output resolution
+ *
+ * Return interpolation mode
+ */
+static inline u8 vfe_calc_interp_reso(u16 input, u16 output)
+{
+	if (input / output >= 16)
+		return 0;
+
+	if (input / output >= 8)
+		return 1;
+
+	if (input / output >= 4)
+		return 2;
+
+	return 3;
+}
 
 #endif /* QC_MSM_CAMSS_VFE_H */

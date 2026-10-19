@@ -474,16 +474,6 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 
 	pix_mp = &f->fmt.pix_mp;
 
-	if (video->line_based)
-		for (i = 0; i < pix_mp->num_planes && i < 3; i++) {
-			p = &pix_mp->plane_fmt[i];
-			bytesperline[i] = clamp_t(u32, p->bytesperline,
-						  1, 65528);
-			sizeimage[i] = clamp_t(u32, p->sizeimage,
-					       bytesperline[i],
-					       bytesperline[i] * CAMSS_FRAME_MAX_HEIGHT_PIX);
-		}
-
 	for (j = 0; j < video->nformats; j++)
 		if (pix_mp->pixelformat == video->formats[j].pixelformat)
 			break;
@@ -492,6 +482,17 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 		j = 0; /* default format */
 
 	fi = &video->formats[j];
+	if (video->line_based)
+		for (i = 0; i < min_t(unsigned int, pix_mp->num_planes, fi->planes); i++) {
+			p = &pix_mp->plane_fmt[i];
+			bytesperline[i] = clamp_t(u32, p->bytesperline,
+						  1, 65528);
+			sizeimage[i] = clamp_t(u32, p->sizeimage,
+					       bytesperline[i],
+					       bytesperline[i] * CAMSS_FRAME_MAX_HEIGHT_PIX /
+					       fi->vsub[i].numerator * fi->vsub[i].denominator);
+		}
+
 	width = pix_mp->width;
 	height = pix_mp->height;
 
@@ -502,7 +503,8 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 
 	pix_mp->pixelformat = fi->pixelformat;
 	pix_mp->width = clamp_t(u32, width, 1, CAMSS_FRAME_MAX_WIDTH);
-	pix_mp->height = clamp_t(u32, height, 1, CAMSS_FRAME_MAX_HEIGHT_RDI);
+	pix_mp->height = clamp_t(u32, height, 1, video->line_based ?
+				 CAMSS_FRAME_MAX_HEIGHT_PIX : CAMSS_FRAME_MAX_HEIGHT_RDI);
 	pix_mp->num_planes = fi->planes;
 	for (i = 0; i < pix_mp->num_planes; i++) {
 		bpl = pix_mp->width / fi->hsub[i].numerator *
@@ -528,7 +530,8 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 						  1, 65528);
 			p->sizeimage = clamp_t(u32, p->sizeimage,
 					       p->bytesperline,
-					       p->bytesperline * CAMSS_FRAME_MAX_HEIGHT_PIX);
+					       p->bytesperline * CAMSS_FRAME_MAX_HEIGHT_PIX /
+					       fi->vsub[i].numerator * fi->vsub[i].denominator);
 			lines = p->sizeimage / p->bytesperline;
 
 			if (p->bytesperline < bytesperline[i])

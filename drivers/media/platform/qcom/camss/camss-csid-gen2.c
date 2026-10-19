@@ -7,6 +7,7 @@
  * Copyright (C) 2020 Linaro Ltd.
  */
 #include <linux/completion.h>
+#include <linux/iopoll.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
@@ -119,6 +120,35 @@
 							+ 0x100 * (rdi))
 #define CSID_RDI_RPP_LINE_DROP_PERIOD(rdi)		((csid_is_lite(csid) ? 0x230 : 0x330)\
 							+ 0x100 * (rdi))
+
+#define CSID_PXL_IRQ_STATUS		0x30
+#define CSID_PXL_IRQ_CLEAR		0x38
+#define CSID_PXL_IRQ_RESET_DONE		BIT(1)
+#define CSID_PXL_HCROP			0x21c
+#define CSID_PXL_VCROP			0x220
+#define CSID_PXL_CFG0			0x200
+#define CSID_PXL_CFG1			0x204
+#define CSID_PXL_CTRL			0x208
+#define CSID_PXL_RST_STROBES		0x240
+#define CSID_PXL_FRM_DROP_PERIOD	0x210
+#define CSID_PXL_FRM_DROP_PATTERN	0x20c
+#define CSID_PXL_IRQ_SUBSAMPLE_PERIOD	0x218
+#define CSID_PXL_IRQ_SUBSAMPLE_PATTERN	0x214
+#define CSID_PXL_PIX_DROP_PERIOD	0x228
+#define CSID_PXL_PIX_DROP_PATTERN	0x224
+#define CSID_PXL_LINE_DROP_PERIOD	0x230
+#define CSID_PXL_LINE_DROP_PATTERN	0x22c
+#define CSID_PXL_CFG0_PATH_EN		BIT(31)
+#define CSID_PXL_CFG0_STORE_EN		BIT(7)
+#define CSID_PXL_CFG0_CROP_H_EN		BIT(5)
+#define CSID_PXL_CFG0_CROP_V_EN		BIT(6)
+#define CSID_PXL_CFG0_EARLY_EOF_EN	BIT(29)
+#define CSID_PXL_CFG0_INPUT_EN		BIT(0)
+#define CSID_PXL_CFG0_SOF_RETIMING_EN	BIT(1)
+#define CSID_PXL_CFG0_VC_SHIFT		22
+#define CSID_PXL_CFG0_DT_SHIFT		16
+#define CSID_PXL_CFG0_FMT_SHIFT		12
+#define CSID_PXL_CFG1_TIMESTAMP_SEL	2
 
 #define CSID_TPG_CTRL		0x600
 #define		TPG_CTRL_TEST_EN		0
@@ -322,9 +352,58 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8 
 	writel_relaxed(val, csid->base + CSID_RDI_CFG0(port));
 }
 
+static void __csid_configure_pix_stream(struct csid_device *csid, u8 enable,
+					 u8 port, u8 vc)
+{
+	struct v4l2_mbus_framefmt *input_format =
+		&csid->fmt[MSM_CSID_PAD_FIRST_SRC + port];
+	const struct csid_format_info *format =
+		csid_get_fmt_entry(csid->res->formats->formats,
+				   csid->res->formats->nformats,
+				   input_format->code);
+	u32 val;
+
+	if (!enable) {
+		val = readl_relaxed(csid->base + CSID_PXL_CFG0);
+		val &= ~(CSID_PXL_CFG0_PATH_EN | CSID_PXL_CFG0_STORE_EN);
+		writel_relaxed(val, csid->base + CSID_PXL_CFG0);
+		return;
+	}
+
+	val = vc << CSID_PXL_CFG0_VC_SHIFT;
+	val |= format->data_type << CSID_PXL_CFG0_DT_SHIFT;
+	val |= format->decode_format << CSID_PXL_CFG0_FMT_SHIFT;
+	val |= CSID_PXL_CFG0_INPUT_EN | CSID_PXL_CFG0_SOF_RETIMING_EN |
+	       CSID_PXL_CFG0_CROP_H_EN | CSID_PXL_CFG0_CROP_V_EN |
+	       CSID_PXL_CFG0_EARLY_EOF_EN;
+	writel_relaxed((input_format->width - 1) << 16, csid->base + CSID_PXL_HCROP);
+	writel_relaxed((input_format->height - 1) << 16, csid->base + CSID_PXL_VCROP);
+	val |= CSID_PXL_CFG0_STORE_EN;
+	val |= CSID_PXL_CFG0_PATH_EN;
+	writel_relaxed(val, csid->base + CSID_PXL_CFG0);
+
+	writel_relaxed(CSID_PXL_CFG1_TIMESTAMP_SEL,
+		       csid->base + CSID_PXL_CFG1);
+	writel_relaxed(1, csid->base + CSID_PXL_FRM_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_PXL_FRM_DROP_PATTERN);
+	writel_relaxed(1, csid->base + CSID_PXL_IRQ_SUBSAMPLE_PERIOD);
+	writel_relaxed(0, csid->base + CSID_PXL_IRQ_SUBSAMPLE_PATTERN);
+	writel_relaxed(1, csid->base + CSID_PXL_PIX_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_PXL_PIX_DROP_PATTERN);
+	writel_relaxed(1, csid->base + CSID_PXL_LINE_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_PXL_LINE_DROP_PATTERN);
+	writel_relaxed(1, csid->base + CSID_PXL_CTRL);
+	dev_dbg(csid->camss->dev,
+		 "CSID%d PIX enable fmt=0x%x dt=0x%x cfg0=0x%x cfg1=0x%x\n",
+		 csid->id, input_format->code, format->data_type,
+		 readl_relaxed(csid->base + CSID_PXL_CFG0),
+		 readl_relaxed(csid->base + CSID_PXL_CFG1));
+}
+
 static void csid_configure_stream(struct csid_device *csid, u8 enable)
 {
 	struct csid_testgen_config *tg = &csid->testgen;
+	bool is_pix;
 	u8 i;
 
 	/* Loop through all enabled ports and configure a stream for each */
@@ -333,9 +412,16 @@ static void csid_configure_stream(struct csid_device *csid, u8 enable)
 			if (tg->enabled)
 				__csid_configure_testgen(csid, enable, i, 0);
 
-			__csid_configure_rdi_stream(csid, enable, i, 0);
+			is_pix = csid->camss->res->version == CAMSS_8150 &&
+				 !csid_is_lite(csid) && i == 3;
+
+			if (is_pix) {
+				__csid_configure_pix_stream(csid, enable, i, 0);
+			} else {
+				__csid_configure_rdi_stream(csid, enable, i, 0);
+				__csid_ctrl_rdi(csid, enable, i);
+			}
 			__csid_configure_rx(csid, &csid->phy, 0);
-			__csid_ctrl_rdi(csid, enable, i);
 		}
 }
 
@@ -411,6 +497,21 @@ static int csid_reset(struct csid_device *csid)
 	if (!time) {
 		dev_err(csid->camss->dev, "CSID reset timeout\n");
 		return -EIO;
+	}
+
+	if (csid->camss->res->version == CAMSS_8150 && !csid_is_lite(csid)) {
+		int ret;
+
+		writel_relaxed(0x7f, csid->base + CSID_PXL_RST_STROBES);
+		ret = readl_poll_timeout(csid->base + CSID_PXL_IRQ_STATUS, val,
+					 val & CSID_PXL_IRQ_RESET_DONE, 10, 10000);
+		if (ret) {
+			dev_err(csid->camss->dev, "CSID pixel reset timeout\n");
+			return ret;
+		}
+		writel_relaxed(CSID_PXL_IRQ_RESET_DONE,
+			       csid->base + CSID_PXL_IRQ_CLEAR);
+		writel_relaxed(1, csid->base + CSID_IRQ_CMD);
 	}
 
 	return 0;

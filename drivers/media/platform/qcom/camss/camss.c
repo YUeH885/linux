@@ -1854,12 +1854,13 @@ static const struct camss_subdev_resources vfe_res_sm8150[] = {
 		.reg = { "vfe0" },
 		.interrupt = { "vfe0" },
 		.vfe = {
-			.line_num = 3,
+			.line_num = 4,
 			.has_pd = true,
 			.pd_name = "ife0",
 			.hw_ops = &vfe_ops_170,
 			.formats_rdi = &vfe_formats_rdi_845,
-			.formats_pix = &vfe_formats_pix_845
+			.formats_pix = &vfe_formats_pix_175,
+			.formats_pix_sink = &vfe_formats_pix_175_sink
 		}
 	},
 	/* VFE1 */
@@ -1878,12 +1879,13 @@ static const struct camss_subdev_resources vfe_res_sm8150[] = {
 		.reg = { "vfe1" },
 		.interrupt = { "vfe1" },
 		.vfe = {
-			.line_num = 3,
+			.line_num = 4,
 			.has_pd = true,
 			.pd_name = "ife1",
 			.hw_ops = &vfe_ops_170,
 			.formats_rdi = &vfe_formats_rdi_845,
-			.formats_pix = &vfe_formats_pix_845
+			.formats_pix = &vfe_formats_pix_175,
+			.formats_pix_sink = &vfe_formats_pix_175_sink
 		}
 	},
 	/* VFE2 (lite) */
