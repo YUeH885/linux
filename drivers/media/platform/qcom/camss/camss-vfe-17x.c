@@ -20,6 +20,7 @@
 
 #include "camss.h"
 #include "camss-vfe.h"
+#include "camss-vfe-17x-stats.h"
 #include "camss-vfe-17x-tuning.h"
 
 #define VFE_GLOBAL_RESET_CMD			(0x018)
@@ -228,6 +229,7 @@
 #define VFE_BUS_COMP_GRP_0			(0x2010)
 #define VFE_BUS_COMP_ERROR_STATUS		(0x206c)
 #define VFE_BUS_COMP_OVERWRITE_STATUS		(0x2070)
+#define VFE_BUS_DEBUG_STATUS_0			(0x2270)
 
 #define VFE_BUS_IRQ_CLEAR_GLOBAL		(0x2068)
 
@@ -430,6 +432,7 @@ static void vfe_ife_write_gamma(struct vfe_line *line,
 	wmb();
 	line->ife_gamma_bank = bank;
 }
+
 
 static void vfe_ife_write_config(struct vfe_line *line,
 				 const struct v4l2_qcom_camss_ife_config *config,
@@ -728,7 +731,7 @@ static int vfe_pix_program(struct vfe_line *line)
 	writel_relaxed(BIT(3) | BIT(4), vfe->base + VFE_BUS_COMP_GRP_0);
 	mutex_unlock(&line->ife_config_lock);
 
-	return 0;
+	return vfe_17x_stats_start(line);
 }
 
 static void vfe_global_reset(struct vfe_device *vfe)
@@ -892,7 +895,8 @@ static void vfe_enable_irq_common(struct vfe_device *vfe)
 	writel_relaxed(STATUS0_COMP0_BUF_DONE | STATUS0_COMP_ERROR |
 		       STATUS0_COMP_OVERWRITE | STATUS0_OVERFLOW | STATUS0_VIOLATION,
 		       vfe->base + VFE_BUS_IRQ_MASK(0));
-	writel_relaxed(vfe->res->is_lite ? GENMASK(3, 0) : GENMASK(2, 0),
+	writel_relaxed(vfe->res->is_lite ? GENMASK(3, 0) :
+		       (GENMASK(2, 0) | VFE_17X_STATS_IRQ_MASK),
 		       vfe->base + VFE_BUS_IRQ_MASK(1));
 	writel_relaxed(0, vfe->base + VFE_BUS_IRQ_MASK(2));
 }
@@ -960,10 +964,11 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	if (vfe_bus_status[0] & (STATUS0_COMP_ERROR | STATUS0_COMP_OVERWRITE |
 				 STATUS0_OVERFLOW | STATUS0_VIOLATION))
 		dev_err_ratelimited(vfe->camss->dev,
-			"VFE%u bus error %08x comp=%08x overwrite=%08x\n",
+			"VFE%u bus error %08x comp=%08x overwrite=%08x dbg=%08x\n",
 			vfe->id, vfe_bus_status[0],
 			readl_relaxed(vfe->base + VFE_BUS_COMP_ERROR_STATUS),
-			readl_relaxed(vfe->base + VFE_BUS_COMP_OVERWRITE_STATUS));
+			readl_relaxed(vfe->base + VFE_BUS_COMP_OVERWRITE_STATUS),
+			readl_relaxed(vfe->base + VFE_BUS_DEBUG_STATUS_0));
 
 	if (status0 & STATUS_0_RESET_ACK)
 		vfe->isr_ops.reset_ack(vfe);
@@ -986,6 +991,9 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	for (wm = 0; wm < (vfe->res->is_lite ? 4 : 3); wm++)
 		if (vfe_bus_status[1] & STATUS1_WM_CLIENT_BUF_DONE(wm))
 			vfe->isr_ops.wm_done(vfe, wm);
+
+	if (!vfe->res->is_lite)
+		vfe_17x_stats_isr(vfe, vfe_bus_status[1]);
 
 	if (!vfe->res->is_lite &&
 	    (vfe_bus_status[0] & STATUS0_COMP0_BUF_DONE))
@@ -1214,6 +1222,7 @@ static const struct vfe_isr_ops vfe_isr_ops_170 = {
 static const struct camss_video_ops vfe_video_ops_170 = {
 	.queue_buffer = vfe_queue_buffer_v2,
 	.flush_buffers = vfe_flush_buffers,
+	.get_stats = vfe_17x_get_stats,
 };
 
 static void vfe_subdev_init(struct device *dev, struct vfe_device *vfe)

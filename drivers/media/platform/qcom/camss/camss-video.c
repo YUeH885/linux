@@ -595,6 +595,17 @@ static int video_s_input(struct file *file, void *fh, unsigned int input)
 	return input == 0 ? 0 : -EINVAL;
 }
 
+static long video_ioctl_default(struct file *file, void *fh, bool valid_prio,
+				unsigned int cmd, void *arg)
+{
+	struct camss_video *video = video_drvdata(file);
+
+	if (cmd == VIDIOC_QCOM_CAMSS_GET_STATS && video->ops->get_stats)
+		return video->ops->get_stats(video, arg);
+
+	return -ENOTTY;
+}
+
 static const struct v4l2_ioctl_ops msm_vid_ioctl_ops = {
 	.vidioc_querycap		= video_querycap,
 	.vidioc_enum_fmt_vid_cap	= video_enum_fmt,
@@ -614,6 +625,7 @@ static const struct v4l2_ioctl_ops msm_vid_ioctl_ops = {
 	.vidioc_enum_input		= video_enum_input,
 	.vidioc_g_input			= video_g_input,
 	.vidioc_s_input			= video_s_input,
+	.vidioc_default			= video_ioctl_default,
 };
 
 /* -----------------------------------------------------------------------------

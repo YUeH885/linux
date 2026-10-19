@@ -95,6 +95,7 @@ struct vfe_line {
 	struct v4l2_qcom_camss_ife_config ife_config;
 	bool ife_ctrls_initialized;
 	u8 ife_gamma_bank;
+	struct vfe_17x_stats *stats;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
 	struct v4l2_mbus_framefmt fmt[MSM_VFE_PADS_NUM];
 	struct v4l2_rect compose;

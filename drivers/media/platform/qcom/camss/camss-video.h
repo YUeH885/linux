@@ -18,6 +18,7 @@
 #include <media/v4l2-fh.h>
 #include <media/v4l2-mediabus.h>
 #include <media/videobuf2-v4l2.h>
+#include <uapi/linux/qcom_camss.h>
 
 struct camss_buffer {
 	struct vb2_v4l2_buffer vb;
@@ -31,6 +32,8 @@ struct camss_video_ops {
 	int (*queue_buffer)(struct camss_video *vid, struct camss_buffer *buf);
 	int (*flush_buffers)(struct camss_video *vid,
 			     enum vb2_buffer_state state);
+	long (*get_stats)(struct camss_video *vid,
+			  struct v4l2_qcom_camss_stats *stats);
 };
 
 struct camss_video {

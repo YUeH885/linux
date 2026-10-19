@@ -3,7 +3,9 @@
 #define _UAPI_LINUX_QCOM_CAMSS_H
 
 #include <linux/types.h>
+#include <linux/ioctl.h>
 #include <linux/v4l2-controls.h>
+#include <linux/videodev2.h>
 
 #define V4L2_CID_USER_QCOM_CAMSS_BASE \
 	(V4L2_CID_USER_BASE + 0x1250)
@@ -51,5 +53,51 @@ struct v4l2_qcom_camss_ife_config {
 	__u16 gamma[V4L2_QCOM_CAMSS_IFE_GAMMA_CHANNELS]
 		[V4L2_QCOM_CAMSS_IFE_GAMMA_ENTRIES];
 };
+
+#define V4L2_QCOM_CAMSS_STATS_VERSION	1
+
+#define V4L2_QCOM_CAMSS_AWB_BG_H_NUM	32
+#define V4L2_QCOM_CAMSS_AWB_BG_V_NUM	24
+#define V4L2_QCOM_CAMSS_AWB_BG_REGIONS	\
+	(V4L2_QCOM_CAMSS_AWB_BG_H_NUM * V4L2_QCOM_CAMSS_AWB_BG_V_NUM)
+#define V4L2_QCOM_CAMSS_AWB_BG_REGION_SIZE	48
+#define V4L2_QCOM_CAMSS_BHIST_BINS	1024
+#define V4L2_QCOM_CAMSS_BHIST_CHANNELS	1
+#define V4L2_QCOM_CAMSS_BF_ROIS		25
+#define V4L2_QCOM_CAMSS_BF_REGION_SIZE	32
+#define V4L2_QCOM_CAMSS_BF_SIZE \
+	(8 + V4L2_QCOM_CAMSS_BF_ROIS * V4L2_QCOM_CAMSS_BF_REGION_SIZE)
+
+/*
+ * Raw 3A statistics for the most recent IFE frame. The caller supplies user
+ * buffers through awb_bg, bhist and bf; the driver copies the hardware DMA
+ * output. AWB BG uses V4L2_QCOM_CAMSS_AWB_BG_REGIONS entries of 48 bytes,
+ * BHIST uses 1024 32-bit bins for the selected channel and BF uses 25 32-byte
+ * regions following an eight-byte frame tag. All DMA fields are little-endian.
+ *
+ * Each AWB BG region contains four 30-bit sums in R, B, Gr, Gb order, followed
+ * by two words containing 16-bit R/B and Gr/Gb counts. Six more words hold the
+ * same fields for saturated pixels. BHIST bins contain 25-bit counts.
+ * Each BF region contains four 64-bit words: H sum[36:0]/count[61:39],
+ * H sharpness[39:0]/region ID[61:54], V sum[36:0]/count[61:39],
+ * and V sharpness[39:0]. sequence uses the PIX SOF frame number;
+ * timestamp is the CLOCK_MONOTONIC time of snapshot completion in nanoseconds.
+ * The last complete snapshot remains available after stream-off.
+ */
+struct v4l2_qcom_camss_stats {
+	__u32 version;
+	__u32 sequence;
+	__aligned_u64 timestamp;
+	__u32 awb_bg_regions;
+	__u32 bhist_bins;
+	__u32 bf_regions;
+	__u32 reserved;
+	__aligned_u64 awb_bg;
+	__aligned_u64 bhist;
+	__aligned_u64 bf;
+};
+
+#define VIDIOC_QCOM_CAMSS_GET_STATS \
+	_IOWR('V', BASE_VIDIOC_PRIVATE + 0, struct v4l2_qcom_camss_stats)
 
 #endif /* _UAPI_LINUX_QCOM_CAMSS_H */
