@@ -32,10 +32,12 @@
  * of the next frame to receive the update; use zero while the line is stopped.
  * black_level and black_level_comp use the IFE 14-bit code domain; the
  * hardware encodes the compensation thresholds at 8-bit precision. White
- * balance gains use unsigned Q7, white balance offsets use signed 12-bit
- * values, CCM coefficients use signed Q7, CCM offsets use signed 12-bit
- * values, and gamma entries use 10-bit values. Gamma is supplied as 65
- * samples per channel in R, G, B order; the driver derives the 64 hardware
+ * balance gains use unsigned Q7, white balance offsets use signed 15-bit
+ * values. White balance arrays use R, Gr, Gb, B order; Gr and Gb must match
+ * because WB12 has a single green channel. CCM coefficients use signed Q7
+ * in RGB row-major order and CCM offsets use signed 11-bit RGB values.
+ * Gamma is supplied as 65 10-bit samples per channel in R, G, B order;
+ * the driver derives the 64 hardware
  * base/delta entries from consecutive samples.
  */
 struct v4l2_qcom_camss_ife_config {

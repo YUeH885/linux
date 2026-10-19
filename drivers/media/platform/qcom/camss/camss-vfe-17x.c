@@ -91,6 +91,7 @@
 #define VFE_MODULE_COLOR_EN			(0x048)
 #define		COLOR_CC_EN			BIT(1)
 #define		COLOR_GAMMA_EN			BIT(3)
+#define VFE_MODULE_COLOR_CGC_OVERRIDE		(0x034)
 
 #define VFE_MODULE_ZOOM_EN			(0x04c)
 #define		ZOOM_CST_EN			BIT(0)
@@ -126,10 +127,10 @@
 
 
 #define VFE_DEMO_CFG				(0x6f8)
-#define VFE_DEMO_WB_LEFT_CFG_0			(0x6fc)
-#define VFE_DEMO_WB_LEFT_CFG_1			(0x700)
-#define VFE_DEMO_WB_LEFT_OFFSET_CFG_0		(0x704)
-#define VFE_DEMO_WB_LEFT_OFFSET_CFG_1		(0x708)
+#define VFE_DEMO_WB_CFG_0			(0x6fc)
+#define VFE_DEMO_WB_CFG_1			(0x700)
+#define VFE_DEMO_WB_OFFSET_CFG_0		(0x704)
+#define VFE_DEMO_WB_OFFSET_CFG_1		(0x708)
 #define VFE_DEMO_INTERP_COEFF_CFG		(0x71c)
 #define VFE_DEMO_INTERP_CLASSIFIER_0		(0x720)
 #define VFE_BLS_CFG_0				(0x6b0)
@@ -359,31 +360,41 @@ static void vfe_ife_write_black_level(struct vfe_device *vfe,
 static void vfe_ife_write_white_balance(struct vfe_device *vfe,
 					const struct v4l2_qcom_camss_ife_config *config)
 {
-	writel_relaxed((config->wb_gain_q7[0] & 0xfff) |
-		       ((config->wb_gain_q7[1] & 0xfff) << 16),
-		       vfe->base + VFE_DEMO_WB_LEFT_CFG_0);
-	writel_relaxed((config->wb_gain_q7[2] & 0xfff) |
-		       ((config->wb_gain_q7[3] & 0xfff) << 16),
-		       vfe->base + VFE_DEMO_WB_LEFT_CFG_1);
-	writel_relaxed(((u16)config->wb_offset[0] & 0xfff) |
-		       (((u16)config->wb_offset[1] & 0xfff) << 16),
-		       vfe->base + VFE_DEMO_WB_LEFT_OFFSET_CFG_0);
-	writel_relaxed(((u16)config->wb_offset[2] & 0xfff) |
-		       (((u16)config->wb_offset[3] & 0xfff) << 16),
-		       vfe->base + VFE_DEMO_WB_LEFT_OFFSET_CFG_1);
+	u16 r_gain = config->wb_gain_q7[0] & 0xfff;
+	u16 g_gain = config->wb_gain_q7[1] & 0xfff;
+	u16 b_gain = config->wb_gain_q7[3] & 0xfff;
+	u16 r_offset = (u16)config->wb_offset[0] & 0x7fff;
+	u16 g_offset = (u16)config->wb_offset[1] & 0x7fff;
+	u16 b_offset = (u16)config->wb_offset[3] & 0x7fff;
+
+	writel_relaxed(g_gain | (b_gain << 16),
+		       vfe->base + VFE_DEMO_WB_CFG_0);
+	writel_relaxed(r_gain,
+		       vfe->base + VFE_DEMO_WB_CFG_1);
+	writel_relaxed(g_offset | (b_offset << 16),
+		       vfe->base + VFE_DEMO_WB_OFFSET_CFG_0);
+	writel_relaxed(r_offset,
+		       vfe->base + VFE_DEMO_WB_OFFSET_CFG_1);
 }
 
 static void vfe_ife_write_ccm(struct vfe_device *vfe,
 			      const struct v4l2_qcom_camss_ife_config *config)
 {
-	unsigned int i;
+	static const u8 channels[] = { 1, 2, 0 };
+	unsigned int row, col;
 
-	for (i = 0; i < ARRAY_SIZE(config->ccm_q7); i++)
-		writel_relaxed((u16)config->ccm_q7[i] & 0xfff,
-			       vfe->base + VFE_COLOR_CORRECT_COEFF_0 + 4 * i);
-	for (i = 0; i < ARRAY_SIZE(config->ccm_offset); i++)
-		writel_relaxed((u16)config->ccm_offset[i] & 0xfff,
-			       vfe->base + VFE_COLOR_CORRECT_OFFSET_0 + 4 * i);
+	/* CC12 operates in G, B, R order; the payload matrix uses R, G, B. */
+	for (row = 0; row < ARRAY_SIZE(channels); row++) {
+		for (col = 0; col < ARRAY_SIZE(channels); col++) {
+			u16 coeff = config->ccm_q7[3 * channels[row] + channels[col]];
+
+			writel_relaxed(coeff & 0xfff,
+				       vfe->base + VFE_COLOR_CORRECT_COEFF_0 +
+				       4 * (3 * row + col));
+		}
+		writel_relaxed((u16)config->ccm_offset[channels[row]] & 0x7ff,
+			       vfe->base + VFE_COLOR_CORRECT_OFFSET_0 + 4 * row);
+	}
 	writel_relaxed(0, vfe->base + VFE_COLOR_CORRECT_COEFF_Q);
 }
 
@@ -401,8 +412,12 @@ static void vfe_ife_write_gamma(struct vfe_line *line,
 		{ DMI_GAMMA_R_BANK_0, 0 },
 	};
 	u8 bank = reset_bank ? 0 : line->ife_gamma_bank ^ 1;
-	u32 rgb_lut_cfg;
+	u32 cgc_override;
 	unsigned int channel, entry;
+
+	/* Gamma RAM needs its clock even before the color modules are enabled. */
+	cgc_override = readl_relaxed(vfe->base + VFE_MODULE_COLOR_CGC_OVERRIDE);
+	writel(~0U, vfe->base + VFE_MODULE_COLOR_CGC_OVERRIDE);
 
 	for (channel = 0; channel < ARRAY_SIZE(channels); channel++) {
 		const u16 *curve = config->gamma[channels[channel].payload_channel];
@@ -425,11 +440,9 @@ static void vfe_ife_write_gamma(struct vfe_line *line,
 	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
 
 	/* Bits [2:0] select the read bank for B, G, and R channels. */
-	rgb_lut_cfg = ((bank & 1) << 0) |
-		      ((bank & 1) << 1) |
-		      ((bank & 1) << 2);
-	writel_relaxed(rgb_lut_cfg, vfe->base + VFE_RGB_LUT_CFG);
+	writel_relaxed(bank ? GENMASK(2, 0) : 0, vfe->base + VFE_RGB_LUT_CFG);
 	wmb();
+	writel(cgc_override, vfe->base + VFE_MODULE_COLOR_CGC_OVERRIDE);
 	line->ife_gamma_bank = bank;
 }
 
@@ -469,15 +482,18 @@ static int vfe_ife_config_try_ctrl(struct v4l2_ctrl *ctrl)
 				return -ERANGE;
 	}
 
-	if (config->flags & V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE)
+	if (config->flags & V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE) {
+		if (config->wb_gain_q7[1] != config->wb_gain_q7[2] ||
+		    config->wb_offset[1] != config->wb_offset[2])
+			return -EINVAL;
 		for (i = 0; i < ARRAY_SIZE(config->wb_gain_q7); i++)
 			if (config->wb_gain_q7[i] > 0xfff)
 				return -ERANGE;
-	if (config->flags & V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE)
 		for (i = 0; i < ARRAY_SIZE(config->wb_offset); i++)
-			if (config->wb_offset[i] < -2048 ||
-			    config->wb_offset[i] > 2047)
+			if (config->wb_offset[i] < -16384 ||
+			    config->wb_offset[i] > 16383)
 				return -ERANGE;
+	}
 
 	if (config->flags & V4L2_QCOM_CAMSS_IFE_CONFIG_CCM) {
 		for (i = 0; i < ARRAY_SIZE(config->ccm_q7); i++)
@@ -485,8 +501,8 @@ static int vfe_ife_config_try_ctrl(struct v4l2_ctrl *ctrl)
 			    config->ccm_q7[i] > 2047)
 				return -ERANGE;
 		for (i = 0; i < ARRAY_SIZE(config->ccm_offset); i++)
-			if (config->ccm_offset[i] < -2048 ||
-			    config->ccm_offset[i] > 2047)
+			if (config->ccm_offset[i] < -1024 ||
+			    config->ccm_offset[i] > 1023)
 				return -ERANGE;
 	}
 
@@ -625,11 +641,20 @@ void vfe_ife_ctrl_cleanup(struct vfe_line *line)
 
 static int vfe_pix_program(struct vfe_line *line)
 {
+	static const struct {
+		u32 even;
+		u32 odd;
+	} demux_patterns[] = {
+		{ 0xc9, 0xac }, /* RGGB */
+		{ 0x9c, 0xca }, /* GRBG */
+		{ 0xca, 0x9c }, /* BGGR */
+		{ 0xac, 0xc9 }, /* GBRG */
+	};
 	struct vfe_device *vfe = to_vfe(line);
 	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
-	int pattern;
 	u32 first, last, top, bottom;
 	u32 val;
+	int pattern;
 
 	pattern = vfe_pix_pattern(sink->code);
 	if (pattern < 0) {
@@ -658,8 +683,8 @@ static int vfe_pix_program(struct vfe_line *line)
 	writel_relaxed(0x04000400, vfe->base + VFE_DEMUX_CFG + 8);
 	writel_relaxed(0x04000400, vfe->base + VFE_DEMUX_CFG + 12);
 	writel_relaxed(0x04000400, vfe->base + VFE_DEMUX_CFG + 16);
-	writel_relaxed(0xc9, vfe->base + VFE_DEMUX_CFG + 20);
-	writel_relaxed(0xac, vfe->base + VFE_DEMUX_CFG + 24);
+	writel_relaxed(demux_patterns[pattern].even, vfe->base + VFE_DEMUX_CFG + 20);
+	writel_relaxed(demux_patterns[pattern].odd, vfe->base + VFE_DEMUX_CFG + 24);
 
 	/* Program factory tuning before enabling the IFE color modules. */
 	mutex_lock(&line->ife_config_lock);
@@ -797,14 +822,6 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 
 		val = 1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE;
 		writel_relaxed(val, vfe->base + VFE_BUS_WM_CFG(wm));
-		dev_dbg(vfe->camss->dev,
-			 "WM%d cfg=0x%x w=%u h=%u pack=0x%x stride=%u inc=%u\n",
-			 wm, readl_relaxed(vfe->base + VFE_BUS_WM_CFG(wm)),
-			 readl_relaxed(vfe->base + VFE_BUS_WM_BUFFER_WIDTH_CFG(wm)),
-			 readl_relaxed(vfe->base + VFE_BUS_WM_BUFFER_HEIGHT_CFG(wm)),
-			 readl_relaxed(vfe->base + VFE_BUS_WM_PACKER_CFG(wm)),
-			 readl_relaxed(vfe->base + VFE_BUS_WM_STRIDE(wm)),
-			 readl_relaxed(vfe->base + VFE_BUS_WM_FRAME_INC(wm)));
 		return;
 	}
 
@@ -815,7 +832,7 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 	writel_relaxed(val, vfe->base + VFE_BUS_WM_BUFFER_HEIGHT_CFG(wm));
 
 	val = 0;
-	writel_relaxed(val, vfe->base + VFE_BUS_WM_PACKER_CFG(wm)); // XXX 1 for PLAIN8?
+	writel_relaxed(val, vfe->base + VFE_BUS_WM_PACKER_CFG(wm));
 
 	/* Configure stride for RDIs */
 	val = WM_STRIDE_DEFAULT_STRIDE;
@@ -956,9 +973,6 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	writel_relaxed(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
 	writel_relaxed(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
 
-	dev_dbg(vfe->camss->dev, "VFE%u IRQ top=%08x/%08x bus=%08x/%08x/%08x\n",
-		vfe->id, status0, status1, vfe_bus_status[0],
-		vfe_bus_status[1], vfe_bus_status[2]);
 	if (status1 & STATUS_1_VIOLATION)
 		vfe_violation_read(vfe);
 	if (vfe_bus_status[0] & (STATUS0_COMP_ERROR | STATUS0_COMP_OVERWRITE |
