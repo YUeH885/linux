@@ -11,6 +11,8 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 
+#include <media/v4l2-event.h>
+
 #include "camss.h"
 #include "camss-vfe.h"
 
@@ -474,7 +476,17 @@ error_get_output:
  */
 static void vfe_isr_sof(struct vfe_device *vfe, enum vfe_line_id line_id)
 {
-	/* nop */
+	struct vfe_line *line = &vfe->line[line_id];
+	struct vfe_output *output = &line->output;
+	struct v4l2_event event = { .type = V4L2_EVENT_FRAME_SYNC };
+	unsigned long flags;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	if (output->state == VFE_OUTPUT_ON) {
+		event.u.frame_sync.frame_sequence = output->sof_sequence++;
+		v4l2_event_queue(line->subdev.devnode, &event);
+	}
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
 }
 
 /*
@@ -531,7 +543,7 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	}
 
 	ready_buf->vb.vb2_buf.timestamp = ts;
-	ready_buf->vb.sequence = output->sequence++;
+	ready_buf->vb.sequence = output->sof_sequence - 1;
 
 	index = 0;
 	output->buf[0] = output->buf[1];
