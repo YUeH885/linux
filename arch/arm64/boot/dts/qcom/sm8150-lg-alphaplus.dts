@@ -1082,6 +1082,14 @@
 };
 
 &cci1_i2c1 {
+	s5k3m5_eeprom: eeprom@50 {
+		compatible = "atmel,24c32";
+		reg = <0x50>;
+		vcc-supply = <&camera_front_iovdd>;
+		read-only;
+		linux,readable-by-users;
+	};
+
 	lc898219xi: lens@72 {
 		compatible = "onnn,lc898219xi";
 		reg = <0x72>;
@@ -1109,6 +1117,8 @@
 		vdda-supply = <&camera_rear_t_avdd>;
 		vddd-supply = <&camera_rear_t_dvdd>;
 		vddio-supply = <&camera_front_iovdd>;
+		lg,camera-id = <3>;
+		nvmem = <&s5k3m5_eeprom>;
 		orientation = <1>;
 		rotation = <90>;
 		lens-focus = <&lc898219xi>;
