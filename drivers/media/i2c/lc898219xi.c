@@ -12,7 +12,9 @@
 
 #define LC898219XI_REG_POSITION	CCI_REG16(0x84)
 #define LC898219XI_REG_INITIALIZE	CCI_REG8(0xe0)
-#define LC898219XI_MAX_POSITION	4095
+#define LC898219XI_REG_TEMPERATURE	CCI_REG16(0x58)
+#define LC898219XI_MIN_POSITION	(-2048)
+#define LC898219XI_MAX_POSITION	2047
 
 static const char * const lc898219xi_supply_names[] = {
 	"vdd",
@@ -40,7 +42,8 @@ static int lc898219xi_set_ctrl(struct v4l2_ctrl *ctrl)
 	if (ret <= 0)
 		return ret;
 
-	ret = cci_write(lens->regmap, LC898219XI_REG_POSITION, ctrl->val, NULL);
+	ret = cci_write(lens->regmap, LC898219XI_REG_POSITION,
+			ctrl->val & 0xfff, NULL);
 	pm_runtime_put(lens->sd.dev);
 
 	return ret;
@@ -74,6 +77,7 @@ static int lc898219xi_resume(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct lc898219xi *lens = container_of(sd, struct lc898219xi, sd);
+	u64 temperature;
 	int ret;
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(lens->supplies), lens->supplies);
@@ -81,12 +85,36 @@ static int lc898219xi_resume(struct device *dev)
 		return ret;
 
 	usleep_range(20000, 21000);
+	ret = 0;
+	cci_write(lens->regmap, CCI_REG8(0x8e), 0x15, &ret);
+	cci_write(lens->regmap, CCI_REG8(0x8d), 0x20, &ret);
+	cci_write(lens->regmap, CCI_REG8(0x81), 0x80, &ret);
+	if (ret)
+		goto disable_supplies;
+
+	usleep_range(1000, 2000);
+	ret = cci_read(lens->regmap, LC898219XI_REG_TEMPERATURE,
+		       &temperature, NULL);
+	if (ret)
+		goto disable_supplies;
+
 	ret = cci_write(lens->regmap, LC898219XI_REG_INITIALIZE, 1, NULL);
 	if (ret)
 		goto disable_supplies;
 
 	usleep_range(1000, 2000);
-	ret = cci_write(lens->regmap, LC898219XI_REG_POSITION, lens->focus->val, NULL);
+	/* The factory telephoto driver scales the sampled temperature by eight. */
+	temperature = (u16)(temperature << 3);
+	cci_write(lens->regmap, CCI_REG16(0x30), temperature, &ret);
+	cci_write(lens->regmap, CCI_REG16(0x32), temperature, &ret);
+	cci_write(lens->regmap, CCI_REG16(0x76), temperature, &ret);
+	cci_write(lens->regmap, CCI_REG16(0x78), temperature, &ret);
+	cci_write(lens->regmap, CCI_REG8(0x8c), 0xe9, &ret);
+	if (ret)
+		goto disable_supplies;
+
+	ret = cci_write(lens->regmap, LC898219XI_REG_POSITION,
+			lens->focus->val & 0xfff, NULL);
 	if (ret)
 		goto disable_supplies;
 
@@ -139,7 +167,8 @@ static int lc898219xi_probe(struct i2c_client *client)
 	v4l2_ctrl_handler_init(&lens->controls, 1);
 	/* The LM-G820N factory profile starts at DAC code 100. */
 	lens->focus = v4l2_ctrl_new_std(&lens->controls, &lc898219xi_ctrl_ops,
-				       V4L2_CID_FOCUS_ABSOLUTE, 0,
+				       V4L2_CID_FOCUS_ABSOLUTE,
+				       LC898219XI_MIN_POSITION,
 				       LC898219XI_MAX_POSITION, 1, 100);
 	if (lens->controls.error) {
 		ret = lens->controls.error;
