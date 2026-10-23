@@ -113,6 +113,32 @@
 		vin-supply = <&vreg_s4a_1p8>;
 	};
 
+	camera_rear_w_avdd: regulator-camera-rear-w-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_rear_w_avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&pm8150l_gpios 6 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&camera_rear_w_avdd_default>;
+		vin-supply = <&vreg_bob>;
+	};
+
+	camera_rear_w_dvdd: regulator-camera-rear-w-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_rear_w_dvdd";
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&pm8150l_gpios 8 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&camera_rear_w_dvdd_default>;
+		vin-supply = <&vreg_s4a_1p8>;
+	};
+
 	camera_rear_t_avdd: regulator-camera-rear-t-avdd {
 		compatible = "regulator-fixed";
 		regulator-name = "camera_rear_t_avdd";
@@ -1004,8 +1030,22 @@
 		bias-disable;
 	};
 
+	cam_mclk1_default: cam-mclk1-default-state {
+		pins = "gpio14";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+
 	cam_rear_n_reset_default: cam-rear-n-reset-default-state {
 		pins = "gpio28";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_rear_w_reset_default: cam-rear-w-reset-default-state {
+		pins = "gpio30";
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;
@@ -1132,6 +1172,14 @@
 			};
 		};
 
+		port@1 {
+			csiphy1_ep: endpoint {
+				clock-lanes = <4>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&imx351_ep>;
+			};
+		};
+
 		port@2 {
 			csiphy2_ep: endpoint {
 				clock-lanes = <4>;
@@ -1187,6 +1235,47 @@
 			imx363_ep: endpoint {
 				link-frequencies = /bits/ 64 <678400000 280000000>;
 				remote-endpoint = <&csiphy0_ep>;
+			};
+		};
+	};
+};
+
+&cci0_i2c1 {
+	imx351_eeprom: eeprom@50 {
+		compatible = "atmel,24c32";
+		reg = <0x50>;
+		vcc-supply = <&vreg_l1c_1p8>;
+		read-only;
+		linux,readable-by-users;
+	};
+
+	imx351: camera@1a {
+		compatible = "sony,imx351";
+		reg = <0x1a>;
+
+		status = "okay";
+
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 30 GPIO_ACTIVE_LOW>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk1_default &cam_rear_w_reset_default>;
+
+		vdda-supply = <&camera_rear_w_avdd>;
+		vddd-supply = <&camera_rear_w_dvdd>;
+		vddio-supply = <&vreg_l1c_1p8>;
+		lg,camera-id = <2>;
+		nvmem = <&imx351_eeprom>;
+		orientation = <1>;
+		rotation = <90>;
+
+		port {
+			imx351_ep: endpoint {
+				link-frequencies = /bits/ 64 <664800000 510000000>;
+				remote-endpoint = <&csiphy1_ep>;
 			};
 		};
 	};
@@ -1264,6 +1353,24 @@
 
 	camera_rear_n_dvdd_default: camera-rear-n-dvdd-default-state {
 		pins = "gpio3";
+		function = "normal";
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		drive-push-pull;
+		output-high;
+	};
+
+	camera_rear_w_avdd_default: camera-rear-w-avdd-default-state {
+		pins = "gpio6";
+		function = "normal";
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		drive-push-pull;
+		output-high;
+	};
+
+	camera_rear_w_dvdd_default: camera-rear-w-dvdd-default-state {
+		pins = "gpio8";
 		function = "normal";
 		power-source = <0>;
 		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
