@@ -24,7 +24,7 @@
 #define IMX520_MODE_STREAMING		0x01
 
 #define IMX520_REG_ORIENTATION		CCI_REG8(0x0101)
-#define IMX520_ORIENTATION_FACTORY	0x03
+#define IMX520_ORIENTATION_FACTORY	0x02
 
 #define IMX520_REG_CHIP_ID		CCI_REG16(0x0016)
 #define IMX520_CHIP_ID			0x0520
@@ -56,9 +56,9 @@ static const s64 imx520_link_freq_menu[] = {
 	IMX520_LINK_FREQ_675P2MHZ,
 };
 
-/* The factory readout has both orientation bits enabled. */
+/* The factory readout has vertical orientation bit enabled. */
 static const u32 imx520_mbus_formats[] = {
-	MEDIA_BUS_FMT_SBGGR10_1X10,	MEDIA_BUS_FMT_SGBRG10_1X10,
+	MEDIA_BUS_FMT_SGBRG10_1X10,	MEDIA_BUS_FMT_SBGGR10_1X10,
 	MEDIA_BUS_FMT_SGRBG10_1X10,	MEDIA_BUS_FMT_SRGGB10_1X10,
 };
 
@@ -217,7 +217,7 @@ static const struct cci_reg_sequence imx520_init_regs[] = {
 	{ CCI_REG8(0xbc42), 0x00 },
 	{ CCI_REG8(0xbc43), 0x00 },
 	{ CCI_REG8(0xe07a), 0x01 },
-	{ CCI_REG8(0x0101), 0x03 },
+	{ CCI_REG8(0x0101), 0x02 },
 };
 
 static const struct cci_reg_sequence imx520_3280x2460_30fps_regs[] = {
