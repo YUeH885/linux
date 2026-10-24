@@ -4,6 +4,7 @@
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <media/v4l2-async.h>
 #include <media/v4l2-cci.h>
@@ -26,6 +27,7 @@ struct lc898219xi {
 	struct v4l2_ctrl_handler controls;
 	struct v4l2_ctrl *focus;
 	struct regmap *regmap;
+	u32 temperature_shift;
 	struct regulator_bulk_data supplies[ARRAY_SIZE(lc898219xi_supply_names)];
 };
 
@@ -103,8 +105,7 @@ static int lc898219xi_resume(struct device *dev)
 		goto disable_supplies;
 
 	usleep_range(1000, 2000);
-	/* The factory telephoto driver scales the sampled temperature by eight. */
-	temperature = (u16)(temperature << 3);
+	temperature = (u16)(temperature << lens->temperature_shift);
 	cci_write(lens->regmap, CCI_REG16(0x30), temperature, &ret);
 	cci_write(lens->regmap, CCI_REG16(0x32), temperature, &ret);
 	cci_write(lens->regmap, CCI_REG16(0x76), temperature, &ret);
@@ -145,6 +146,16 @@ static int lc898219xi_probe(struct i2c_client *client)
 	lens = devm_kzalloc(&client->dev, sizeof(*lens), GFP_KERNEL);
 	if (!lens)
 		return -ENOMEM;
+
+	ret = device_property_read_u32(&client->dev, "onnn,temperature-shift",
+				       &lens->temperature_shift);
+	if (ret)
+		return dev_err_probe(&client->dev, ret,
+				     "Failed to read temperature shift\n");
+	if (lens->temperature_shift != 0 && lens->temperature_shift != 1 &&
+	    lens->temperature_shift != 3)
+		return dev_err_probe(&client->dev, -EINVAL,
+				     "Invalid temperature shift\n");
 
 	for (i = 0; i < ARRAY_SIZE(lens->supplies); i++)
 		lens->supplies[i].supply = lc898219xi_supply_names[i];

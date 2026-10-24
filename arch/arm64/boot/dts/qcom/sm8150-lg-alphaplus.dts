@@ -1327,6 +1327,7 @@
 		reg = <0x72>;
 		vdd-supply = <&camera_rear_n_afvdd>;
 		vio-supply = <&vreg_l1c_1p8>;
+		onnn,temperature-shift = <0>;
 	};
 
 	imx363_ois: ois@3e {
@@ -1426,6 +1427,7 @@
 		reg = <0x72>;
 		vdd-supply = <&camera_rear_t_afvdd>;
 		vio-supply = <&camera_front_iovdd>;
+		onnn,temperature-shift = <3>;
 	};
 
 	s5k3m5: camera@2d {
@@ -1476,6 +1478,7 @@
 		reg = <0x72>;
 		vdd-supply = <&camera_front_afvdd>;
 		vio-supply = <&camera_front_iovdd>;
+		onnn,temperature-shift = <1>;
 	};
 
 	imx520: camera@10 {
