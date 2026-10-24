@@ -986,6 +986,14 @@ config VIDEO_LC898219XI
 	  This is a driver for the onsemi LC898219XI camera lens actuator.
 	  The device provides 12-bit position control over I2C.
 
+config VIDEO_LC898124EP1
+	tristate "onsemi LC898124EP1 optical image stabilization support"
+	select V4L2_CCI_I2C
+	help
+	  This is a driver for the onsemi LC898124EP1 optical image
+	  stabilization (OIS) controller. The device provides optical
+	  stabilization control over I2C.
+
 endif
 
 menu "Flash devices"
