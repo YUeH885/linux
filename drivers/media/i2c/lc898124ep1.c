@@ -4,8 +4,11 @@
  */
 
 #include <linux/delay.h>
+#include <linux/firmware.h>
 #include <linux/i2c.h>
+#include <linux/iopoll.h>
 #include <linux/module.h>
+#include <linux/nvmem-consumer.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <media/v4l2-async.h>
@@ -15,10 +18,21 @@
 
 #define LC898124EP1_REG_MODE	0xf013
 #define LC898124EP1_REG_ENABLE	0xf012
+#define LC898124EP1_REG_CENTER	0xf010
+#define LC898124EP1_REG_STATUS	0xf100
+#define LC898124EP1_REG_IO_ADDR	0xc000
+#define LC898124EP1_REG_IO_DATA	0xd000
+#define LC898124EP1_ROMINFO	0xe0500c
+#define LC898124EP1_CORE_RESET	0xd000ac
+#define LC898124EP1_PM_CHECKSUM	0x0514
+#define LC898124EP1_DM_CHECKSUM	0x0540
+#define LC898124EP1_DM_COMMAND	0x8588
+#define LC898124EP1_FW_PREFIX	"onnn/lc898124ep1-lgit-"
 
 static const char * const lc898124ep1_supply_names[] = {
 	"vdd",
 	"vio",
+	"vmotor",
 };
 
 struct lc898124ep1 {
@@ -26,18 +40,172 @@ struct lc898124ep1 {
 	struct v4l2_ctrl_handler controls;
 	struct v4l2_ctrl *stabilization;
 	struct regmap *regmap;
+	u8 firmware_variant;
 	struct regulator_bulk_data supplies[ARRAY_SIZE(lc898124ep1_supply_names)];
 };
 
-static int lc898124ep1_set_stabilization(struct lc898124ep1 *ois, bool enable)
+static int lc898124ep1_send(struct lc898124ep1 *ois, const u8 *data, size_t size)
 {
+	struct i2c_client *client = v4l2_get_subdevdata(&ois->sd);
+	int ret = i2c_master_send(client, data, size);
+
+	return ret < 0 ? ret : (ret == size ? 0 : -EIO);
+}
+
+static int lc898124ep1_wait_ready(struct lc898124ep1 *ois)
+{
+	u64 status;
+	int ret, read_ret;
+
+	ret = read_poll_timeout(cci_read, read_ret, read_ret || !status,
+				5000, 75000, false, ois->regmap,
+				CCI_REG32(LC898124EP1_REG_STATUS), &status, NULL);
+	return read_ret ? read_ret : ret;
+}
+
+static int lc898124ep1_command(struct lc898124ep1 *ois, u16 reg, u32 value)
+{
+	int ret;
+
+	ret = cci_write(ois->regmap, CCI_REG32(reg), value, NULL);
+	if (ret)
+		return ret;
+
+	return lc898124ep1_wait_ready(ois);
+}
+
+static int lc898124ep1_download(struct lc898124ep1 *ois,
+				const struct firmware *pm, const struct firmware *dm)
+{
+	u8 pm_start[] = { 0x30, 0x00, 0x10, 0x00, 0x00 };
+	u8 pm_check[] = { 0xf0, 0x0a, pm->size / 5 >> 8, pm->size / 5 };
+	u8 pm_word[6] = { 0x40 };
+	const u8 *dm_command = NULL;
+	u64 rom, pm_sum, dm_sum, version, actuator;
+	u32 expected = ois->firmware_variant == 1 ? 0xa7350880 : 0xaa9f0742;
+	size_t offset;
 	int ret = 0;
 
-	cci_write(ois->regmap, CCI_REG32(LC898124EP1_REG_MODE), 0, &ret);
-	cci_write(ois->regmap, CCI_REG32(LC898124EP1_REG_ENABLE),
-		  enable ? 1 : 0, &ret);
+	cci_write(ois->regmap, CCI_REG32(LC898124EP1_REG_IO_ADDR),
+		  LC898124EP1_ROMINFO, &ret);
+	cci_read(ois->regmap, CCI_REG32(LC898124EP1_REG_IO_DATA), &rom, &ret);
+	if (ret)
+		return ret;
 
+	if ((rom & 0xff) == 1) {
+		cci_write(ois->regmap, CCI_REG32(LC898124EP1_REG_IO_ADDR),
+			  LC898124EP1_CORE_RESET, &ret);
+		cci_write(ois->regmap, CCI_REG32(LC898124EP1_REG_IO_DATA),
+			  0x1000, &ret);
+		if (ret)
+			return ret;
+		usleep_range(6000, 7000);
+	} else if ((rom & 0xff) != 0x0a) {
+		dev_err(ois->sd.dev, "Unexpected boot ROM status: %#llx\n", rom);
+		return -EPROTO;
+	}
+
+	ret = lc898124ep1_send(ois, pm_start, sizeof(pm_start));
+	if (ret)
+		return ret;
+
+	/* A five-byte PM word plus its command fits the CCI write FIFO. */
+	for (offset = 0; offset < pm->size; offset += 5) {
+		memcpy(pm_word + 1, pm->data + offset, 5);
+		ret = lc898124ep1_send(ois, pm_word, sizeof(pm_word));
+		if (ret)
+			return ret;
+	}
+	ret = lc898124ep1_send(ois, pm_check, sizeof(pm_check));
+	if (ret)
+		return ret;
+
+	cci_write(ois->regmap, CCI_REG32(LC898124EP1_DM_CHECKSUM), 0, &ret);
+	cci_write(ois->regmap, CCI_REG32(LC898124EP1_DM_COMMAND), 0x1001de, &ret);
+	if (ret)
+		return ret;
+	for (offset = 0; offset < dm->size; offset += 6) {
+		/* Keep the checksum handler active across separate I2C writes. */
+		if (dm->data[offset] == 0x85 && dm->data[offset + 1] == 0x88) {
+			dm_command = dm->data + offset;
+			continue;
+		}
+		ret = lc898124ep1_send(ois, dm->data + offset, 6);
+		if (ret)
+			return ret;
+	}
+	if (!dm_command)
+		return -EINVAL;
+	ret = lc898124ep1_send(ois, dm_command, 6);
+	if (ret)
+		return ret;
+	cci_read(ois->regmap, CCI_REG32(LC898124EP1_PM_CHECKSUM), &pm_sum, &ret);
+	cci_read(ois->regmap, CCI_REG32(LC898124EP1_DM_CHECKSUM), &dm_sum, &ret);
+	cci_write(ois->regmap, CCI_REG32(LC898124EP1_DM_COMMAND), 0x418c4, &ret);
+	if (ret)
+		return ret;
+	if ((u32)(pm_sum + dm_sum) != expected) {
+		dev_err(ois->sd.dev, "Firmware checksum mismatch: PM %#llx DM %#llx\n",
+			pm_sum, dm_sum);
+		return -EBADMSG;
+	}
+
+	ret = cci_write(ois->regmap, CCI_REG32(0xf000), 0, NULL);
+	if (ret)
+		return ret;
+	ret = lc898124ep1_wait_ready(ois);
+	if (ret)
+		return ret;
+	cci_read(ois->regmap, CCI_REG32(0x8000), &version, &ret);
+	cci_read(ois->regmap, CCI_REG32(0x8004), &actuator, &ret);
+	cci_write(ois->regmap, CCI_REG32(LC898124EP1_REG_IO_ADDR),
+		  LC898124EP1_ROMINFO, &ret);
+	cci_read(ois->regmap, CCI_REG32(LC898124EP1_REG_IO_DATA), &rom, &ret);
+	if (ret)
+		return ret;
+	if ((rom & 0xff) != 1 || version != 0x090e000b ||
+	    actuator != ois->firmware_variant << 8)
+		return -EPROTO;
+
+	dev_info(ois->sd.dev, "DSP firmware %#llx, actuator %#llx, checksum %#x\n",
+		 version, actuator, expected);
+	return lc898124ep1_command(ois, LC898124EP1_REG_CENTER, 3);
+}
+
+static int lc898124ep1_load_firmware(struct lc898124ep1 *ois)
+{
+	const struct firmware *pm, *dm;
+	char name[64];
+	int ret;
+
+	snprintf(name, sizeof(name), LC898124EP1_FW_PREFIX "%u.pm", ois->firmware_variant);
+	ret = request_firmware(&pm, name, ois->sd.dev);
+	if (ret)
+		return ret;
+	snprintf(name, sizeof(name), LC898124EP1_FW_PREFIX "%u.dm", ois->firmware_variant);
+	ret = request_firmware(&dm, name, ois->sd.dev);
+	if (ret)
+		goto release_pm;
+
+	if (pm->size != 864 * 5 || dm->size != 0x394 * 6 / 4)
+		ret = -EINVAL;
+	else
+		ret = lc898124ep1_download(ois, pm, dm);
+	release_firmware(dm);
+release_pm:
+	release_firmware(pm);
 	return ret;
+}
+
+static int lc898124ep1_set_stabilization(struct lc898124ep1 *ois, bool enable)
+{
+	int ret;
+
+	ret = lc898124ep1_command(ois, LC898124EP1_REG_MODE, 0);
+	if (ret)
+		return ret;
+
+	return lc898124ep1_command(ois, LC898124EP1_REG_ENABLE, enable);
 }
 
 static int lc898124ep1_set_ctrl(struct v4l2_ctrl *ctrl)
@@ -95,7 +263,9 @@ static int lc898124ep1_resume(struct device *dev)
 
 	usleep_range(20000, 21000);
 
-	ret = lc898124ep1_set_stabilization(ois, ois->stabilization->val != 0);
+	ret = lc898124ep1_load_firmware(ois);
+	if (!ret)
+		ret = lc898124ep1_set_stabilization(ois, ois->stabilization->val != 0);
 	if (ret) {
 		regulator_bulk_disable(ARRAY_SIZE(ois->supplies), ois->supplies);
 		return ret;
@@ -108,8 +278,13 @@ static int lc898124ep1_suspend(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct lc898124ep1 *ois = container_of(sd, struct lc898124ep1, sd);
+	int ret;
 
-	lc898124ep1_set_stabilization(ois, false);
+	ret = lc898124ep1_set_stabilization(ois, false);
+	if (!ret)
+		ret = lc898124ep1_command(ois, LC898124EP1_REG_CENTER, 0);
+	if (ret)
+		dev_warn(dev, "Failed to stop DSP before power off: %d\n", ret);
 	usleep_range(2000, 3000);
 
 	return regulator_bulk_disable(ARRAY_SIZE(ois->supplies), ois->supplies);
@@ -119,11 +294,20 @@ static int lc898124ep1_probe(struct i2c_client *client)
 {
 	struct lc898124ep1 *ois;
 	unsigned int i;
+	u8 vcm_version;
 	int ret;
 
 	ois = devm_kzalloc(&client->dev, sizeof(*ois), GFP_KERNEL);
 	if (!ois)
 		return -ENOMEM;
+
+	ret = nvmem_cell_read_u8(&client->dev, "vcm-version", &vcm_version);
+	if (ret)
+		return dev_err_probe(&client->dev, ret, "Failed to read VCM version\n");
+	if (vcm_version != 2 && vcm_version != 3)
+		return dev_err_probe(&client->dev, -EINVAL,
+				     "Unsupported VCM version: %#x\n", vcm_version);
+	ois->firmware_variant = vcm_version - 1;
 
 	for (i = 0; i < ARRAY_SIZE(ois->supplies); i++)
 		ois->supplies[i].supply = lc898124ep1_supply_names[i];
@@ -209,3 +393,7 @@ module_i2c_driver(lc898124ep1_driver);
 
 MODULE_DESCRIPTION("onsemi LC898124EP1 optical image stabilization driver");
 MODULE_LICENSE("GPL");
+MODULE_FIRMWARE(LC898124EP1_FW_PREFIX "1.pm");
+MODULE_FIRMWARE(LC898124EP1_FW_PREFIX "1.dm");
+MODULE_FIRMWARE(LC898124EP1_FW_PREFIX "2.pm");
+MODULE_FIRMWARE(LC898124EP1_FW_PREFIX "2.dm");

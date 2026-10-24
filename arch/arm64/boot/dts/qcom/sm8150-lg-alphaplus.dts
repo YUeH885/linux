@@ -1320,6 +1320,16 @@
 		vcc-supply = <&vreg_l1c_1p8>;
 		read-only;
 		linux,readable-by-users;
+
+		nvmem-layout {
+			compatible = "fixed-layout";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			imx363_vcm_version: vcm-version@ef1 {
+				reg = <0xef1 1>;
+			};
+		};
 	};
 
 	imx363_lens: lens@72 {
@@ -1333,8 +1343,11 @@
 	imx363_ois: ois@3e {
 		compatible = "onnn,lc898124ep1";
 		reg = <0x3e>;
-		vdd-supply = <&camera_rear_n_mvdd>;
+		vdd-supply = <&camera_rear_n_afvdd>;
+		vmotor-supply = <&camera_rear_n_mvdd>;
 		vio-supply = <&vreg_l1c_1p8>;
+		nvmem-cells = <&imx363_vcm_version>;
+		nvmem-cell-names = "vcm-version";
 	};
 
 	imx363: camera@10 {

@@ -988,6 +988,8 @@ config VIDEO_LC898219XI
 
 config VIDEO_LC898124EP1
 	tristate "onsemi LC898124EP1 optical image stabilization support"
+	depends on NVMEM
+	select FW_LOADER
 	select V4L2_CCI_I2C
 	help
 	  This is a driver for the onsemi LC898124EP1 optical image

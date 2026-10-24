@@ -22,11 +22,24 @@ properties:
   vio-supply:
     description: I2C I/O supply.
 
+  vmotor-supply:
+    description: Motor power supply.
+
+  nvmem-cells:
+    maxItems: 1
+    description: Module VCM version used to select the DSP firmware.
+
+  nvmem-cell-names:
+    const: vcm-version
+
 required:
   - compatible
   - reg
   - vdd-supply
   - vio-supply
+  - vmotor-supply
+  - nvmem-cells
+  - nvmem-cell-names
 
 additionalProperties: false
 
@@ -41,5 +54,8 @@ examples:
             reg = <0x3e>;
             vdd-supply = <&vreg_ois>;
             vio-supply = <&vreg_io>;
+            vmotor-supply = <&vreg_motor>;
+            nvmem-cells = <&vcm_version>;
+            nvmem-cell-names = "vcm-version";
         };
     };
