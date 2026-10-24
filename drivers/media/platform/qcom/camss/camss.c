@@ -4851,12 +4851,8 @@ struct media_pad *camss_find_sensor_pad(struct media_entity *entity)
 	struct media_pad *pad;
 
 	while (1) {
-		pad = &entity->pads[0];
-		if (!(pad->flags & MEDIA_PAD_FL_SINK))
-			return NULL;
-
-		pad = media_pad_remote_pad_first(pad);
-		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		pad = media_entity_remote_source_pad_unique(entity);
+		if (IS_ERR(pad) || !is_media_entity_v4l2_subdev(pad->entity))
 			return NULL;
 
 		entity = pad->entity;
@@ -4864,6 +4860,18 @@ struct media_pad *camss_find_sensor_pad(struct media_entity *entity)
 		if (entity->function == MEDIA_ENT_F_CAM_SENSOR)
 			return pad;
 	}
+}
+
+int camss_get_active_data_lanes(struct media_entity *entity,
+				unsigned int max_data_lanes)
+{
+	struct media_pad *sensor_pad;
+
+	sensor_pad = camss_find_sensor_pad(entity);
+	if (!sensor_pad)
+		return -ENODEV;
+
+	return v4l2_get_active_data_lanes(sensor_pad, max_data_lanes);
 }
 
 /**
@@ -5016,6 +5024,7 @@ static int camss_parse_endpoint_node(struct device *dev,
 	lncfg->clk.pos = mipi_csi2->clock_lane;
 	lncfg->clk.pol = mipi_csi2->lane_polarities[0];
 	lncfg->num_data = mipi_csi2->num_data_lanes;
+	lncfg->max_data = lncfg->num_data;
 
 	lncfg->data = devm_kcalloc(dev,
 				   lncfg->num_data, sizeof(*lncfg->data),

@@ -270,12 +270,8 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 
 	entity = &vdev->entity;
 	while (1) {
-		pad = &entity->pads[0];
-		if (!(pad->flags & MEDIA_PAD_FL_SINK))
-			break;
-
-		pad = media_pad_remote_pad_first(pad);
-		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		pad = media_entity_remote_source_pad_unique(entity);
+		if (IS_ERR(pad) || !is_media_entity_v4l2_subdev(pad->entity))
 			break;
 
 		entity = pad->entity;
@@ -284,6 +280,8 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
 		if (ret < 0 && ret != -ENOIOCTLCMD)
 			goto error;
+		if (entity->function == MEDIA_ENT_F_VID_MUX)
+			break;
 	}
 
 	return 0;
@@ -308,12 +306,8 @@ static void video_stop_streaming(struct vb2_queue *q)
 
 	entity = &vdev->entity;
 	while (1) {
-		pad = &entity->pads[0];
-		if (!(pad->flags & MEDIA_PAD_FL_SINK))
-			break;
-
-		pad = media_pad_remote_pad_first(pad);
-		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		pad = media_entity_remote_source_pad_unique(entity);
+		if (IS_ERR(pad) || !is_media_entity_v4l2_subdev(pad->entity))
 			break;
 
 		entity = pad->entity;
@@ -325,6 +319,8 @@ static void video_stop_streaming(struct vb2_queue *q)
 			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
 			return;
 		}
+		if (entity->function == MEDIA_ENT_F_VID_MUX)
+			break;
 	}
 
 	video_device_pipeline_stop(vdev);
