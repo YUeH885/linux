@@ -25,11 +25,19 @@ properties:
   vio-supply:
     description: I2C I/O supply.
 
+  onnn,temperature-shift:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [0, 1, 3]
+    description:
+      Module-specific left shift of the initial temperature sample before
+      writing the temperature compensation registers.
+
 required:
   - compatible
   - reg
   - vdd-supply
   - vio-supply
+  - onnn,temperature-shift
 
 additionalProperties: false
 
@@ -44,5 +52,6 @@ examples:
             reg = <0x72>;
             vdd-supply = <&vreg_af>;
             vio-supply = <&vreg_io>;
+            onnn,temperature-shift = <0>;
         };
     };
