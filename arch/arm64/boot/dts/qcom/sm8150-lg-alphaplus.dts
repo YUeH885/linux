@@ -100,6 +100,19 @@
 		vin-supply = <&vreg_bob>;
 	};
 
+	camera_rear_n_mvdd: regulator-camera-rear-n-mvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_rear_n_mvdd";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&pm8150l_gpios 4 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&camera_rear_n_mvdd_default>;
+		vin-supply = <&vreg_bob>;
+	};
+
 	camera_rear_n_dvdd: regulator-camera-rear-n-dvdd {
 		compatible = "regulator-fixed";
 		regulator-name = "camera_rear_n_dvdd";
@@ -1316,6 +1329,13 @@
 		vio-supply = <&vreg_l1c_1p8>;
 	};
 
+	imx363_ois: ois@3e {
+		compatible = "onnn,lc898124ep1";
+		reg = <0x3e>;
+		vdd-supply = <&camera_rear_n_mvdd>;
+		vio-supply = <&vreg_l1c_1p8>;
+	};
+
 	imx363: camera@10 {
 		compatible = "sony,imx363";
 		reg = <0x10>;
@@ -1340,6 +1360,7 @@
 		orientation = <1>;
 		rotation = <90>;
 		lens-focus = <&imx363_lens>;
+		ois = <&imx363_ois>;
 
 		port {
 			imx363_ep: endpoint {
@@ -1521,6 +1542,15 @@
 
 	camera_rear_n_dvdd_default: camera-rear-n-dvdd-default-state {
 		pins = "gpio3";
+		function = "normal";
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		drive-push-pull;
+		output-high;
+	};
+
+	camera_rear_n_mvdd_default: camera-rear-n-mvdd-default-state {
+		pins = "gpio4";
 		function = "normal";
 		power-source = <0>;
 		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
