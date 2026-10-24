@@ -178,6 +178,83 @@
 		vin-supply = <&vreg_bob>;
 	};
 
+	camera_front_avdd: regulator-camera-front-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_front_avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&pm8150l_gpios 10 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&camera_front_avdd_default>;
+		vin-supply = <&vreg_bob>;
+	};
+
+	camera_front_dvdd: regulator-camera-front-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_front_dvdd";
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&pm8150l_gpios 11 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&camera_front_dvdd_default>;
+		vin-supply = <&vreg_s4a_1p8>;
+	};
+
+	camera_mipi_mux_enable: regulator-camera-mipi-mux-enable {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_mipi_mux_enable";
+		gpio = <&tlmm 49 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mipi_mux_enable_default>;
+	};
+
+	camera_mipi_mux: mux-controller {
+		compatible = "gpio-mux";
+		#mux-control-cells = <0>;
+		mux-gpios = <&tlmm 29 GPIO_ACTIVE_HIGH>;
+		mux-supply = <&camera_mipi_mux_enable>;
+		idle-state = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mipi_mux_select_default>;
+	};
+
+	camera_csi_mux: video-mux {
+		compatible = "video-mux";
+		mux-controls = <&camera_mipi_mux>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk2_default>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			camera_csi_mux_tele: endpoint {
+				remote-endpoint = <&s5k3m5_ep>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+
+			camera_csi_mux_front: endpoint {
+				remote-endpoint = <&imx520_ep>;
+			};
+		};
+
+		port@2 {
+			reg = <2>;
+
+			camera_csi_mux_out: endpoint {
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
+
 	camera_rear_t_afvdd: regulator-camera-rear-t-afvdd {
 		compatible = "regulator-fixed";
 		regulator-name = "camera_rear_t_afvdd";
@@ -1073,12 +1150,32 @@
 		bias-disable;
 	};
 
-	cam_rear_t_mipi_sw: cam-rear-t-mipi-sw-state {
-		pins = "gpio29", "gpio49";
+	cam_front_reset_default: cam-front-reset-default-state {
+		pins = "gpio12";
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;
-		output-low;
+	};
+
+	cam_front_mclk_req: cam-front-mclk-req-state {
+		pins = "gpio83";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mipi_mux_enable_default: cam-mipi-mux-enable-default-state {
+		pins = "gpio49";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mipi_mux_select_default: cam-mipi-mux-select-default-state {
+		pins = "gpio29";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
 	};
 
 	cam_sensor_rear_t_avdd_default: cam-sensor-rear-t-avdd-default-state {
@@ -1184,7 +1281,7 @@
 			csiphy2_ep: endpoint {
 				clock-lanes = <4>;
 				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&s5k3m5_ep>;
+				remote-endpoint = <&camera_csi_mux_out>;
 			};
 		};
 	};
@@ -1311,8 +1408,7 @@
 		mclk-request-gpios = <&tlmm 84 GPIO_ACTIVE_HIGH>;
 
 		pinctrl-names = "default";
-		pinctrl-0 = <&cam_mclk2_default &cam_rear_t_reset_default
-			     &cam_rear_t_mclk_req &cam_rear_t_mipi_sw>;
+		pinctrl-0 = <&cam_rear_t_reset_default &cam_rear_t_mclk_req>;
 
 		vdda-supply = <&camera_rear_t_avdd>;
 		vddd-supply = <&camera_rear_t_dvdd>;
@@ -1326,7 +1422,39 @@
 		port {
 			s5k3m5_ep: endpoint {
 				link-frequencies = /bits/ 64 <720000000 400000000>;
-				remote-endpoint = <&csiphy2_ep>;
+				remote-endpoint = <&camera_csi_mux_tele>;
+			};
+		};
+	};
+};
+
+&cci1_i2c0 {
+	imx520: camera@10 {
+		compatible = "sony,imx520";
+		reg = <0x10>;
+
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 12 GPIO_ACTIVE_LOW>;
+		mclk-request-gpios = <&tlmm 83 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_front_reset_default &cam_front_mclk_req>;
+
+		vdda-supply = <&camera_front_avdd>;
+		vddd-supply = <&camera_front_dvdd>;
+		vddio-supply = <&camera_front_iovdd>;
+		lg,camera-id = <1>;
+		orientation = <0>;
+		rotation = <270>;
+
+		port {
+			imx520_ep: endpoint {
+				link-frequencies = /bits/ 64 <716800000 675200000>;
+				data-lanes = <1 2>;
+				remote-endpoint = <&camera_csi_mux_front>;
 			};
 		};
 	};
@@ -1371,6 +1499,24 @@
 
 	camera_rear_w_dvdd_default: camera-rear-w-dvdd-default-state {
 		pins = "gpio8";
+		function = "normal";
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		drive-push-pull;
+		output-high;
+	};
+
+	camera_front_avdd_default: camera-front-avdd-default-state {
+		pins = "gpio10";
+		function = "normal";
+		power-source = <0>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		drive-push-pull;
+		output-high;
+	};
+
+	camera_front_dvdd_default: camera-front-dvdd-default-state {
+		pins = "gpio11";
 		function = "normal";
 		power-source = <0>;
 		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
