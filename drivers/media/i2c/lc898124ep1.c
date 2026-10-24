@@ -13,7 +13,7 @@
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 
-#define LC898124EP1_REG_MODE	0xf100
+#define LC898124EP1_REG_MODE	0xf013
 #define LC898124EP1_REG_ENABLE	0xf012
 
 static const char * const lc898124ep1_supply_names[] = {
@@ -33,7 +33,7 @@ static int lc898124ep1_set_stabilization(struct lc898124ep1 *ois, bool enable)
 {
 	int ret = 0;
 
-	cci_write(ois->regmap, CCI_REG8(LC898124EP1_REG_MODE), 0, &ret);
+	cci_write(ois->regmap, CCI_REG32(LC898124EP1_REG_MODE), 0, &ret);
 	cci_write(ois->regmap, CCI_REG32(LC898124EP1_REG_ENABLE),
 		  enable ? 1 : 0, &ret);
 
