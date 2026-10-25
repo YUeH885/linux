@@ -73,7 +73,7 @@ struct imx351_mode {
 	u32 hts;			/* Horizontal timing size */
 	u32 vts;			/* Default vertical timing size */
 	u32 exposure;			/* Default exposure value */
-	u64 pixel_rate;
+	u64 pixel_rate;		/* VT timing clock, independent of CSI output clock */
 	u8 link_freq_index;
 	struct v4l2_rect crop;
 
@@ -543,7 +543,7 @@ static const struct imx351_mode imx351_supported_modes[] = {
 		.hts = 6032,
 		.vts = 3604,
 		.exposure = 3584,
-		.pixel_rate = 531840000,
+		.pixel_rate = 652800000,
 		.link_freq_index = 0,
 		.crop = { 0, 0, 4656, 3492 },
 		.reg_list = {
@@ -557,7 +557,7 @@ static const struct imx351_mode imx351_supported_modes[] = {
 		.hts = 3220,
 		.vts = 2680,
 		.exposure = 2660,
-		.pixel_rate = 408000000,
+		.pixel_rate = 518400000,
 		.link_freq_index = 1,
 		.crop = { 0, 432, 4656, 2624 },
 		.reg_list = {

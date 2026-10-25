@@ -284,7 +284,7 @@ int vfe_17x_stats_start(struct vfe_line *line)
 		       ((sink->width / 2) - 1),
 		       vfe->base + VFE_STATS_BHIST_RGN_NUM_CFG);
 
-	/* The BHIST LUT is unused by the linear binning mode. */
+	/* Nonuniform bin edges are fixed by hardware and do not use this LUT. */
 	writel_relaxed(DMI_CFG_AUTO_INCREMENT | STATS_BHIST_DMI_BANK,
 		       vfe->base + VFE_DMI_CFG);
 	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);

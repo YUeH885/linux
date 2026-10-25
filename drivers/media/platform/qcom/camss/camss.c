@@ -4895,30 +4895,46 @@ s64 camss_get_link_freq(struct media_entity *entity, unsigned int bpp,
 }
 
 /*
- * camss_get_pixel_clock - Get pixel clock rate from sensor
+ * camss_get_csi2_pixel_rate - Get the pixel transfer rate on the CSI-2 bus
  * @entity: Media entity in the current pipeline
- * @pixel_clock: Received pixel clock value
+ * @bpp: Number of bits per pixel
+ * @pixel_rate: Received pixel rate
  *
  * Return 0 on success or a negative error code otherwise
  */
-int camss_get_pixel_clock(struct media_entity *entity, u64 *pixel_clock)
+int camss_get_csi2_pixel_rate(struct media_entity *entity, unsigned int bpp,
+			    u64 *pixel_rate)
 {
+	struct v4l2_fwnode_endpoint endpoint = {
+		.bus_type = V4L2_MBUS_CSI2_DPHY,
+	};
+	struct fwnode_handle *fwnode;
 	struct media_pad *sensor_pad;
 	struct v4l2_subdev *subdev;
-	struct v4l2_ctrl *ctrl;
+	s64 link_freq;
+	int lanes, ret;
 
 	sensor_pad = camss_find_sensor_pad(entity);
 	if (!sensor_pad)
 		return -ENODEV;
 
 	subdev = media_entity_to_v4l2_subdev(sensor_pad->entity);
+	fwnode = fwnode_graph_get_next_endpoint(dev_fwnode(subdev->dev), NULL);
+	ret = v4l2_fwnode_endpoint_parse(fwnode, &endpoint);
+	fwnode_handle_put(fwnode);
+	if (ret)
+		return ret;
 
-	ctrl = v4l2_ctrl_find(subdev->ctrl_handler, V4L2_CID_PIXEL_RATE);
+	lanes = v4l2_get_active_data_lanes(sensor_pad,
+					endpoint.bus.mipi_csi2.num_data_lanes);
+	if (lanes <= 0)
+		return lanes < 0 ? lanes : -EINVAL;
+	link_freq = v4l2_get_link_freq(sensor_pad, bpp, 2 * lanes);
+	if (link_freq < 0)
+		return link_freq;
 
-	if (!ctrl)
-		return -EINVAL;
-
-	*pixel_clock = v4l2_ctrl_g_ctrl_int64(ctrl);
+	/* VFE processes CSI traffic, independently of sensor array timing. */
+	*pixel_rate = div_u64(link_freq * 2 * lanes, bpp);
 
 	return 0;
 }

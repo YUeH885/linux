@@ -36,7 +36,7 @@
 
 #define IMX363_REG_ANALOGUE_GAIN	CCI_REG16(0x0204)
 #define IMX363_ANALOGUE_GAIN_MIN	0
-#define IMX363_ANALOGUE_GAIN_MAX	960
+#define IMX363_ANALOGUE_GAIN_MAX	448
 #define IMX363_ANALOGUE_GAIN_STEP	1
 #define IMX363_ANALOGUE_GAIN_DEFAULT	0
 
@@ -73,7 +73,7 @@ struct imx363_mode {
 	u32 hts;			/* Horizontal timing size */
 	u32 vts;			/* Default vertical timing size */
 	u32 exposure;			/* Default exposure value */
-	u64 pixel_rate;
+	u64 pixel_rate;		/* VT timing clock, independent of CSI output clock */
 	u8 link_freq_index;
 	struct v4l2_rect crop;
 
@@ -306,7 +306,7 @@ static const struct imx363_mode imx363_supported_modes[] = {
 		.hts = 8832,
 		.vts = 3156,
 		.exposure = 3140,
-		.pixel_rate = 542720000,
+		.pixel_rate = 836266667,
 		.link_freq_index = 0,
 		.crop = { 0, 0, 4032, 3024 },
 		.reg_list = {
@@ -320,7 +320,7 @@ static const struct imx363_mode imx363_supported_modes[] = {
 		.hts = 5520,
 		.vts = 1236,
 		.exposure = 1220,
-		.pixel_rate = 224000000,
+		.pixel_rate = 409600000,
 		.link_freq_index = 1,
 		.crop = { 0, 376, 4032, 2272 },
 		.reg_list = {

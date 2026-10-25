@@ -1379,6 +1379,7 @@
 		port {
 			imx363_ep: endpoint {
 				link-frequencies = /bits/ 64 <678400000 280000000>;
+				data-lanes = <1 2 3 4>;
 				remote-endpoint = <&csiphy0_ep>;
 			};
 		};
@@ -1420,6 +1421,7 @@
 		port {
 			imx351_ep: endpoint {
 				link-frequencies = /bits/ 64 <664800000 510000000>;
+				data-lanes = <1 2 3 4>;
 				remote-endpoint = <&csiphy1_ep>;
 			};
 		};
@@ -1471,6 +1473,7 @@
 		port {
 			s5k3m5_ep: endpoint {
 				link-frequencies = /bits/ 64 <720000000 400000000>;
+				data-lanes = <1 2 3 4>;
 				remote-endpoint = <&camera_csi_mux_tele>;
 			};
 		};
