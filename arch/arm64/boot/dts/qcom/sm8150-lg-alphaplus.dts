@@ -1270,12 +1270,14 @@
 };
 
 &cci0 {
+	vbus-supply = <&vreg_l1c_1p8>;
 	status = "okay";
 	pinctrl-0 = <&cci0_i2c0_default>, <&cci0_i2c1_default>;
 	pinctrl-1 = <&cci0_i2c0_sleep>, <&cci0_i2c1_sleep>;
 };
 
 &cci1 {
+	vbus-supply = <&camera_front_iovdd>;
 	status = "okay";
 	pinctrl-0 = <&cci1_i2c0_default>, <&cci1_i2c1_default>;
 	pinctrl-1 = <&cci1_i2c0_sleep>, <&cci1_i2c1_sleep>;
