@@ -11,6 +11,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/regulator/consumer.h>
 
 #define CCI_HW_VERSION				0x0
 #define CCI_RESET_CMD				0x004
@@ -127,6 +128,7 @@ struct cci {
 	const struct cci_data *data;
 	struct clk_bulk_data *clocks;
 	int nclocks;
+	struct regulator *vbus;
 	struct cci_master master[NUM_MASTERS];
 };
 
@@ -461,21 +463,36 @@ static const struct i2c_algorithm cci_algo = {
 	.functionality = cci_func,
 };
 
-static int cci_enable_clocks(struct cci *cci)
+static int cci_enable_resources(struct cci *cci)
 {
-	return clk_bulk_prepare_enable(cci->nclocks, cci->clocks);
+	int ret;
+
+	/* Unpowered targets must not clamp the bus while CCI is clocked. */
+	if (cci->vbus) {
+		ret = regulator_enable(cci->vbus);
+		if (ret)
+			return ret;
+	}
+
+	ret = clk_bulk_prepare_enable(cci->nclocks, cci->clocks);
+	if (ret && cci->vbus)
+		regulator_disable(cci->vbus);
+
+	return ret;
 }
 
-static void cci_disable_clocks(struct cci *cci)
+static void cci_disable_resources(struct cci *cci)
 {
 	clk_bulk_disable_unprepare(cci->nclocks, cci->clocks);
+	if (cci->vbus)
+		regulator_disable(cci->vbus);
 }
 
 static int __maybe_unused cci_suspend_runtime(struct device *dev)
 {
 	struct cci *cci = dev_get_drvdata(dev);
 
-	cci_disable_clocks(cci);
+	cci_disable_resources(cci);
 	return 0;
 }
 
@@ -484,12 +501,17 @@ static int __maybe_unused cci_resume_runtime(struct device *dev)
 	struct cci *cci = dev_get_drvdata(dev);
 	int ret;
 
-	ret = cci_enable_clocks(cci);
+	ret = cci_enable_resources(cci);
 	if (ret)
 		return ret;
 
 	cci_init(cci);
-	return 0;
+	/* Target power loss can leave the bus state machine stuck across suspend. */
+	ret = cci_reset(cci);
+	if (ret)
+		cci_disable_resources(cci);
+
+	return ret;
 }
 
 static const struct dev_pm_ops qcom_cci_pm = {
@@ -577,7 +599,15 @@ static int cci_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EINVAL, "not enough clocks in DT\n");
 	cci->nclocks = ret;
 
-	ret = cci_enable_clocks(cci);
+	cci->vbus = devm_regulator_get_optional(dev, "vbus");
+	if (IS_ERR(cci->vbus)) {
+		ret = PTR_ERR(cci->vbus);
+		if (ret != -ENODEV)
+			return dev_err_probe(dev, ret, "failed to get bus supply\n");
+		cci->vbus = NULL;
+	}
+
+	ret = cci_enable_resources(cci);
 	if (ret < 0)
 		return ret;
 
@@ -626,7 +656,7 @@ error_i2c:
 			i2c_del_adapter(&cci->master[i].adap);
 	}
 disable_clocks:
-	cci_disable_clocks(cci);
+	cci_disable_resources(cci);
 
 	return ret;
 }
@@ -634,14 +664,18 @@ disable_clocks:
 static void cci_remove(struct platform_device *pdev)
 {
 	struct cci *cci = platform_get_drvdata(pdev);
-	int i;
+	int ret, i;
 
+	ret = pm_runtime_resume_and_get(cci->dev);
 	for (i = 0; i < cci->data->num_masters; i++) {
 		if (cci->master[i].cci) {
 			i2c_del_adapter(&cci->master[i].adap);
-			cci_halt(cci, i);
+			if (ret >= 0)
+				cci_halt(cci, i);
 		}
 	}
+	if (ret >= 0)
+		pm_runtime_put_sync_suspend(cci->dev);
 }
 
 static const struct cci_data cci_v1_data = {
