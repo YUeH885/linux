@@ -230,6 +230,32 @@
 		vin-supply = <&vreg_bob>;
 	};
 
+	camera_tof_illu_vdd: regulator-camera-tof-illu-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_tof_illu_vdd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&tlmm 102 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_sensor_illu_vdd_default>;
+		vin-supply = <&vreg_bob>;
+	};
+
+	camera_tof_vdd: regulator-camera-tof-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "camera_tof_vdd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-enable-ramp-delay = <135>;
+		enable-active-high;
+		gpio = <&tlmm 103 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_sensor_tof_vdd_default>;
+		vin-supply = <&vreg_bob>;
+	};
+
 	camera_mipi_mux_enable: regulator-camera-mipi-mux-enable {
 		compatible = "regulator-fixed";
 		regulator-name = "camera_mipi_mux_enable";
@@ -942,6 +968,7 @@
 &tlmm {
 	/*
 	 * Reserve the eGPIO range except GPIO96 for SD card detect,
+	 * GPIO102 for front ToF illumination VDD, GPIO103 for front ToF VDD,
 	 * GPIO113 for NFC clock request, GPIO119 for SBU LDO/OE,
 	 * GPIO152 for touchscreen VDD, GPIO123 for the WCD9340 interrupt,
 	 * GPIO115 for the rear telephoto AVDD switch, GPIO125 for the SMA6101
@@ -949,7 +976,7 @@
 	 * GPIO143 for the codec reset and GPIO148 for DisplayPort AUX select.
 	 * Touch IRQ uses PDC90, not TLMM122.
 	 */
-	gpio-reserved-ranges = <93 3>, <97 16>, <114 1>, <116 3>, <120 3>,
+	gpio-reserved-ranges = <93 3>, <97 5>, <104 9>, <114 1>, <116 3>, <120 3>,
 			       <124 1>, <136 7>, <144 4>, <149 3>, <153 12>,
 			       <166 9>;
 
@@ -1212,6 +1239,34 @@
 		output-high;
 	};
 
+	cam_mclk3_default: cam-mclk3-default-state {
+		pins = "gpio16";
+		function = "cam_mclk";
+		drive-strength = <4>;
+		bias-disable;
+	};
+
+	cam_tof_reset_default: cam-tof-reset-default-state {
+		pins = "gpio23";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_sensor_illu_vdd_default: cam-sensor-illu-vdd-default-state {
+		pins = "gpio102";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_sensor_tof_vdd_default: cam-sensor-tof-vdd-default-state {
+		pins = "gpio103";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
 	cci0_i2c0_default: cci0-i2c0-default-state {
 		pins = "gpio17", "gpio18";
 		function = "cci_i2c";
@@ -1310,6 +1365,14 @@
 				clock-lanes = <4>;
 				data-lanes = <0 1 2 3>;
 				remote-endpoint = <&camera_csi_mux_out>;
+			};
+		};
+
+		port@3 {
+			csiphy3_ep: endpoint {
+				clock-lanes = <4>;
+				data-lanes = <0 1>;
+				remote-endpoint = <&irs2381c_ep>;
 			};
 		};
 	};
@@ -2316,6 +2379,42 @@
 
 		pinctrl-0 = <&nfc_default>;
 		pinctrl-names = "default";
+	};
+};
+
+&i2c10 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	irs2381c: camera@3d {
+		compatible = "infineon,irs2381c";
+		reg = <0x3d>;
+
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		assigned-clock-rates = <24000000>;
+
+		reset-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk3_default &cam_tof_reset_default>;
+
+		vdda-supply = <&camera_tof_illu_vdd>;
+		vddd-supply = <&camera_tof_vdd>;
+		vddio-supply = <&vreg_l8c_1p8>;
+
+		orientation = <0>;
+		rotation = <270>;
+
+		port {
+			irs2381c_ep: endpoint {
+				link-frequencies = /bits/ 64 <300000000 400000000>;
+				data-lanes = <1 2>;
+				remote-endpoint = <&csiphy3_ep>;
+			};
+		};
 	};
 };
 
