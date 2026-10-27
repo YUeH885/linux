@@ -14,7 +14,6 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-fwnode.h>
 
-#define IRS2381C_LINK_FREQ_300MHZ	300000000ULL
 #define IRS2381C_LINK_FREQ_400MHZ	400000000ULL
 #define IRS2381C_MCLK_FREQ_24MHZ	(24000 * HZ_PER_KHZ)
 #define IRS2381C_MCLK_FREQ_19_2MHZ	19200000UL
@@ -24,28 +23,6 @@
 #define IRS2381C_REG_CHIP_ID_ALT	CCI_REG16(0xa000)
 #define IRS2381C_CHIP_ID		0x0300
 #define IRS2381C_CHIP_ID_ALT		0x2381
-
-#define IRS2381C_REG_MODE_SELECT	CCI_REG16(0xa001)
-#define IRS2381C_MODE_STANDBY		0x0000
-#define IRS2381C_MODE_STREAMING		0x0001
-
-#define IRS2381C_REG_EXPOSURE		CCI_REG16(0xa004)
-#define IRS2381C_EXPOSURE_MIN		1
-#define IRS2381C_EXPOSURE_MAX		65535
-#define IRS2381C_EXPOSURE_DEFAULT	1000
-#define IRS2381C_EXPOSURE_STEP		1
-
-#define IRS2381C_REG_ANALOGUE_GAIN	CCI_REG16(0xa006)
-#define IRS2381C_ANALOGUE_GAIN_MIN	0
-#define IRS2381C_ANALOGUE_GAIN_MAX	1023
-#define IRS2381C_ANALOGUE_GAIN_DEFAULT	0
-#define IRS2381C_ANALOGUE_GAIN_STEP	1
-
-#define IRS2381C_REG_TEST_PATTERN	CCI_REG16(0xa008)
-#define IRS2381C_TEST_PATTERN_DISABLE	0
-#define IRS2381C_TEST_PATTERN_SOLID	1
-#define IRS2381C_TEST_PATTERN_BARS	2
-#define IRS2381C_TEST_PATTERN_RAMP	3
 
 #define IRS2381C_NUM_SUPPLIES		3
 
@@ -58,46 +35,24 @@ static const char * const irs2381c_supply_names[IRS2381C_NUM_SUPPLIES] = {
 };
 
 static const s64 irs2381c_link_freq_menu[] = {
-	IRS2381C_LINK_FREQ_300MHZ,
 	IRS2381C_LINK_FREQ_400MHZ,
 };
 
 static const u32 irs2381c_mbus_formats[] = {
 	MEDIA_BUS_FMT_SBGGR12_1X12,
-	MEDIA_BUS_FMT_SBGGR10_1X10,
-	MEDIA_BUS_FMT_Y12_1X12,
-	MEDIA_BUS_FMT_Y10_1X10,
-};
-
-static const char * const irs2381c_test_pattern_menu[] = {
-	"Disabled",
-	"Solid Color",
-	"Color Bars",
-	"Grey Ramp",
 };
 
 struct irs2381c_mode {
 	u32 width;
 	u32 height;
-	u32 hts;
-	u32 vts;
-	u32 max_fps;
+	u32 flash_offset;
 };
 
 static const struct irs2381c_mode irs2381c_supported_modes[] = {
 	{
 		.width = 224,
-		.height = 172,
-		.hts = 400,
-		.vts = 250,
-		.max_fps = 60,
-	},
-	{
-		.width = 224,
 		.height = 1903,
-		.hts = 400,
-		.vts = 2000,
-		.max_fps = 5,
+		.flash_offset = 0x2a00,
 	},
 };
 
@@ -111,22 +66,32 @@ struct irs2381c {
 	struct regulator_bulk_data supplies[IRS2381C_NUM_SUPPLIES];
 
 	const struct irs2381c_mode *cur_mode;
-	u32 cur_mbus_code;
 
 	struct v4l2_ctrl_handler ctrl_handler;
-	struct v4l2_ctrl *exposure;
-	struct v4l2_ctrl *analogue_gain;
-	struct v4l2_ctrl *test_pattern;
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *link_freq;
-	struct v4l2_ctrl *hblank;
-	struct v4l2_ctrl *vblank;
 
 	bool streaming;
 };
 
 static const struct media_entity_operations irs2381c_subdev_entity_ops = {
 	.link_validate = v4l2_subdev_link_validate,
+};
+
+static const struct cci_reg_sequence irs2381c_initial_config[] = {
+	/* ZWETSCHGE EEPROM eLENA initialization map. */
+	{ CCI_REG16(0xa001), 0x0007 },
+	{ CCI_REG16(0xa008), 0x1513 },
+	{ CCI_REG16(0xa00c), 0x0135 },
+	{ CCI_REG16(0x9401), 0x0002 },
+	{ CCI_REG16(0xa087), 0x8003 },
+	{ CCI_REG16(0xa039), 0x16a1 },
+	{ CCI_REG16(0xa03a), 0x5555 },
+	{ CCI_REG16(0xa03b), 0x0005 },
+	{ CCI_REG16(0xa03c), 0x0000 },
+	{ CCI_REG16(0xa03d), 0x04d0 },
+	{ CCI_REG16(0xa03e), 0x0000 },
+	{ CCI_REG16(0xa03f), 0x0017 },
 };
 
 static int irs2381c_power_on(struct device *dev)
@@ -202,34 +167,49 @@ match:
 
 static int irs2381c_start_streaming(struct irs2381c *irs2381c)
 {
+	u64 status;
 	int ret;
 
-	ret = __v4l2_ctrl_handler_setup(&irs2381c->ctrl_handler);
+	ret = cci_multi_reg_write(irs2381c->regmap, irs2381c_initial_config,
+				  ARRAY_SIZE(irs2381c_initial_config), NULL);
 	if (ret)
 		return ret;
 
-	ret = cci_write(irs2381c->regmap, IRS2381C_REG_MODE_SELECT,
-			IRS2381C_MODE_STREAMING, NULL);
-	if (ret) {
-		dev_err(irs2381c->dev, "failed to start streaming: %d\n", ret);
+	cci_write(irs2381c->regmap, CCI_REG16(0xa02a), 0x0001, &ret);
+
+	/* ImagerM2453_B11 copies the selected use case from module Flash. */
+	cci_write(irs2381c->regmap, CCI_REG16(0xa087), 0x4002, &ret);
+	cci_write(irs2381c->regmap, CCI_REG16(0x9380),
+		  irs2381c->cur_mode->flash_offset & 0xffff, &ret);
+	cci_write(irs2381c->regmap, CCI_REG16(0x9381),
+		  irs2381c->cur_mode->flash_offset >> 16, &ret);
+	cci_write(irs2381c->regmap, CCI_REG16(0x93e1), 0x0007, &ret);
+	cci_write(irs2381c->regmap, CCI_REG16(0x8452), 0x0004, &ret);
+	cci_write(irs2381c->regmap, CCI_REG16(0x8401), 0x0008, &ret);
+	if (ret)
 		return ret;
+	usleep_range(10000, 12000);
+
+	cci_read(irs2381c->regmap, CCI_REG16(0x93e2), &status, &ret);
+	if (ret)
+		return ret;
+	if (status != 0xaaaa) {
+		dev_err(irs2381c->dev, "use case transfer failed: 0x%04llx\n", status);
+		return -EIO;
 	}
 
-	return 0;
+	return cci_write(irs2381c->regmap, CCI_REG16(0x9400), 0x0001, NULL);
 }
 
 static int irs2381c_stop_streaming(struct irs2381c *irs2381c)
 {
 	int ret;
 
-	ret = cci_write(irs2381c->regmap, IRS2381C_REG_MODE_SELECT,
-			IRS2381C_MODE_STANDBY, NULL);
-	if (ret) {
-		dev_err(irs2381c->dev, "failed to stop streaming: %d\n", ret);
-		return ret;
-	}
+	ret = cci_write(irs2381c->regmap, CCI_REG16(0x9400), 0x0000, NULL);
+	if (!ret)
+		msleep(500);
 
-	return 0;
+	return ret;
 }
 
 static int irs2381c_set_stream(struct v4l2_subdev *sd, int enable)
@@ -250,11 +230,11 @@ static int irs2381c_set_stream(struct v4l2_subdev *sd, int enable)
 
 		ret = irs2381c_start_streaming(irs2381c);
 		if (ret) {
-			pm_runtime_put(irs2381c->dev);
+			pm_runtime_put_sync_suspend(irs2381c->dev);
 			goto unlock;
 		}
 	} else {
-		irs2381c_stop_streaming(irs2381c);
+		ret = irs2381c_stop_streaming(irs2381c);
 		pm_runtime_mark_last_busy(irs2381c->dev);
 		pm_runtime_put_autosuspend(irs2381c->dev);
 	}
@@ -266,97 +246,25 @@ unlock:
 	return ret;
 }
 
-static int irs2381c_set_ctrl(struct v4l2_ctrl *ctrl)
-{
-	struct irs2381c *irs2381c = container_of(ctrl->handler,
-						 struct irs2381c, ctrl_handler);
-	int ret = 0;
-
-	if (!pm_runtime_get_if_in_use(irs2381c->dev))
-		return 0;
-
-	switch (ctrl->id) {
-	case V4L2_CID_EXPOSURE:
-		ret = cci_write(irs2381c->regmap, IRS2381C_REG_EXPOSURE,
-				ctrl->val, NULL);
-		break;
-	case V4L2_CID_ANALOGUE_GAIN:
-		ret = cci_write(irs2381c->regmap, IRS2381C_REG_ANALOGUE_GAIN,
-				ctrl->val, NULL);
-		break;
-	case V4L2_CID_TEST_PATTERN:
-		ret = cci_write(irs2381c->regmap, IRS2381C_REG_TEST_PATTERN,
-				ctrl->val, NULL);
-		break;
-	default:
-		ret = -EINVAL;
-		break;
-	}
-
-	pm_runtime_put(irs2381c->dev);
-	return ret;
-}
-
-static const struct v4l2_ctrl_ops irs2381c_ctrl_ops = {
-	.s_ctrl = irs2381c_set_ctrl,
-};
-
 static int irs2381c_init_controls(struct irs2381c *irs2381c)
 {
 	struct v4l2_ctrl_handler *ctrl_hdlr = &irs2381c->ctrl_handler;
-	const struct irs2381c_mode *mode = irs2381c->cur_mode;
 	s64 pixel_rate_val;
 	int ret;
 
-	v4l2_ctrl_handler_init(ctrl_hdlr, 8);
+	v4l2_ctrl_handler_init(ctrl_hdlr, 2);
 
-	irs2381c->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr, &irs2381c_ctrl_ops,
+	irs2381c->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr, NULL,
 						     V4L2_CID_LINK_FREQ,
 						     ARRAY_SIZE(irs2381c_link_freq_menu) - 1,
 						     0, irs2381c_link_freq_menu);
 	if (irs2381c->link_freq)
 		irs2381c->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
-	pixel_rate_val = (IRS2381C_LINK_FREQ_300MHZ * 2 * IRS2381C_DATA_LANES) / 12;
-	irs2381c->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &irs2381c_ctrl_ops,
-						V4L2_CID_PIXEL_RATE, 1,
-						pixel_rate_val * 2, 1, pixel_rate_val);
-
-	irs2381c->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &irs2381c_ctrl_ops,
-					       V4L2_CID_EXPOSURE,
-					       IRS2381C_EXPOSURE_MIN,
-					       IRS2381C_EXPOSURE_MAX,
-					       IRS2381C_EXPOSURE_STEP,
-					       IRS2381C_EXPOSURE_DEFAULT);
-
-	irs2381c->analogue_gain = v4l2_ctrl_new_std(ctrl_hdlr, &irs2381c_ctrl_ops,
-						    V4L2_CID_ANALOGUE_GAIN,
-						    IRS2381C_ANALOGUE_GAIN_MIN,
-						    IRS2381C_ANALOGUE_GAIN_MAX,
-						    IRS2381C_ANALOGUE_GAIN_STEP,
-						    IRS2381C_ANALOGUE_GAIN_DEFAULT);
-
-	irs2381c->test_pattern = v4l2_ctrl_new_std_menu_items(ctrl_hdlr,
-							      &irs2381c_ctrl_ops,
-							      V4L2_CID_TEST_PATTERN,
-							      ARRAY_SIZE(irs2381c_test_pattern_menu) - 1,
-							      0, 0, irs2381c_test_pattern_menu);
-
-	irs2381c->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &irs2381c_ctrl_ops,
-					     V4L2_CID_HBLANK,
-					     mode->hts - mode->width,
-					     mode->hts - mode->width, 1,
-					     mode->hts - mode->width);
-	if (irs2381c->hblank)
-		irs2381c->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
-
-	irs2381c->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &irs2381c_ctrl_ops,
-					     V4L2_CID_VBLANK,
-					     mode->vts - mode->height,
-					     mode->vts - mode->height, 1,
-					     mode->vts - mode->height);
-	if (irs2381c->vblank)
-		irs2381c->vblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	pixel_rate_val = (IRS2381C_LINK_FREQ_400MHZ * 2 * IRS2381C_DATA_LANES) / 12;
+	irs2381c->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, NULL,
+						V4L2_CID_PIXEL_RATE, pixel_rate_val,
+						pixel_rate_val, 1, pixel_rate_val);
 
 	if (ctrl_hdlr->error) {
 		ret = ctrl_hdlr->error;
@@ -395,34 +303,12 @@ static int irs2381c_enum_frame_size(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int irs2381c_enum_frame_interval(struct v4l2_subdev *sd,
-					struct v4l2_subdev_state *sd_state,
-					struct v4l2_subdev_frame_interval_enum *fie)
-{
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(irs2381c_supported_modes); i++) {
-		if (fie->width == irs2381c_supported_modes[i].width &&
-		    fie->height == irs2381c_supported_modes[i].height) {
-			if (fie->index != 0)
-				return -EINVAL;
-
-			fie->interval.numerator = 1;
-			fie->interval.denominator = irs2381c_supported_modes[i].max_fps;
-			return 0;
-		}
-	}
-
-	return -EINVAL;
-}
-
 static int irs2381c_set_fmt(struct v4l2_subdev *sd,
 			    struct v4l2_subdev_state *sd_state,
 			    struct v4l2_subdev_format *fmt)
 {
 	struct irs2381c *irs2381c = to_irs2381c(sd);
 	const struct irs2381c_mode *mode;
-	s64 hblank, vblank;
 	unsigned int i;
 
 	mode = v4l2_find_nearest_size(irs2381c_supported_modes,
@@ -448,16 +334,8 @@ static int irs2381c_set_fmt(struct v4l2_subdev *sd,
 
 	*v4l2_subdev_state_get_format(sd_state, fmt->pad) = fmt->format;
 
-	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE)
 		irs2381c->cur_mode = mode;
-		irs2381c->cur_mbus_code = fmt->format.code;
-
-		hblank = mode->hts - mode->width;
-		__v4l2_ctrl_modify_range(irs2381c->hblank, hblank, hblank, 1, hblank);
-
-		vblank = mode->vts - mode->height;
-		__v4l2_ctrl_modify_range(irs2381c->vblank, vblank, vblank, 1, vblank);
-	}
 
 	return 0;
 }
@@ -511,7 +389,6 @@ static const struct v4l2_subdev_video_ops irs2381c_video_ops = {
 static const struct v4l2_subdev_pad_ops irs2381c_pad_ops = {
 	.enum_mbus_code = irs2381c_enum_mbus_code,
 	.enum_frame_size = irs2381c_enum_frame_size,
-	.enum_frame_interval = irs2381c_enum_frame_interval,
 	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = irs2381c_set_fmt,
 	.get_selection = irs2381c_get_selection,
@@ -621,7 +498,6 @@ static int irs2381c_probe(struct i2c_client *client)
 				     "failed to get supply regulators\n");
 
 	irs2381c->cur_mode = &irs2381c_supported_modes[0];
-	irs2381c->cur_mbus_code = irs2381c_mbus_formats[0];
 
 	ret = irs2381c_power_on(irs2381c->dev);
 	if (ret)
