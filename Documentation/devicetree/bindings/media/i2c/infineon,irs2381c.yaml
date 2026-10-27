@@ -98,7 +98,7 @@ examples:
 
               port {
                   irs2381c_ep: endpoint {
-                      link-frequencies = /bits/ 64 <300000000>;
+                      link-frequencies = /bits/ 64 <400000000>;
                       remote-endpoint = <&csiphy3_ep>;
                       data-lanes = <1 2>;
                   };
