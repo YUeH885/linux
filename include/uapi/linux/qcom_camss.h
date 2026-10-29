@@ -12,7 +12,7 @@
 #define V4L2_CID_QCOM_CAMSS_IFE_CONFIG \
 	(V4L2_CID_USER_QCOM_CAMSS_BASE + 0)
 
-#define V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION	3
+#define V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION	4
 
 #define V4L2_QCOM_CAMSS_IFE_CONFIG_BLACK_LEVEL	(1U << 0)
 #define V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE	(1U << 1)
@@ -40,7 +40,9 @@
  * CCM flags. sensor_delay must be two for requests and zero for global tuning. A
  * request contains one NV12 PIX buffer, this control and the sensor
  * exposure and analogue gain control handler. The
- * completed request returns the applied input frame in frame_sequence.
+ * completed request returns the applied input frame in frame_sequence and its
+ * CAMIF SOF time in sensor_timestamp (CLOCK_BOOTTIME nanoseconds). Both
+ * sensor_timestamp and reserved2 must be zero on submission.
  * Gamma is supplied as 65 10-bit samples per channel in R, G, B order;
  * the driver derives the 64 hardware
  * base/delta entries from consecutive samples.
@@ -59,6 +61,8 @@ struct v4l2_qcom_camss_ife_config {
 	__s16 ccm_offset[3];
 	__u16 gamma[V4L2_QCOM_CAMSS_IFE_GAMMA_CHANNELS]
 		[V4L2_QCOM_CAMSS_IFE_GAMMA_ENTRIES];
+	__u32 reserved2;
+	__aligned_u64 sensor_timestamp;
 };
 
 #define V4L2_QCOM_CAMSS_STATS_VERSION	3

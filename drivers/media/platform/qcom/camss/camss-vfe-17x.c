@@ -471,7 +471,8 @@ static int vfe_ife_config_validate(const struct v4l2_qcom_camss_ife_config *conf
 	if (config->version != V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION ||
 	    !config->flags ||
 	    config->flags & ~V4L2_QCOM_CAMSS_IFE_CONFIG_ALL ||
-	    (config->sensor_delay && config->sensor_delay != 2) || config->reserved1)
+	    (config->sensor_delay && config->sensor_delay != 2) || config->reserved1 ||
+	    config->reserved2 || config->sensor_timestamp)
 		return -EINVAL;
 
 	if (config->flags & V4L2_QCOM_CAMSS_IFE_CONFIG_BLACK_LEVEL) {
@@ -1398,11 +1399,20 @@ static void vfe_isr_sof(struct vfe_device *vfe, enum vfe_line_id line_id)
 	struct vfe_output *output = &line->output;
 	struct v4l2_event event = { .type = V4L2_EVENT_FRAME_SYNC };
 	unsigned long flags;
+	u64 timestamp = ktime_get_boottime_ns();
+	unsigned int i;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	if (output->state == VFE_OUTPUT_ON) {
 		event.u.frame_sync.frame_sequence = output->sof_sequence++;
 		if (line->video_out.vb2_q.uses_requests) {
+			for (i = 0; i < ARRAY_SIZE(output->buf); i++) {
+				struct camss_buffer *buf = output->buf[i];
+
+				if (buf && !buf->dummy &&
+				    buf->input_sequence == event.u.frame_sync.frame_sequence)
+					buf->ife.sensor_timestamp = timestamp;
+			}
 			vfe_ife_schedule_request(line);
 			vfe_sensor_schedule(line);
 		}
@@ -1472,6 +1482,7 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		ready_buf->vb.sequence = output->sof_sequence - 1;
 		if (ready_buf->ife_valid &&
 		    (!ready_buf->ife_applied || !ready_buf->sensor_applied ||
+		     !ready_buf->ife.sensor_timestamp ||
 		     ready_buf->input_sequence + 1 != ready_buf->vb.sequence)) {
 			dev_err_ratelimited(vfe->camss->dev,
 				"IFE request input %u returned at DMA frame %u, IFE %u sensor %u\n",
