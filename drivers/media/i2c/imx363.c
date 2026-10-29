@@ -29,6 +29,8 @@
 #define IMX363_REG_CHIP_ID		CCI_REG16(0x0016)
 #define IMX363_CHIP_ID			0x0363
 
+#define IMX363_REG_GROUP_HOLD		CCI_REG8(0x0104)
+
 #define IMX363_REG_EXPOSURE		CCI_REG16(0x0202)
 #define IMX363_EXPOSURE_MIN		8
 #define IMX363_EXPOSURE_STEP		1
@@ -104,7 +106,11 @@ struct imx363 {
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *hblank;
 	struct v4l2_ctrl *vblank;
-	struct v4l2_ctrl *exposure;
+	/* Keep the controls adjacent for v4l2_ctrl_cluster(). */
+	struct {
+		struct v4l2_ctrl *exposure;
+		struct v4l2_ctrl *analogue_gain;
+	};
 	struct v4l2_ctrl *digital_gain;
 	struct v4l2_ctrl *vflip;
 	struct v4l2_ctrl *hflip;
@@ -336,7 +342,7 @@ static int imx363_set_ctrl(struct v4l2_ctrl *ctrl)
 					     ctrl_handler);
 	const struct imx363_mode *mode = imx363->mode;
 	s64 exposure_max;
-	int ret;
+	int ret, release;
 
 	/* Propagate change of current control to all related controls */
 	switch (ctrl->id) {
@@ -360,17 +366,19 @@ static int imx363_set_ctrl(struct v4l2_ctrl *ctrl)
 		return 0;
 
 	switch (ctrl->id) {
-	case V4L2_CID_ANALOGUE_GAIN:
-		ret = cci_write(imx363->regmap, IMX363_REG_ANALOGUE_GAIN,
-				ctrl->val, NULL);
-		break;
 	case V4L2_CID_DIGITAL_GAIN:
 		ret = cci_write(imx363->regmap, IMX363_REG_DIGITAL_GAIN,
 				ctrl->val, NULL);
 		break;
 	case V4L2_CID_EXPOSURE:
-		ret = cci_write(imx363->regmap, IMX363_REG_EXPOSURE,
-				ctrl->val, NULL);
+		ret = cci_write(imx363->regmap, IMX363_REG_GROUP_HOLD, 1, NULL);
+		cci_write(imx363->regmap, IMX363_REG_EXPOSURE,
+			  imx363->exposure->val, &ret);
+		cci_write(imx363->regmap, IMX363_REG_ANALOGUE_GAIN,
+			  imx363->analogue_gain->val, &ret);
+		release = cci_write(imx363->regmap, IMX363_REG_GROUP_HOLD, 0, NULL);
+		if (!ret)
+			ret = release;
 		break;
 	case V4L2_CID_VBLANK:
 		ret = cci_write(imx363->regmap, IMX363_REG_VTS,
@@ -426,9 +434,10 @@ static int imx363_init_controls(struct imx363 *imx363)
 					   IMX363_VTS_MAX - mode->height, 1,
 					   vblank);
 
-	v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
-			  IMX363_ANALOGUE_GAIN_MIN, IMX363_ANALOGUE_GAIN_MAX,
-			  IMX363_ANALOGUE_GAIN_STEP, IMX363_ANALOGUE_GAIN_DEFAULT);
+	imx363->analogue_gain =
+		v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+				  IMX363_ANALOGUE_GAIN_MIN, IMX363_ANALOGUE_GAIN_MAX,
+				  IMX363_ANALOGUE_GAIN_STEP, IMX363_ANALOGUE_GAIN_DEFAULT);
 
 	imx363->digital_gain = v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops,
 						 V4L2_CID_DIGITAL_GAIN,
@@ -463,6 +472,12 @@ static int imx363_init_controls(struct imx363 *imx363)
 					      &props);
 	if (ret)
 		goto error_free_hdlr;
+
+	if (ctrl_hdlr->error) {
+		ret = ctrl_hdlr->error;
+		goto error_free_hdlr;
+	}
+	v4l2_ctrl_cluster(2, &imx363->exposure);
 
 	imx363->sd.ctrl_handler = ctrl_hdlr;
 

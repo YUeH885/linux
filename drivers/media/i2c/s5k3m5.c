@@ -30,6 +30,8 @@
 #define S5K3M5_VFLIP			BIT(1)
 #define S5K3M5_HFLIP			BIT(0)
 
+#define S5K3M5_REG_GROUP_HOLD		CCI_REG16(0x0104)
+
 #define S5K3M5_REG_EXPOSURE		CCI_REG16(0x0202)
 #define S5K3M5_EXPOSURE_MIN		8
 #define S5K3M5_EXPOSURE_STEP		1
@@ -116,7 +118,11 @@ struct s5k3m5 {
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *hblank;
 	struct v4l2_ctrl *vblank;
-	struct v4l2_ctrl *exposure;
+	/* Keep the controls adjacent for v4l2_ctrl_cluster(). */
+	struct {
+		struct v4l2_ctrl *exposure;
+		struct v4l2_ctrl *analogue_gain;
+	};
 	struct v4l2_ctrl *vflip;
 	struct v4l2_ctrl *hflip;
 
@@ -298,7 +304,7 @@ static int s5k3m5_set_ctrl(struct v4l2_ctrl *ctrl)
 					     ctrl_handler);
 	const struct s5k3m5_mode *mode = s5k3m5->mode;
 	s64 exposure_max;
-	int ret;
+	int ret, release;
 
 	/* Propagate change of current control to all related controls */
 	switch (ctrl->id) {
@@ -322,13 +328,15 @@ static int s5k3m5_set_ctrl(struct v4l2_ctrl *ctrl)
 		return 0;
 
 	switch (ctrl->id) {
-	case V4L2_CID_ANALOGUE_GAIN:
-		ret = cci_write(s5k3m5->regmap, S5K3M5_REG_AGAIN,
-				ctrl->val, NULL);
-		break;
 	case V4L2_CID_EXPOSURE:
-		ret = cci_write(s5k3m5->regmap, S5K3M5_REG_EXPOSURE,
-				ctrl->val, NULL);
+		ret = cci_write(s5k3m5->regmap, S5K3M5_REG_GROUP_HOLD, 0x0100, NULL);
+		cci_write(s5k3m5->regmap, S5K3M5_REG_EXPOSURE,
+			  s5k3m5->exposure->val, &ret);
+		cci_write(s5k3m5->regmap, S5K3M5_REG_AGAIN,
+			  s5k3m5->analogue_gain->val, &ret);
+		release = cci_write(s5k3m5->regmap, S5K3M5_REG_GROUP_HOLD, 0, NULL);
+		if (!ret)
+			ret = release;
 		break;
 	case V4L2_CID_VBLANK:
 		ret = cci_write(s5k3m5->regmap, S5K3M5_REG_VTS,
@@ -388,9 +396,10 @@ static int s5k3m5_init_controls(struct s5k3m5 *s5k3m5)
 					   S5K3M5_VTS_MAX - mode->height, 1,
 					   vblank);
 
-	v4l2_ctrl_new_std(ctrl_hdlr, &s5k3m5_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
-			  S5K3M5_AGAIN_MIN, S5K3M5_AGAIN_MAX,
-			  S5K3M5_AGAIN_STEP, S5K3M5_AGAIN_DEFAULT);
+	s5k3m5->analogue_gain =
+		v4l2_ctrl_new_std(ctrl_hdlr, &s5k3m5_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+				  S5K3M5_AGAIN_MIN, S5K3M5_AGAIN_MAX,
+				  S5K3M5_AGAIN_STEP, S5K3M5_AGAIN_DEFAULT);
 
 	exposure_max = mode->vts - S5K3M5_EXPOSURE_MARGIN;
 	s5k3m5->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &s5k3m5_ctrl_ops,
@@ -423,6 +432,12 @@ static int s5k3m5_init_controls(struct s5k3m5 *s5k3m5)
 					      &props);
 	if (ret)
 		goto error_free_hdlr;
+
+	if (ctrl_hdlr->error) {
+		ret = ctrl_hdlr->error;
+		goto error_free_hdlr;
+	}
+	v4l2_ctrl_cluster(2, &s5k3m5->exposure);
 
 	s5k3m5->sd.ctrl_handler = ctrl_hdlr;
 
