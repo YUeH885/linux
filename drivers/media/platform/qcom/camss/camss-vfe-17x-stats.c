@@ -91,6 +91,8 @@ struct vfe_17x_stats {
 	u32 sequence;
 	u64 timestamp;
 	bool ready;
+	bool sensor_valid;
+	struct vfe_sensor_state sensor;
 };
 
 static void vfe_stats_wm_queue(struct vfe_device *vfe, u8 wm, dma_addr_t addr)
@@ -321,6 +323,8 @@ void vfe_17x_stats_isr(struct vfe_device *vfe, u32 status)
 	/* Pair with the buffer publication in vfe_17x_stats_start(). */
 	struct vfe_17x_stats *stats = smp_load_acquire(&line->stats);
 	u32 sequence = line->output.sof_sequence - 1;
+	struct vfe_sensor_state sensor;
+	bool sensor_valid;
 	unsigned long flags;
 	unsigned int i;
 
@@ -350,7 +354,11 @@ void vfe_17x_stats_isr(struct vfe_device *vfe, u32 status)
 	if (stats->done != VFE_STATS_ALL_DONE)
 		return;
 
+	sensor_valid = vfe_sensor_state(line, sequence ? sequence - 1 : 0, &sensor);
 	spin_lock_irqsave(&stats->lock, flags);
+	stats->sensor_valid = sensor_valid;
+	if (sensor_valid)
+		stats->sensor = sensor;
 	memcpy(stats->snapshot, stats->pending, VFE_STATS_SIZE);
 	stats->sequence = sequence;
 	stats->timestamp = ktime_get_ns();
@@ -385,6 +393,10 @@ long vfe_17x_get_stats(struct camss_video *vid,
 		memcpy(stats->reader, stats->snapshot, VFE_STATS_SIZE);
 		request->sequence = stats->sequence;
 		request->timestamp = stats->timestamp;
+		request->flags = stats->sensor_valid ? V4L2_QCOM_CAMSS_STATS_SENSOR_CONTROLS : 0;
+		request->exposure_lines = stats->sensor_valid ? stats->sensor.exposure : 0;
+		request->analogue_gain = stats->sensor_valid ? stats->sensor.gain : 0;
+		request->reserved1 = 0;
 	}
 	spin_unlock_irqrestore(&stats->lock, flags);
 	if (ret)

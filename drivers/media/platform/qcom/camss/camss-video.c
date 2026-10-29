@@ -196,8 +196,8 @@ int camss_video_request_validate(struct media_request *request)
 			buffer = container_of(to_vb2_v4l2_buffer(vb), struct camss_buffer, vb);
 		}
 	}
-	/* One PIX buffer and its IFE control handler form a capture transaction. */
-	if (objects != 2 || !buffer)
+	/* Capture, IFE and sensor controls form one transaction. */
+	if (objects != 3 || !buffer)
 		return -EINVAL;
 	video = vb2_get_drv_priv(buffer->vb.vb2_buf.vb2_queue);
 	if (!video->request_controls || !video->ops->prepare_request)
@@ -208,6 +208,7 @@ int camss_video_request_validate(struct media_request *request)
 	ret = video->ops->prepare_request(video, buffer);
 	if (ret)
 		return ret;
+	buffer->sensor_applied = false;
 	buffer->ife_valid = true;
 	buffer->ife_applied = false;
 	buffer->request_completed = false;
@@ -221,6 +222,7 @@ static void video_buf_request_complete(struct vb2_buffer *vb)
 	struct camss_video *video = vb2_get_drv_priv(vb->vb2_queue);
 
 	if (vb->request && !buffer->request_completed) {
+		v4l2_ctrl_request_complete(vb->request, buffer->sensor_controls);
 		v4l2_ctrl_request_complete(vb->request, video->request_controls);
 		buffer->request_completed = true;
 	}
@@ -253,6 +255,14 @@ void camss_buffer_done(struct camss_buffer *buffer, enum vb2_buffer_state state)
 	}
 }
 
+static void camss_sensor_work(struct work_struct *work)
+{
+	struct camss_buffer *buffer = container_of(work, struct camss_buffer, sensor_work);
+	struct camss_video *video = vb2_get_drv_priv(buffer->vb.vb2_buf.vb2_queue);
+
+	video->ops->apply_sensor(video, buffer);
+}
+
 static int video_buf_init(struct vb2_buffer *vb)
 {
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
@@ -265,6 +275,7 @@ static int video_buf_init(struct vb2_buffer *vb)
 	unsigned int i;
 
 	INIT_WORK(&buffer->complete_work, camss_buffer_complete_work);
+	INIT_WORK(&buffer->sensor_work, camss_sensor_work);
 	for (i = 0; i < format->num_planes; i++) {
 		sgt = vb2_dma_sg_plane_desc(vb, i);
 		if (!sgt)
@@ -368,6 +379,7 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct v4l2_subdev *subdev;
 	int ret;
 
+	WRITE_ONCE(video->requests_stopping, false);
 	if (video->request_controls) {
 		ret = video->ops->start_requests(video);
 		if (ret)
@@ -420,6 +432,10 @@ static void video_stop_streaming(struct vb2_queue *q)
 	struct media_pad *pad;
 	struct v4l2_subdev *subdev;
 	int ret;
+
+	WRITE_ONCE(video->requests_stopping, true);
+	if (q->uses_requests)
+		flush_workqueue(video->request_wq);
 
 	entity = &vdev->entity;
 	while (1) {
@@ -722,6 +738,10 @@ static long video_ioctl_default(struct file *file, void *fh, bool valid_prio,
 	    video->ops->get_frame_sequence)
 		return video->ops->get_frame_sequence(video, arg);
 
+	if (cmd == VIDIOC_QCOM_CAMSS_GET_REQUEST_SEQUENCE &&
+	    video->ops->get_request_sequence)
+		return video->ops->get_request_sequence(video, arg);
+
 	return -ENOTTY;
 }
 
@@ -845,7 +865,8 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 	q->lock = &video->q_lock;
 	if (video->request_controls) {
 		q->supports_requests = true;
-		video->request_wq = alloc_ordered_workqueue("%s-requests", WQ_MEM_RECLAIM, name);
+		video->request_wq = alloc_ordered_workqueue("%s-requests",
+						 WQ_MEM_RECLAIM | WQ_HIGHPRI, name);
 		if (!video->request_wq) {
 			ret = -ENOMEM;
 			goto error_vb2_init;

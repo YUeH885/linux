@@ -87,6 +87,13 @@ struct vfe_output {
 	struct completion reg_update;
 };
 
+struct vfe_sensor_state {
+	u32 sequence;
+	s32 exposure;
+	s32 gain;
+	bool valid;
+};
+
 struct vfe_line {
 	enum vfe_line_id id;
 	struct v4l2_subdev subdev;
@@ -95,9 +102,13 @@ struct vfe_line {
 	struct v4l2_qcom_camss_ife_config ife_config;
 	bool ife_ctrls_initialized;
 	struct camss_buffer dummy_buffer[2];
+	struct list_head sensor_pending;
+	struct camss_buffer *sensor_inflight;
+	u32 sensor_next;
+	struct vfe_sensor_state sensor_history[64];
+	u32 sensor_count;
 	void *dummy_memory;
 	size_t dummy_size;
-	unsigned int dummy_count;
 	u8 ife_gamma_bank;
 	struct vfe_17x_stats *stats;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
@@ -200,6 +211,8 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 
 void msm_vfe_unregister_entities(struct vfe_device *vfe);
 
+bool vfe_sensor_state(struct vfe_line *line, u32 sequence,
+		      struct vfe_sensor_state *state);
 int vfe_ife_ctrl_init(struct vfe_line *line);
 void vfe_ife_ctrl_cleanup(struct vfe_line *line);
 

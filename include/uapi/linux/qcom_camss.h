@@ -12,7 +12,7 @@
 #define V4L2_CID_QCOM_CAMSS_IFE_CONFIG \
 	(V4L2_CID_USER_QCOM_CAMSS_BASE + 0)
 
-#define V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION	2
+#define V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION	3
 
 #define V4L2_QCOM_CAMSS_IFE_CONFIG_BLACK_LEVEL	(1U << 0)
 #define V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE	(1U << 1)
@@ -37,7 +37,9 @@
  * because WB12 has a single green channel. CCM coefficients use signed Q7
  * in RGB row-major order and CCM offsets use signed 11-bit RGB values.
  * Request controls require frame_sequence zero and both WHITE_BALANCE and
- * CCM flags. A request contains one NV12 PIX buffer and this control. The
+ * CCM flags. sensor_delay must be two for requests and zero for global tuning. A
+ * request contains one NV12 PIX buffer, this control and the sensor
+ * exposure and analogue gain control handler. The
  * completed request returns the applied input frame in frame_sequence.
  * Gamma is supplied as 65 10-bit samples per channel in R, G, B order;
  * the driver derives the 64 hardware
@@ -47,7 +49,7 @@ struct v4l2_qcom_camss_ife_config {
 	__u32 version;
 	__u32 frame_sequence;
 	__u32 flags;
-	__u32 reserved;
+	__u32 sensor_delay;
 	__u16 black_level;
 	__u16 black_level_comp[4];
 	__u16 reserved1;
@@ -59,7 +61,8 @@ struct v4l2_qcom_camss_ife_config {
 		[V4L2_QCOM_CAMSS_IFE_GAMMA_ENTRIES];
 };
 
-#define V4L2_QCOM_CAMSS_STATS_VERSION	2
+#define V4L2_QCOM_CAMSS_STATS_VERSION	3
+#define V4L2_QCOM_CAMSS_STATS_SENSOR_CONTROLS	(1U << 0)
 
 #define V4L2_QCOM_CAMSS_AWB_BG_H_NUM	64
 #define V4L2_QCOM_CAMSS_AWB_BG_V_NUM	48
@@ -100,6 +103,10 @@ struct v4l2_qcom_camss_stats {
 	__aligned_u64 awb_bg;
 	__aligned_u64 bhist;
 	__aligned_u64 bf;
+	__u32 flags;
+	__u32 exposure_lines;
+	__u32 analogue_gain;
+	__u32 reserved1;
 };
 
 #define VIDIOC_QCOM_CAMSS_GET_STATS \
@@ -108,5 +115,9 @@ struct v4l2_qcom_camss_stats {
 /* Next PIX input SOF sequence, or zero while the output is stopped. */
 #define VIDIOC_QCOM_CAMSS_GET_FRAME_SEQUENCE \
 	_IOR('V', BASE_VIDIOC_PRIVATE + 1, __u32)
+
+/* Earliest input target for the next queued request; zero while stopped. */
+#define VIDIOC_QCOM_CAMSS_GET_REQUEST_SEQUENCE \
+	_IOR('V', BASE_VIDIOC_PRIVATE + 2, __u32)
 
 #endif /* _UAPI_LINUX_QCOM_CAMSS_H */

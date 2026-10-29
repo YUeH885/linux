@@ -829,13 +829,13 @@ void vfe_buf_add_pending(struct vfe_output *output,
  * @output: VFE output
  * @state: vb2 buffer state
  */
-static void vfe_buf_flush_pending(struct vfe_output *output,
+static void vfe_buf_flush_pending(struct list_head *pending,
 				  enum vb2_buffer_state state)
 {
 	struct camss_buffer *buf;
 	struct camss_buffer *t;
 
-	list_for_each_entry_safe(buf, t, &output->pending_bufs, queue) {
+	list_for_each_entry_safe(buf, t, pending, queue) {
 		camss_buffer_done(buf, state);
 		list_del(&buf->queue);
 	}
@@ -1250,11 +1250,16 @@ int vfe_flush_buffers(struct camss_video *vid,
 
 	output = &line->output;
 
-	if (vid->vb2_q.uses_requests)
+	if (vid->vb2_q.uses_requests) {
+		WRITE_ONCE(vid->requests_stopping, true);
 		synchronize_irq(vfe->irq);
+		flush_workqueue(vid->request_wq);
+	}
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
-	vfe_buf_flush_pending(output, state);
+	vfe_buf_flush_pending(&output->pending_bufs, state);
+	if (vid->request_controls)
+		vfe_buf_flush_pending(&line->sensor_pending, state);
 
 	if (output->buf[0])
 		camss_buffer_done(output->buf[0], state);

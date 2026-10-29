@@ -29,6 +29,11 @@ struct camss_buffer {
 	struct list_head queue;
 	struct v4l2_qcom_camss_ife_config ife;
 	struct work_struct complete_work;
+	struct work_struct sensor_work;
+	struct v4l2_ctrl_handler *sensor_controls;
+	s32 sensor_exposure;
+	s32 sensor_gain;
+	bool sensor_applied;
 	enum vb2_buffer_state completion_state;
 	u32 input_sequence;
 	bool ife_valid;
@@ -46,9 +51,11 @@ struct camss_video_ops {
 	long (*get_stats)(struct camss_video *vid,
 			  struct v4l2_qcom_camss_stats *stats);
 	long (*get_frame_sequence)(struct camss_video *vid, u32 *sequence);
+	long (*get_request_sequence)(struct camss_video *vid, u32 *sequence);
 	int (*prepare_request)(struct camss_video *vid, struct camss_buffer *buf);
 	int (*start_requests)(struct camss_video *vid);
 	void (*stop_requests)(struct camss_video *vid);
+	void (*apply_sensor)(struct camss_video *vid, struct camss_buffer *buf);
 };
 
 struct camss_video {
@@ -62,6 +69,7 @@ struct camss_video {
 	const struct camss_video_ops *ops;
 	struct v4l2_ctrl_handler *request_controls;
 	struct workqueue_struct *request_wq;
+	bool requests_stopping;
 	struct mutex lock;
 	struct mutex q_lock;
 	unsigned int bpl_alignment;
