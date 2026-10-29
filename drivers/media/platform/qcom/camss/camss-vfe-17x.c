@@ -619,6 +619,8 @@ static void vfe_stop_requests(struct camss_video *video)
 {
 	struct vfe_line *line = container_of(video, struct vfe_line, video_out);
 
+	line->dummy_count = 0;
+
 	if (line->dummy_memory) {
 		dma_free_coherent(video->camss->dev, line->dummy_size,
 				  line->dummy_memory, line->dummy_buffer[0].addr[0]);
@@ -694,8 +696,10 @@ static int vfe_queue_request_buffer(struct camss_video *video, struct camss_buff
 	else if (output->state == VFE_OUTPUT_ON && output->sof_sequence)
 		sequence = output->sof_sequence - 1;
 
-	if (output->state == VFE_OUTPUT_ON && sequence <= output->sof_sequence) {
-		/* Two discarded outputs establish DMA phase before a new request is exposed. */
+	if (output->state == VFE_OUTPUT_ON && sequence <= output->sof_sequence &&
+	    !line->dummy_count) {
+		/* The same pair stays owned by the queue until both outputs complete. */
+		line->dummy_count = ARRAY_SIZE(line->dummy_buffer);
 		for (i = 0; i < ARRAY_SIZE(line->dummy_buffer); i++) {
 			line->dummy_buffer[i].input_sequence = sequence++;
 			vfe_request_enqueue(line, &line->dummy_buffer[i]);
@@ -1389,6 +1393,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		output->gen2.active_num--;
 	}
 
+	if (ready_buf->dummy)
+		line->dummy_count--;
 	if (ready_buf == &line->dummy_buffer[0])
 		vfe_request_rebase(line, output->sof_sequence - 2 - ready_buf->input_sequence);
 	spin_unlock_irqrestore(&vfe->output_lock, flags);

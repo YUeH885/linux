@@ -97,6 +97,7 @@ struct vfe_line {
 	struct camss_buffer dummy_buffer[2];
 	void *dummy_memory;
 	size_t dummy_size;
+	unsigned int dummy_count;
 	u8 ife_gamma_bank;
 	struct vfe_17x_stats *stats;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
