@@ -36,6 +36,9 @@
  * values. White balance arrays use R, Gr, Gb, B order; Gr and Gb must match
  * because WB12 has a single green channel. CCM coefficients use signed Q7
  * in RGB row-major order and CCM offsets use signed 11-bit RGB values.
+ * Request controls require frame_sequence zero and both WHITE_BALANCE and
+ * CCM flags. A request contains one NV12 PIX buffer and this control. The
+ * completed request returns the applied input frame in frame_sequence.
  * Gamma is supplied as 65 10-bit samples per channel in R, G, B order;
  * the driver derives the 64 hardware
  * base/delta entries from consecutive samples.

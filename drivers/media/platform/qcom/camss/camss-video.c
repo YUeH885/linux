@@ -146,6 +146,113 @@ static int video_queue_setup(struct vb2_queue *q,
 	return 0;
 }
 
+static int camss_request_config(struct camss_buffer *buffer, bool update)
+{
+	struct vb2_buffer *vb = &buffer->vb.vb2_buf;
+	struct camss_video *video = vb2_get_drv_priv(vb->vb2_queue);
+	struct v4l2_ctrl_handler *handler;
+	struct v4l2_ctrl_ref *ref;
+	int ret = -ENOENT;
+
+	handler = v4l2_ctrl_request_hdl_find(vb->request, video->request_controls);
+	if (!handler)
+		return ret;
+	mutex_lock(handler->lock);
+	list_for_each_entry(ref, &handler->ctrl_refs, node) {
+		if (ref->ctrl->id != V4L2_CID_QCOM_CAMSS_IFE_CONFIG ||
+		    !ref->p_req_valid)
+			continue;
+		if (ref->p_req_array_enomem) {
+			ret = -ENOMEM;
+			break;
+		}
+		if (update)
+			memcpy(ref->p_req.p, &buffer->ife, sizeof(buffer->ife));
+		else
+			memcpy(&buffer->ife, ref->p_req.p, sizeof(buffer->ife));
+		ret = 0;
+		break;
+	}
+	mutex_unlock(handler->lock);
+	v4l2_ctrl_request_hdl_put(handler);
+	return ret;
+}
+
+int camss_video_request_validate(struct media_request *request)
+{
+	struct media_request_object *object;
+	struct camss_buffer *buffer = NULL;
+	struct camss_video *video;
+	unsigned int objects = 0;
+	int ret;
+
+	if (vb2_request_buffer_cnt(request) != 1)
+		return -EINVAL;
+	list_for_each_entry(object, &request->objects, list) {
+		objects++;
+		if (vb2_request_object_is_buffer(object)) {
+			struct vb2_buffer *vb = container_of(object, struct vb2_buffer, req_obj);
+
+			buffer = container_of(to_vb2_v4l2_buffer(vb), struct camss_buffer, vb);
+		}
+	}
+	/* One PIX buffer and its IFE control handler form a capture transaction. */
+	if (objects != 2 || !buffer)
+		return -EINVAL;
+	video = vb2_get_drv_priv(buffer->vb.vb2_buf.vb2_queue);
+	if (!video->request_controls || !video->ops->prepare_request)
+		return -EINVAL;
+	ret = camss_request_config(buffer, false);
+	if (ret)
+		return ret;
+	ret = video->ops->prepare_request(video, buffer);
+	if (ret)
+		return ret;
+	buffer->ife_valid = true;
+	buffer->ife_applied = false;
+	buffer->request_completed = false;
+	return vb2_request_validate(request);
+}
+
+static void video_buf_request_complete(struct vb2_buffer *vb)
+{
+	struct camss_buffer *buffer = container_of(to_vb2_v4l2_buffer(vb),
+						 struct camss_buffer, vb);
+	struct camss_video *video = vb2_get_drv_priv(vb->vb2_queue);
+
+	if (vb->request && !buffer->request_completed) {
+		v4l2_ctrl_request_complete(vb->request, video->request_controls);
+		buffer->request_completed = true;
+	}
+}
+
+static void camss_buffer_complete_work(struct work_struct *work)
+{
+	struct camss_buffer *buffer = container_of(work, struct camss_buffer, complete_work);
+	struct vb2_buffer *vb = &buffer->vb.vb2_buf;
+
+	if (buffer->completion_state == VB2_BUF_STATE_DONE)
+		WARN_ON(camss_request_config(buffer, true));
+	video_buf_request_complete(vb);
+	vb2_buffer_done(vb, buffer->completion_state);
+}
+
+void camss_buffer_done(struct camss_buffer *buffer, enum vb2_buffer_state state)
+{
+	struct vb2_buffer *vb = &buffer->vb.vb2_buf;
+	struct camss_video *video;
+
+	if (buffer->dummy)
+		return;
+	video = vb2_get_drv_priv(vb->vb2_queue);
+	if (vb->request && state != VB2_BUF_STATE_QUEUED) {
+		buffer->completion_state = state;
+		queue_work(video->request_wq, &buffer->complete_work);
+	} else {
+		vb2_buffer_done(vb, state);
+	}
+}
+
 static int video_buf_init(struct vb2_buffer *vb)
 {
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
@@ -157,6 +264,7 @@ static int video_buf_init(struct vb2_buffer *vb)
 	struct sg_table *sgt;
 	unsigned int i;
 
+	INIT_WORK(&buffer->complete_work, camss_buffer_complete_work);
 	for (i = 0; i < format->num_planes; i++) {
 		sgt = vb2_dma_sg_plane_desc(vb, i);
 		if (!sgt)
@@ -203,6 +311,8 @@ static void video_buf_queue(struct vb2_buffer *vb)
 	struct camss_buffer *buffer = container_of(vbuf, struct camss_buffer,
 						   vb);
 
+	if (!vb->request)
+		buffer->ife_valid = false;
 	video->ops->queue_buffer(video, buffer);
 }
 
@@ -258,6 +368,11 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct v4l2_subdev *subdev;
 	int ret;
 
+	if (video->request_controls) {
+		ret = video->ops->start_requests(video);
+		if (ret)
+			goto flush_buffers;
+	}
 	ret = video_device_pipeline_alloc_start(vdev);
 	if (ret < 0) {
 		dev_err(video->camss->dev, "Failed to start media pipeline: %d\n", ret);
@@ -291,6 +406,8 @@ error:
 
 flush_buffers:
 	video->ops->flush_buffers(video, VB2_BUF_STATE_QUEUED);
+	if (video->request_controls)
+		video->ops->stop_requests(video);
 
 	return ret;
 }
@@ -326,6 +443,8 @@ static void video_stop_streaming(struct vb2_queue *q)
 	video_device_pipeline_stop(vdev);
 
 	video->ops->flush_buffers(video, VB2_BUF_STATE_ERROR);
+	if (video->request_controls)
+		video->ops->stop_requests(video);
 }
 
 static void video_unprepare_streaming(struct vb2_queue *q)
@@ -341,6 +460,7 @@ static const struct vb2_ops msm_video_vb2_q_ops = {
 	.buf_init        = video_buf_init,
 	.buf_prepare     = video_buf_prepare,
 	.buf_queue       = video_buf_queue,
+	.buf_request_complete = video_buf_request_complete,
 	.prepare_streaming = video_prepare_streaming,
 	.start_streaming = video_start_streaming,
 	.stop_streaming  = video_stop_streaming,
@@ -650,6 +770,8 @@ static void msm_video_release(struct video_device *vdev)
 	struct camss_video *video = video_get_drvdata(vdev);
 
 	media_entity_cleanup(&vdev->entity);
+	if (video->request_wq)
+		destroy_workqueue(video->request_wq);
 
 	mutex_destroy(&video->q_lock);
 	mutex_destroy(&video->lock);
@@ -721,6 +843,14 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 	q->buf_struct_size = sizeof(struct camss_buffer);
 	q->dev = video->camss->dev;
 	q->lock = &video->q_lock;
+	if (video->request_controls) {
+		q->supports_requests = true;
+		video->request_wq = alloc_ordered_workqueue("%s-requests", WQ_MEM_RECLAIM, name);
+		if (!video->request_wq) {
+			ret = -ENOMEM;
+			goto error_vb2_init;
+		}
+	}
 	ret = vb2_queue_init(q);
 	if (ret < 0) {
 		dev_err(v4l2_dev->dev, "Failed to init vb2 queue: %d\n", ret);
@@ -770,6 +900,8 @@ error_video_register:
 	media_entity_cleanup(&vdev->entity);
 	mutex_destroy(&video->lock);
 error_vb2_init:
+	if (video->request_wq)
+		destroy_workqueue(video->request_wq);
 	mutex_destroy(&video->q_lock);
 
 	return ret;

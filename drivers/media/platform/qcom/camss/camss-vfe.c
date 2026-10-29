@@ -836,7 +836,7 @@ static void vfe_buf_flush_pending(struct vfe_output *output,
 	struct camss_buffer *t;
 
 	list_for_each_entry_safe(buf, t, &output->pending_bufs, queue) {
-		vb2_buffer_done(&buf->vb.vb2_buf, state);
+		camss_buffer_done(buf, state);
 		list_del(&buf->queue);
 	}
 }
@@ -1250,22 +1250,28 @@ int vfe_flush_buffers(struct camss_video *vid,
 
 	output = &line->output;
 
+	if (vid->vb2_q.uses_requests)
+		synchronize_irq(vfe->irq);
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
 	vfe_buf_flush_pending(output, state);
 
 	if (output->buf[0])
-		vb2_buffer_done(&output->buf[0]->vb.vb2_buf, state);
+		camss_buffer_done(output->buf[0], state);
+	output->buf[0] = NULL;
 
 	if (output->buf[1])
-		vb2_buffer_done(&output->buf[1]->vb.vb2_buf, state);
+		camss_buffer_done(output->buf[1], state);
+	output->buf[1] = NULL;
 
 	if (output->last_buffer) {
-		vb2_buffer_done(&output->last_buffer->vb.vb2_buf, state);
+		camss_buffer_done(output->last_buffer, state);
 		output->last_buffer = NULL;
 	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
+	if (vid->vb2_q.uses_requests)
+		flush_workqueue(vid->request_wq);
 
 	return 0;
 }
@@ -2217,6 +2223,8 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		}
 
 		video_out->ops = &vfe->video_ops;
+		if (vfe->line[i].ife_ctrls_initialized)
+			video_out->request_controls = &vfe->line[i].ife_ctrls;
 		if (vfe_is_pix_line(&vfe->line[i])) {
 			video_out->bpl_alignment = vfe_bpl_align_pix(vfe);
 			video_out->line_based = 1;

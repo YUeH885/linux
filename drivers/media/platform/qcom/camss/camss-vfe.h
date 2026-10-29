@@ -94,6 +94,9 @@ struct vfe_line {
 	struct mutex ife_config_lock;
 	struct v4l2_qcom_camss_ife_config ife_config;
 	bool ife_ctrls_initialized;
+	struct camss_buffer dummy_buffer[2];
+	void *dummy_memory;
+	size_t dummy_size;
 	u8 ife_gamma_bank;
 	struct vfe_17x_stats *stats;
 	struct media_pad pads[MSM_VFE_PADS_NUM];

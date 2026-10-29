@@ -5484,6 +5484,8 @@ static const struct v4l2_async_notifier_operations camss_subdev_notifier_ops = {
 
 static const struct media_device_ops camss_media_ops = {
 	.link_notify = v4l2_pipeline_link_notify,
+	.req_validate = camss_video_request_validate,
+	.req_queue = vb2_request_queue,
 };
 
 static int camss_configure_pd(struct camss *camss)

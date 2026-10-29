@@ -8,6 +8,7 @@
  */
 
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -463,9 +464,8 @@ static void vfe_ife_write_config(struct vfe_line *line,
 		vfe_ife_write_gamma(line, config, reset_gamma_bank);
 }
 
-static int vfe_ife_config_try_ctrl(struct v4l2_ctrl *ctrl)
+static int vfe_ife_config_validate(const struct v4l2_qcom_camss_ife_config *config)
 {
-	const struct v4l2_qcom_camss_ife_config *config = ctrl->p_new.p;
 	unsigned int i;
 
 	if (config->version != V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION ||
@@ -518,6 +518,11 @@ static int vfe_ife_config_try_ctrl(struct v4l2_ctrl *ctrl)
 	return 0;
 }
 
+static int vfe_ife_config_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	return vfe_ife_config_validate(ctrl->p_new.p);
+}
+
 static int vfe_ife_config_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct vfe_line *line = ctrl->priv;
@@ -555,7 +560,9 @@ static int vfe_ife_config_s_ctrl(struct v4l2_ctrl *ctrl)
 
 	spin_lock_irqsave(&vfe->output_lock, irq_flags);
 	streaming = line->output.state == VFE_OUTPUT_ON;
-	if (!streaming && request->frame_sequence) {
+	if (streaming && line->video_out.vb2_q.uses_requests) {
+		ret = -EBUSY;
+	} else if (!streaming && request->frame_sequence) {
 		ret = -EINVAL;
 	} else if (streaming && request->frame_sequence &&
 		   request->frame_sequence != line->output.sof_sequence) {
@@ -573,6 +580,151 @@ static int vfe_ife_config_s_ctrl(struct v4l2_ctrl *ctrl)
 	mutex_unlock(&line->ife_config_lock);
 
 	return ret;
+}
+
+static int vfe_prepare_request(struct camss_video *video, struct camss_buffer *buf)
+{
+	if (video->active_fmt.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12 ||
+	    video->active_fmt.fmt.pix_mp.num_planes != 1 || buf->ife.frame_sequence ||
+	    buf->ife.flags != (V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE |
+			       V4L2_QCOM_CAMSS_IFE_CONFIG_CCM))
+		return -EINVAL;
+	return vfe_ife_config_validate(&buf->ife);
+}
+
+static int vfe_start_requests(struct camss_video *video)
+{
+	struct vfe_line *line = container_of(video, struct vfe_line, video_out);
+	const struct v4l2_pix_format_mplane *format = &video->active_fmt.fmt.pix_mp;
+	unsigned int i;
+
+	if (format->pixelformat != V4L2_PIX_FMT_NV12 || format->num_planes != 1)
+		return 0;
+	line->dummy_size = format->plane_fmt[0].sizeimage;
+	line->dummy_memory = dma_alloc_coherent(video->camss->dev, line->dummy_size,
+					      &line->dummy_buffer[0].addr[0], GFP_KERNEL);
+	if (!line->dummy_memory)
+		return -ENOMEM;
+	for (i = 0; i < ARRAY_SIZE(line->dummy_buffer); i++) {
+		struct camss_buffer *buf = &line->dummy_buffer[i];
+
+		buf->dummy = true;
+		buf->addr[0] = line->dummy_buffer[0].addr[0];
+		buf->addr[1] = buf->addr[0] + format->plane_fmt[0].bytesperline * format->height;
+	}
+	return 0;
+}
+
+static void vfe_stop_requests(struct camss_video *video)
+{
+	struct vfe_line *line = container_of(video, struct vfe_line, video_out);
+
+	if (line->dummy_memory) {
+		dma_free_coherent(video->camss->dev, line->dummy_size,
+				  line->dummy_memory, line->dummy_buffer[0].addr[0]);
+		line->dummy_memory = NULL;
+	}
+}
+
+static void vfe_ife_apply_request(struct vfe_line *line, struct camss_buffer *buf)
+{
+	struct vfe_device *vfe = to_vfe(line);
+
+	buf->ife.frame_sequence = buf->input_sequence;
+	vfe_ife_write_config(line, &buf->ife, buf->ife.flags, false);
+	vfe->res->hw_ops->reg_update(vfe, line->id);
+	buf->ife_applied = true;
+}
+
+static void vfe_ife_schedule_request(struct vfe_line *line)
+{
+	struct vfe_output *output = &line->output;
+	struct camss_buffer *buf;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(output->buf); i++) {
+		buf = output->buf[i];
+		if (buf && buf->ife_valid && buf->input_sequence == output->sof_sequence) {
+			vfe_ife_apply_request(line, buf);
+			return;
+		}
+	}
+	if (!list_empty(&output->pending_bufs)) {
+		buf = list_first_entry(&output->pending_bufs, struct camss_buffer, queue);
+		if (buf->ife_valid && buf->input_sequence == output->sof_sequence)
+			vfe_ife_apply_request(line, buf);
+	}
+}
+
+static void vfe_request_enqueue(struct vfe_line *line, struct camss_buffer *buf)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	struct vfe_output *output = &line->output;
+	unsigned int i;
+
+	if (output->state == VFE_OUTPUT_ON && output->gen2.active_num < 2) {
+		output->buf[output->gen2.active_num++] = buf;
+		for (i = 0; i < output->wm_num; i++)
+			vfe->res->hw_ops->vfe_wm_update(vfe, output->wm_idx[i], buf->addr[i], line);
+		vfe->res->hw_ops->reg_update(vfe, line->id);
+	} else {
+		vfe_buf_add_pending(output, buf);
+	}
+}
+
+static int vfe_queue_request_buffer(struct camss_video *video, struct camss_buffer *buf)
+{
+	struct vfe_line *line = container_of(video, struct vfe_line, video_out);
+	struct vfe_device *vfe = to_vfe(line);
+	struct vfe_output *output = &line->output;
+	struct camss_buffer *tail;
+	unsigned long flags;
+	u32 sequence = 0;
+	unsigned int i;
+
+	if (!buf->ife_valid)
+		return vfe_queue_buffer_v2(video, buf);
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	if (!list_empty(&output->pending_bufs))
+		tail = list_last_entry(&output->pending_bufs, struct camss_buffer, queue);
+	else
+		tail = output->buf[1] ? output->buf[1] : output->buf[0];
+	if (tail)
+		sequence = tail->input_sequence + 1;
+	else if (output->state == VFE_OUTPUT_ON && output->sof_sequence)
+		sequence = output->sof_sequence - 1;
+
+	if (output->state == VFE_OUTPUT_ON && sequence <= output->sof_sequence) {
+		/* Two discarded outputs establish DMA phase before a new request is exposed. */
+		for (i = 0; i < ARRAY_SIZE(line->dummy_buffer); i++) {
+			line->dummy_buffer[i].input_sequence = sequence++;
+			vfe_request_enqueue(line, &line->dummy_buffer[i]);
+		}
+	}
+	buf->input_sequence = sequence;
+	vfe_request_enqueue(line, buf);
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+	return 0;
+}
+
+static void vfe_request_rebase(struct vfe_line *line, u32 shift)
+{
+	struct vfe_output *output = &line->output;
+	struct camss_buffer *buf;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(output->buf); i++) {
+		buf = output->buf[i];
+		if (buf) {
+			buf->input_sequence += shift;
+			buf->ife_applied = false;
+		}
+	}
+	list_for_each_entry(buf, &output->pending_bufs, queue) {
+		buf->input_sequence += shift;
+		buf->ife_applied = false;
+	}
+	vfe_ife_schedule_request(line);
 }
 
 static const struct v4l2_ctrl_ops vfe_ife_ctrl_ops = {
@@ -593,10 +745,10 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 		.dims = { sizeof(struct v4l2_qcom_camss_ife_config) },
 		.elem_size = sizeof(u8),
 		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
-			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE |
-			 V4L2_CTRL_FLAG_WRITE_ONLY,
+			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
 	};
 	struct v4l2_qcom_camss_ife_config *tuning = &line->ife_config;
+	struct v4l2_ctrl *control;
 	int ret;
 
 	memset(tuning, 0, sizeof(*tuning));
@@ -616,9 +768,11 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 1);
 	if (ret)
 		return ret;
-	v4l2_ctrl_new_custom(&line->ife_ctrls, &config_ctrl, line);
-	if (line->ife_ctrls.error) {
-		ret = line->ife_ctrls.error;
+	control = v4l2_ctrl_new_custom(&line->ife_ctrls, &config_ctrl, line);
+	ret = line->ife_ctrls.error;
+	if (!ret)
+		ret = v4l2_ctrl_s_ctrl_compound(control, V4L2_CTRL_TYPE_U8, tuning);
+	if (ret) {
 		v4l2_ctrl_handler_free(&line->ife_ctrls);
 		return ret;
 	}
@@ -1103,6 +1257,13 @@ static int vfe_enable(struct vfe_line *line)
 	ret = vfe_enable_output_v2(line);
 	if (ret < 0)
 		goto error_enable_output;
+	if (line->video_out.vb2_q.uses_requests) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		vfe_ife_apply_request(line, line->output.buf[0]);
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+	}
 
 	vfe->was_streaming = 1;
 
@@ -1136,6 +1297,8 @@ static void vfe_isr_sof(struct vfe_device *vfe, enum vfe_line_id line_id)
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	if (output->state == VFE_OUTPUT_ON) {
 		event.u.frame_sync.frame_sequence = output->sof_sequence++;
+		if (line->video_out.vb2_q.uses_requests)
+			vfe_ife_schedule_request(line);
 		v4l2_event_queue(line->subdev.devnode, &event);
 	}
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
@@ -1177,6 +1340,7 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	unsigned long flags;
 	u32 index;
 	u64 ts = ktime_get_ns();
+	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
 	unsigned int i;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
@@ -1196,8 +1360,19 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		goto out_unlock;
 	}
 
-	ready_buf->vb.vb2_buf.timestamp = ts;
-	ready_buf->vb.sequence = output->sof_sequence - 1;
+	if (!ready_buf->dummy) {
+		ready_buf->vb.vb2_buf.timestamp = ts;
+		ready_buf->vb.sequence = output->sof_sequence - 1;
+		if (ready_buf->ife_valid &&
+		    (!ready_buf->ife_applied ||
+		     ready_buf->input_sequence + 1 != ready_buf->vb.sequence)) {
+			dev_err_ratelimited(vfe->camss->dev,
+				"IFE request input %u returned at DMA frame %u, applied %u\n",
+				ready_buf->input_sequence, ready_buf->vb.sequence,
+				ready_buf->ife_applied);
+			state = VB2_BUF_STATE_ERROR;
+		}
+	}
 
 	index = 0;
 	output->buf[0] = output->buf[1];
@@ -1214,9 +1389,11 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		output->gen2.active_num--;
 	}
 
+	if (ready_buf == &line->dummy_buffer[0])
+		vfe_request_rebase(line, output->sof_sequence - 2 - ready_buf->input_sequence);
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
-	vb2_buffer_done(&ready_buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+	camss_buffer_done(ready_buf, state);
 
 	return;
 
@@ -1251,10 +1428,13 @@ static long vfe_get_frame_sequence(struct camss_video *video, u32 *sequence)
 }
 
 static const struct camss_video_ops vfe_video_ops_170 = {
-	.queue_buffer = vfe_queue_buffer_v2,
+	.queue_buffer = vfe_queue_request_buffer,
 	.flush_buffers = vfe_flush_buffers,
 	.get_stats = vfe_17x_get_stats,
 	.get_frame_sequence = vfe_get_frame_sequence,
+	.prepare_request = vfe_prepare_request,
+	.start_requests = vfe_start_requests,
+	.stop_requests = vfe_stop_requests,
 };
 
 static void vfe_subdev_init(struct device *dev, struct vfe_device *vfe)
