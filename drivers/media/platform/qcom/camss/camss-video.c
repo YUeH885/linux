@@ -598,6 +598,9 @@ static long video_ioctl_default(struct file *file, void *fh, bool valid_prio,
 
 	if (cmd == VIDIOC_QCOM_CAMSS_GET_STATS && video->ops->get_stats)
 		return video->ops->get_stats(video, arg);
+	if (cmd == VIDIOC_QCOM_CAMSS_GET_FRAME_SEQUENCE &&
+	    video->ops->get_frame_sequence)
+		return video->ops->get_frame_sequence(video, arg);
 
 	return -ENOTTY;
 }

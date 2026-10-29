@@ -102,4 +102,8 @@ struct v4l2_qcom_camss_stats {
 #define VIDIOC_QCOM_CAMSS_GET_STATS \
 	_IOWR('V', BASE_VIDIOC_PRIVATE + 0, struct v4l2_qcom_camss_stats)
 
+/* Next PIX input SOF sequence, or zero while the output is stopped. */
+#define VIDIOC_QCOM_CAMSS_GET_FRAME_SEQUENCE \
+	_IOR('V', BASE_VIDIOC_PRIVATE + 1, __u32)
+
 #endif /* _UAPI_LINUX_QCOM_CAMSS_H */

@@ -1233,10 +1233,28 @@ static const struct vfe_isr_ops vfe_isr_ops_170 = {
 	.wm_done = vfe_isr_wm_done,
 };
 
+static long vfe_get_frame_sequence(struct camss_video *video, u32 *sequence)
+{
+	struct vfe_line *line = container_of(video, struct vfe_line, video_out);
+	struct vfe_device *vfe = to_vfe(line);
+	unsigned long flags;
+
+	if (line->id != VFE_LINE_PIX || vfe->res->is_lite)
+		return -EINVAL;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	*sequence = line->output.state == VFE_OUTPUT_ON ?
+		    line->output.sof_sequence : 0;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return 0;
+}
+
 static const struct camss_video_ops vfe_video_ops_170 = {
 	.queue_buffer = vfe_queue_buffer_v2,
 	.flush_buffers = vfe_flush_buffers,
 	.get_stats = vfe_17x_get_stats,
+	.get_frame_sequence = vfe_get_frame_sequence,
 };
 
 static void vfe_subdev_init(struct device *dev, struct vfe_device *vfe)

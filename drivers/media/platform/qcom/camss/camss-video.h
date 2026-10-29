@@ -34,6 +34,7 @@ struct camss_video_ops {
 			     enum vb2_buffer_state state);
 	long (*get_stats)(struct camss_video *vid,
 			  struct v4l2_qcom_camss_stats *stats);
+	long (*get_frame_sequence)(struct camss_video *vid, u32 *sequence);
 };
 
 struct camss_video {
