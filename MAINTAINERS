@@ -25646,6 +25646,12 @@ L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	drivers/media/i2c/imx471.c
 
+SONY IMX520 SENSOR DRIVER
+M:	yuzu <yuzu23234@gmail.com>
+L:	linux-media@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/media/i2c/sony,imx520.yaml
+
 SONY IMX678 SENSOR DRIVER
 M:	Jai Luthra <jai.luthra@ideasonboard.com>
 L:	linux-media@vger.kernel.org
