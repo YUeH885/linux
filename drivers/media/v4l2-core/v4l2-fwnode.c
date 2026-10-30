@@ -1235,6 +1235,7 @@ v4l2_async_nf_parse_fwnode_sensor(struct device *dev,
 		{ "mipi-img-flash-leds", },
 		{ "lens-focus", },
 		{ "mipi-img-lens-focus", },
+		{ "ois", },
 	};
 	unsigned int i;
 
