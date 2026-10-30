@@ -25607,6 +25607,7 @@ M:	yuzu <yuzu23234@gmail.com>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/i2c/sony,imx351.yaml
+F:	drivers/media/i2c/imx351.c
 
 SONY IMX355 SENSOR DRIVER
 M:	Sakari Ailus <sakari.ailus@linux.intel.com>
