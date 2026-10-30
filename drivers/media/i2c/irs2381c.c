@@ -226,8 +226,13 @@ static int irs2381c_set_stream(struct v4l2_subdev *sd, int enable)
 		}
 	} else {
 		ret = irs2381c_stop_streaming(irs2381c);
-		pm_runtime_mark_last_busy(irs2381c->dev);
-		pm_runtime_put_autosuspend(irs2381c->dev);
+		if (ret) {
+			dev_err(irs2381c->dev, "failed to stop streaming: %d\n", ret);
+			pm_runtime_put_sync_suspend(irs2381c->dev);
+		} else {
+			pm_runtime_mark_last_busy(irs2381c->dev);
+			pm_runtime_put_autosuspend(irs2381c->dev);
+		}
 	}
 
 	irs2381c->streaming = enable;
