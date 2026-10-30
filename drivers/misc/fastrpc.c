@@ -321,6 +321,7 @@ struct fastrpc_channel_ctx {
 	struct rpmsg_device *rpdev;
 	struct fastrpc_session_ctx session[FASTRPC_MAX_SESSIONS];
 	spinlock_t lock;
+	struct rw_semaphore rpdev_sem;
 	struct idr ctx_idr;
 	struct list_head users;
 	struct kref refcount;
@@ -602,9 +603,21 @@ static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 static int fastrpc_remote_heap_alloc(struct fastrpc_user *fl, struct device *dev,
 				     u64 size, struct fastrpc_buf **obuf)
 {
-	struct device *rdev = &fl->cctx->rpdev->dev;
+	struct device *rdev;
+	int ret;
 
-	return  __fastrpc_buf_alloc(fl, rdev, size, obuf);
+	down_read(&fl->cctx->rpdev_sem);
+	if (!fl->cctx->rpdev) {
+		up_read(&fl->cctx->rpdev_sem);
+		return -EPIPE;
+	}
+	rdev = get_device(&fl->cctx->rpdev->dev);
+	up_read(&fl->cctx->rpdev_sem);
+
+	ret = __fastrpc_buf_alloc(fl, rdev, size, obuf);
+	put_device(rdev);
+
+	return ret;
 }
 
 static void fastrpc_channel_ctx_free(struct kref *ref)
@@ -1375,7 +1388,12 @@ static int fastrpc_invoke_send(struct fastrpc_session_ctx *sctx,
 	msg->size = roundup(ctx->msg_sz, PAGE_SIZE);
 	fastrpc_context_get(ctx);
 
-	ret = rpmsg_send(cctx->rpdev->ept, (void *)msg, sizeof(*msg));
+	down_read(&cctx->rpdev_sem);
+	if (cctx->rpdev)
+		ret = rpmsg_send(cctx->rpdev->ept, (void *)msg, sizeof(*msg));
+	else
+		ret = -EPIPE;
+	up_read(&cctx->rpdev_sem);
 
 	if (ret)
 		fastrpc_context_put(ctx);
@@ -1800,7 +1818,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 
 	sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_CREATE, 4, 0);
 	if (init.attrs)
-		sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_CREATE_ATTR, 4, 0);
+		sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_CREATE_ATTR, 6, 0);
 
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE,
 				      sc, args);
@@ -1920,7 +1938,7 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 
 	fl->sctx = fastrpc_session_alloc(fl);
 	if (!fl->sctx) {
-		dev_err(&cctx->rpdev->dev, "No session available\n");
+		dev_err(fdevice->miscdev.this_device, "No session available\n");
 		mutex_destroy(&fl->mutex);
 		kfree(fl);
 		fastrpc_channel_ctx_put(cctx);
@@ -2069,12 +2087,12 @@ static int fastrpc_get_info_from_kernel(struct fastrpc_ioctl_capability *cap,
 
 	err = fastrpc_get_info_from_dsp(fl, dsp_attributes, FASTRPC_MAX_DSP_ATTRIBUTES);
 	if (err == DSP_UNSUPPORTED_API) {
-		dev_info(&cctx->rpdev->dev,
+		dev_info(fl->sctx->dev,
 			 "Warning: DSP capabilities not supported\n");
 		kfree(dsp_attributes);
 		return -EOPNOTSUPP;
 	} else if (err) {
-		dev_err(&cctx->rpdev->dev, "Error: dsp information is incorrect err: %d\n", err);
+		dev_err(fl->sctx->dev, "Error: dsp information is incorrect err: %d\n", err);
 		kfree(dsp_attributes);
 		return err;
 	}
@@ -2129,7 +2147,7 @@ static int fastrpc_get_dsp_info(struct fastrpc_user *fl, char __user *argp)
 	cap.capability = 0;
 
 	if (cap.attribute_id >= FASTRPC_MAX_DSP_ATTRIBUTES) {
-		dev_err(&fl->cctx->rpdev->dev, "Error: invalid attribute: %d, err: %d\n",
+		dev_err(fl->sctx->dev, "Error: invalid attribute: %d, err: %d\n",
 			cap.attribute_id, err);
 		return -EOVERFLOW;
 	}
@@ -2265,7 +2283,7 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc,
 				      &args[0]);
 	if (err) {
-		dev_err(dev, "mmap error (len 0x%08llx)\n", buf->size);
+		dev_err(dev, "mmap error %d (len 0x%08llx)\n", err, buf->size);
 		fastrpc_buf_free(buf);
 		return err;
 	}
@@ -2783,6 +2801,7 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 	INIT_LIST_HEAD(&data->users);
 	INIT_LIST_HEAD(&data->invoke_interrupted_mmaps);
 	spin_lock_init(&data->lock);
+	init_rwsem(&data->rpdev_sem);
 	idr_init(&data->ctx_idr);
 	data->domain_id = domain_id;
 	data->rpdev = rpdev;
@@ -2825,8 +2844,10 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 	unsigned long flags;
 
 	/* No invocations past this point */
-	spin_lock_irqsave(&cctx->lock, flags);
+	down_write(&cctx->rpdev_sem);
 	cctx->rpdev = NULL;
+	up_write(&cctx->rpdev_sem);
+	spin_lock_irqsave(&cctx->lock, flags);
 	list_for_each_entry(user, &cctx->users, user)
 		fastrpc_notify_users(user);
 	spin_unlock_irqrestore(&cctx->lock, flags);
