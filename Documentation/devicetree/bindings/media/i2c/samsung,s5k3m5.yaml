@@ -18,6 +18,7 @@ maintainers:
 
 allOf:
   - $ref: /schemas/media/video-interface-devices.yaml#
+  - $ref: /schemas/nvmem/nvmem-consumer.yaml#
 
 properties:
   compatible:
@@ -33,6 +34,14 @@ properties:
   reset-gpios:
     description: Active low GPIO connected to RESET pad of the sensor.
     maxItems: 1
+
+  mclk-request-gpios:
+    description: Active high GPIO requesting the module's external MCLK path.
+    maxItems: 1
+
+  lg,camera-id:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: LG camera profile identifier used by the module calibration.
 
   afvdd-supply:
     description: Autofocus actuator voltage supply, 2.8-3.0 volts.
