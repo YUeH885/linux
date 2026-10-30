@@ -949,6 +949,19 @@ config VIDEO_DW9807_VCM
 	  capability. This is designed for linear control of
 	  voice coil motors, controlled via I2C serial interface.
 
+config VIDEO_LC898124EP1
+	tristate "onsemi LC898124EP1 optical image stabilization support"
+	depends on NVMEM
+	select FW_LOADER
+	select V4L2_CCI_I2C
+	help
+	  This is a driver for the onsemi LC898124EP1 optical image
+	  stabilization (OIS) controller. The device loads actuator DSP
+	  firmware and provides optical stabilization control over I2C.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called lc898124ep1.
+
 config VIDEO_LC898219XI
 	tristate "onsemi LC898219XI lens actuator support"
 	select V4L2_CCI_I2C
