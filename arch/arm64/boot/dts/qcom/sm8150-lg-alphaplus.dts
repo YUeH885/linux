@@ -20,10 +20,6 @@
 / {
 	model = "LG LM-G820N";
 	compatible = "lg,alphaplus", "qcom,sm8150";
-	qcom,msm-name = "SM8150 V2";
-	qcom,msm-id = <0x153 0x20000>;
-	qcom,pmic-name = "PM8150";
-	qcom,board-id = <0 0>;
 	chassis-type = "handset";
 
 	aliases {
