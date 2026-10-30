@@ -58,27 +58,6 @@ struct vfe_hw_ops_gen1 {
 };
 
 /*
- * vfe_calc_interp_reso - Calculate interpolation mode
- * @input: Input resolution
- * @output: Output resolution
- *
- * Return interpolation mode
- */
-static inline u8 vfe_calc_interp_reso(u16 input, u16 output)
-{
-	if (input / output >= 16)
-		return 0;
-
-	if (input / output >= 8)
-		return 1;
-
-	if (input / output >= 4)
-		return 2;
-
-	return 3;
-}
-
-/*
  * vfe_gen1_disable - Disable streaming on VFE line
  * @line: VFE line
  *

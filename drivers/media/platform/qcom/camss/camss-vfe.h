@@ -11,10 +11,13 @@
 #define QC_MSM_CAMSS_VFE_H
 
 #include <linux/clk.h>
+#include <linux/mutex.h>
 #include <linux/spinlock_types.h>
+#include <media/v4l2-ctrls.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
+#include <uapi/linux/qcom_camss.h>
 
 #include "camss-video.h"
 #include "camss-vfe-gen1.h"
@@ -77,15 +80,38 @@ struct vfe_output {
 	};
 	enum vfe_output_state state;
 	unsigned int sequence;
+	unsigned int sof_sequence;
 
 	int wait_reg_update;
 	struct completion sof;
 	struct completion reg_update;
 };
 
+struct vfe_sensor_state {
+	u32 sequence;
+	s32 exposure;
+	s32 gain;
+	bool valid;
+};
+
 struct vfe_line {
 	enum vfe_line_id id;
 	struct v4l2_subdev subdev;
+	struct v4l2_ctrl_handler ife_ctrls;
+	/* Serializes IFE tuning updates and hardware programming. */
+	struct mutex ife_config_lock;
+	struct v4l2_qcom_camss_ife_config ife_config;
+	bool ife_ctrls_initialized;
+	struct camss_buffer dummy_buffer[2];
+	struct list_head sensor_pending;
+	struct camss_buffer *sensor_inflight;
+	u32 sensor_next;
+	struct vfe_sensor_state sensor_history[64];
+	u32 sensor_count;
+	void *dummy_memory;
+	size_t dummy_size;
+	u8 ife_gamma_bank;
+	struct vfe_17x_stats *stats;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
 	struct v4l2_mbus_framefmt fmt[MSM_VFE_PADS_NUM];
 	struct v4l2_rect compose;
@@ -94,6 +120,8 @@ struct vfe_line {
 	struct vfe_output output;
 	const struct camss_format_info *formats;
 	unsigned int nformats;
+	const struct camss_format_info *sink_formats;
+	unsigned int nsink_formats;
 };
 
 struct vfe_device;
@@ -141,6 +169,7 @@ struct vfe_subdev_resources {
 	const struct vfe_hw_ops *hw_ops;
 	const struct camss_formats *formats_rdi;
 	const struct camss_formats *formats_pix;
+	const struct camss_formats *formats_pix_sink;
 };
 
 struct vfe_device {
@@ -182,6 +211,11 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 			      struct v4l2_device *v4l2_dev);
 
 void msm_vfe_unregister_entities(struct vfe_device *vfe);
+
+bool vfe_sensor_state(struct vfe_line *line, u32 sequence,
+		      struct vfe_sensor_state *state);
+int vfe_ife_ctrl_init(struct vfe_line *line);
+void vfe_ife_ctrl_cleanup(struct vfe_line *line);
 
 /*
  * vfe_buf_add_pending - Add output buffer to list of pending
@@ -240,6 +274,8 @@ extern const struct camss_formats vfe_formats_rdi_8x96;
 extern const struct camss_formats vfe_formats_pix_8x96;
 extern const struct camss_formats vfe_formats_rdi_845;
 extern const struct camss_formats vfe_formats_pix_845;
+extern const struct camss_formats vfe_formats_pix_175;
+extern const struct camss_formats vfe_formats_pix_175_sink;
 
 extern const struct vfe_hw_ops vfe_ops_4_1;
 extern const struct vfe_hw_ops vfe_ops_4_7;
@@ -313,5 +349,26 @@ int vfe_enable_output_v2(struct vfe_line *line);
  */
 int vfe_queue_buffer_v2(struct camss_video *vid,
 			struct camss_buffer *buf);
+
+/*
+ * vfe_calc_interp_reso - Calculate interpolation mode
+ * @input: Input resolution
+ * @output: Output resolution
+ *
+ * Return interpolation mode
+ */
+static inline u8 vfe_calc_interp_reso(u16 input, u16 output)
+{
+	if (input / output >= 16)
+		return 0;
+
+	if (input / output >= 8)
+		return 1;
+
+	if (input / output >= 4)
+		return 2;
+
+	return 3;
+}
 
 #endif /* QC_MSM_CAMSS_VFE_H */

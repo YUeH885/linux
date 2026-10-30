@@ -31,11 +31,13 @@ struct csiphy_lane {
 /**
  * struct csiphy_lanes_cfg - CSIPHY lanes configuration
  * @num_data: number of data lanes
+ * @max_data: maximum number of data lanes supported by the endpoint
  * @data:     data lanes configuration
  * @clk:      clock lane configuration (only for D-PHY)
  */
 struct csiphy_lanes_cfg {
 	int num_data;
+	int max_data;
 	struct csiphy_lane *data;
 	struct csiphy_lane clk;
 };
