@@ -25616,6 +25616,7 @@ M:	yuzu <yuzu23234@gmail.com>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/i2c/sony,imx363.yaml
+F:	drivers/media/i2c/imx363.c
 
 SONY IMX412 SENSOR DRIVER
 L:	linux-media@vger.kernel.org
