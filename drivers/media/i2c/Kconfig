@@ -340,6 +340,16 @@ config VIDEO_IMX678
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx678.
 
+config VIDEO_IRS2381C
+	tristate "Infineon REAL3 IRS2381C ToF sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the Infineon REAL3
+	  IRS2381C 3D Time-of-Flight (ToF) image sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called irs2381c.
+
 config VIDEO_MAX9271_LIB
 	tristate
 
