@@ -324,8 +324,28 @@ static int video_mux_notify_bound(struct v4l2_async_notifier *notifier,
 	return v4l2_create_fwnode_links(sd, &vmux->subdev);
 }
 
+static void video_mux_notify_unbind(struct v4l2_async_notifier *notifier,
+				    struct v4l2_subdev *sd,
+				    struct v4l2_async_connection *asd)
+{
+	struct video_mux *vmux = notifier_to_video_mux(notifier);
+	struct media_pad *pad;
+
+	mutex_lock(&vmux->lock);
+	if (vmux->active >= 0) {
+		pad = media_pad_remote_pad_first(&vmux->pads[vmux->active]);
+		if (pad && pad->entity == &sd->entity) {
+			/* The enabled input link is about to disappear. */
+			mux_control_deselect(vmux->mux);
+			vmux->active = -1;
+		}
+	}
+	mutex_unlock(&vmux->lock);
+}
+
 static const struct v4l2_async_notifier_operations video_mux_notify_ops = {
 	.bound = video_mux_notify_bound,
+	.unbind = video_mux_notify_unbind,
 };
 
 static int video_mux_async_register(struct video_mux *vmux,
