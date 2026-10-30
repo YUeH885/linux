@@ -628,6 +628,8 @@ static int at24_probe(struct i2c_client *client)
 	flags = cdata->flags;
 	if (device_property_present(dev, "read-only"))
 		flags |= AT24_FLAG_READONLY;
+	if (device_property_present(dev, "linux,readable-by-users"))
+		flags |= AT24_FLAG_IRUGO;
 	if (device_property_present(dev, "no-read-rollover"))
 		flags |= AT24_FLAG_NO_RDROL;
 
