@@ -598,6 +598,48 @@ static int csid_set_clock_rates(struct csid_device *csid)
 	return 0;
 }
 
+static u32 csid_get_lane_assign(struct csiphy_lanes_cfg *lane_cfg,
+				unsigned int num_lanes)
+{
+	u32 lane_assign = 0;
+	unsigned int i;
+
+	for (i = 0; i < num_lanes; i++)
+		lane_assign |= (lane_cfg ? lane_cfg->data[i].pos : i) <<
+			       (i * LANE_CFG_BITWIDTH);
+
+	return lane_assign;
+}
+
+static int csid_update_phy_config(struct csid_device *csid)
+{
+	struct media_pad *remote;
+	struct v4l2_subdev *sd;
+	struct csiphy_device *csiphy;
+	struct csiphy_lanes_cfg *lane_cfg;
+	int num_lanes;
+
+	if (csid->tpg_linked)
+		return 0;
+
+	remote = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_SINK]);
+	if (!remote || !is_media_entity_v4l2_subdev(remote->entity))
+		return -ENOLINK;
+
+	sd = media_entity_to_v4l2_subdev(remote->entity);
+	csiphy = v4l2_get_subdevdata(sd);
+	lane_cfg = &csiphy->cfg.csi2->lane_cfg;
+	num_lanes = camss_get_active_data_lanes(remote->entity, lane_cfg->max_data);
+	if (num_lanes < 0)
+		return num_lanes;
+
+	lane_cfg->num_data = num_lanes;
+	csid->phy.lane_cnt = num_lanes;
+	csid->phy.lane_assign = csid_get_lane_assign(lane_cfg, num_lanes);
+
+	return 0;
+}
+
 /*
  * csid_hw_version - CSID hardware version query
  * @csid: CSID device
@@ -685,6 +727,10 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 	int ret = 0;
 
 	if (on) {
+		ret = csid_update_phy_config(csid);
+		if (ret < 0)
+			return ret;
+
 		/*
 		 * From SDM845 onwards, the VFE needs to be powered on before
 		 * switching on the CSID. Do so unconditionally, as there is no
@@ -1217,27 +1263,6 @@ void msm_csid_get_csid_id(struct media_entity *entity, u8 *id)
 }
 
 /*
- * csid_get_lane_assign - Calculate lane assign by csiphy/tpg lane num
- * @lane_cfg: CSI2 lane configuration
- * @num_lanes: lane num
- *
- * Return lane assign
- */
-static u32 csid_get_lane_assign(struct csiphy_lanes_cfg *lane_cfg, int num_lanes)
-{
-	u32 lane_assign = 0;
-	int pos;
-	int i;
-
-	for (i = 0; i < num_lanes; i++) {
-		pos = lane_cfg ? lane_cfg->data[i].pos : i;
-		lane_assign |= pos << (i * LANE_CFG_BITWIDTH);
-	}
-
-	return lane_assign;
-}
-
-/*
  * csid_link_setup - Setup CSID connections
  * @entity: Pointer to media entity structure
  * @local: Pointer to local pad
@@ -1290,8 +1315,9 @@ static int csid_link_setup(struct media_entity *entity,
 			csid->phy.csiphy_id = csiphy->id;
 
 			lane_cfg = &csiphy->cfg.csi2->lane_cfg;
-			csid->phy.lane_cnt = lane_cfg->num_data;
-			csid->phy.lane_assign = csid_get_lane_assign(lane_cfg, lane_cfg->num_data);
+			lane_cfg->num_data = lane_cfg->max_data;
+			csid->phy.lane_cnt = lane_cfg->max_data;
+			csid->phy.lane_assign = csid_get_lane_assign(lane_cfg, lane_cfg->max_data);
 			csid->tpg_linked = false;
 		}
 	}
