@@ -25602,6 +25602,12 @@ T:	git git://linuxtv.org/media.git
 F:	Documentation/devicetree/bindings/media/i2c/sony,imx335.yaml
 F:	drivers/media/i2c/imx335.c
 
+SONY IMX351 SENSOR DRIVER
+M:	yuzu <yuzu23234@gmail.com>
+L:	linux-media@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/media/i2c/sony,imx351.yaml
+
 SONY IMX355 SENSOR DRIVER
 M:	Sakari Ailus <sakari.ailus@linux.intel.com>
 M:	Dave Stevenson <dave.stevenson@raspberrypi.com>
