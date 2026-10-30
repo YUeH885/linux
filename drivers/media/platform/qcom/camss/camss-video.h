@@ -11,6 +11,9 @@
 #define QC_MSM_CAMSS_VIDEO_H
 
 #include <linux/mutex.h>
+#include <linux/workqueue.h>
+#include <media/media-request.h>
+#include <media/v4l2-ctrls.h>
 #include <linux/videodev2.h>
 #include <media/media-entity.h>
 #include <media/v4l2-dev.h>
@@ -18,11 +21,25 @@
 #include <media/v4l2-fh.h>
 #include <media/v4l2-mediabus.h>
 #include <media/videobuf2-v4l2.h>
+#include <uapi/linux/qcom_camss.h>
 
 struct camss_buffer {
 	struct vb2_v4l2_buffer vb;
 	dma_addr_t addr[3];
 	struct list_head queue;
+	struct v4l2_qcom_camss_ife_config ife;
+	struct work_struct complete_work;
+	struct work_struct sensor_work;
+	struct v4l2_ctrl_handler *sensor_controls;
+	s32 sensor_exposure;
+	s32 sensor_gain;
+	bool sensor_applied;
+	enum vb2_buffer_state completion_state;
+	u32 input_sequence;
+	bool ife_valid;
+	bool ife_applied;
+	bool request_completed;
+	bool dummy;
 };
 
 struct camss_video;
@@ -31,6 +48,14 @@ struct camss_video_ops {
 	int (*queue_buffer)(struct camss_video *vid, struct camss_buffer *buf);
 	int (*flush_buffers)(struct camss_video *vid,
 			     enum vb2_buffer_state state);
+	long (*get_stats)(struct camss_video *vid,
+			  struct v4l2_qcom_camss_stats *stats);
+	long (*get_frame_sequence)(struct camss_video *vid, u32 *sequence);
+	long (*get_request_sequence)(struct camss_video *vid, u32 *sequence);
+	int (*prepare_request)(struct camss_video *vid, struct camss_buffer *buf);
+	int (*start_requests)(struct camss_video *vid);
+	void (*stop_requests)(struct camss_video *vid);
+	void (*apply_sensor)(struct camss_video *vid, struct camss_buffer *buf);
 };
 
 struct camss_video {
@@ -42,6 +67,9 @@ struct camss_video {
 	enum v4l2_buf_type type;
 	struct media_pipeline pipe;
 	const struct camss_video_ops *ops;
+	struct v4l2_ctrl_handler *request_controls;
+	struct workqueue_struct *request_wq;
+	bool requests_stopping;
 	struct mutex lock;
 	struct mutex q_lock;
 	unsigned int bpl_alignment;
@@ -54,5 +82,7 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 		       const char *name);
 
 void msm_video_unregister(struct camss_video *video);
+int camss_video_request_validate(struct media_request *request);
+void camss_buffer_done(struct camss_buffer *buffer, enum vb2_buffer_state state);
 
 #endif /* QC_MSM_CAMSS_VIDEO_H */
