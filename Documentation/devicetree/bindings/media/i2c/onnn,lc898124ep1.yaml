@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/i2c/onnn,lc898124ep1.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: onsemi LC898124EP1 optical image stabilization controller
+
+maintainers:
+  - yuzu <yuzu23234@gmail.com>
+
+properties:
+  compatible:
+    const: onnn,lc898124ep1
+
+  reg:
+    maxItems: 1
+
+  vdd-supply:
+    description: Controller power supply.
+
+  vio-supply:
+    description: I2C I/O supply.
+
+  vmotor-supply:
+    description: Motor power supply.
+
+  nvmem-cells:
+    maxItems: 1
+    description: Module VCM version used to select the DSP firmware.
+
+  nvmem-cell-names:
+    const: vcm-version
+
+required:
+  - compatible
+  - reg
+  - vdd-supply
+  - vio-supply
+  - vmotor-supply
+  - nvmem-cells
+  - nvmem-cell-names
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        ois@3e {
+            compatible = "onnn,lc898124ep1";
+            reg = <0x3e>;
+            vdd-supply = <&vreg_ois>;
+            vio-supply = <&vreg_io>;
+            vmotor-supply = <&vreg_motor>;
+            nvmem-cells = <&vcm_version>;
+            nvmem-cell-names = "vcm-version";
+        };
+    };
+...
