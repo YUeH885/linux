@@ -25611,6 +25611,12 @@ S:	Maintained
 T:	git git://linuxtv.org/media.git
 F:	drivers/media/i2c/imx355.c
 
+SONY IMX363 SENSOR DRIVER
+M:	yuzu <yuzu23234@gmail.com>
+L:	linux-media@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/media/i2c/sony,imx363.yaml
+
 SONY IMX412 SENSOR DRIVER
 L:	linux-media@vger.kernel.org
 S:	Orphan
