@@ -1523,8 +1523,12 @@
 	status = "okay";
 };
 
-/* ADSP firmware (adsp.mdt) comes from the mounted modem_a partition. */
 &remoteproc_adsp {
+	status = "okay";
+};
+
+&remoteproc_cdsp {
+	firmware-name = "cdsp.mdt";
 	status = "okay";
 };
 
