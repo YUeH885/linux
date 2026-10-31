@@ -198,7 +198,7 @@ static int irs2381c_stop_streaming(struct irs2381c *irs2381c)
 
 	ret = cci_write(irs2381c->regmap, CCI_REG16(0x9400), 0x0000, NULL);
 	if (!ret)
-		msleep(500);
+		usleep_range(10000, 15000);
 
 	return ret;
 }
