@@ -324,7 +324,7 @@ void vfe_17x_stats_isr(struct vfe_device *vfe, u32 status)
 	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
 	/* Pair with the buffer publication in vfe_17x_stats_start(). */
 	struct vfe_17x_stats *stats = smp_load_acquire(&line->stats);
-	u32 sequence = line->output.sof_sequence - 1;
+	u32 sequence = line->output.sof_sequence ? line->output.sof_sequence - 1 : 0;
 	struct vfe_sensor_state sensor;
 	bool sensor_valid;
 	unsigned long flags;

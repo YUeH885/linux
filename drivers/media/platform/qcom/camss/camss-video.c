@@ -461,11 +461,8 @@ static void video_stop_streaming(struct vb2_queue *q)
 		subdev = media_entity_to_v4l2_subdev(entity);
 
 		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
-
-		if (ret) {
+		if (ret)
 			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
-			return;
-		}
 		if (entity->function == MEDIA_ENT_F_VID_MUX)
 			break;
 	}

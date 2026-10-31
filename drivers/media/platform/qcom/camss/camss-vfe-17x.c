@@ -730,8 +730,12 @@ static int vfe_start_requests(struct camss_video *video)
 	}
 	buf = list_first_entry(&line->output.pending_bufs, struct camss_buffer, queue);
 	ret = v4l2_ctrl_request_setup(buf->vb.vb2_buf.request, buf->sensor_controls);
-	if (ret)
+	if (ret) {
+		dma_free_coherent(video->camss->dev, line->dummy_size,
+				  line->dummy_memory, line->dummy_buffer[0].addr[0]);
+		line->dummy_memory = NULL;
 		return ret;
+	}
 	buf->sensor_applied = true;
 	vfe_sensor_record(line, 0, buf, true);
 	line->sensor_next = 0;
