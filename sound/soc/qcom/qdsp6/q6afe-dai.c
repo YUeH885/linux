@@ -451,6 +451,7 @@ static int q6afe_dai_prepare(struct snd_pcm_substream *substream,
 					&dai_data->port_config[dai->id].hdmi);
 		break;
 	case SLIMBUS_0_RX ... SLIMBUS_6_TX:
+	case SLIMBUS_7_RX ... SLIMBUS_7_TX:
 		q6afe_slim_port_prepare(dai_data->port[dai->id],
 					&dai_data->port_config[dai->id].slim);
 		break;
@@ -574,6 +575,7 @@ static const struct snd_soc_dapm_route q6afe_dapm_routes[] = {
 	{"Slimbus4 Playback", NULL, "SLIMBUS_4_RX"},
 	{"Slimbus5 Playback", NULL, "SLIMBUS_5_RX"},
 	{"Slimbus6 Playback", NULL, "SLIMBUS_6_RX"},
+	{"Slimbus7 Playback", NULL, "SLIMBUS_7_RX"},
 
 	{"SLIMBUS_0_TX", NULL, "Slimbus Capture"},
 	{"SLIMBUS_1_TX", NULL, "Slimbus1 Capture"},
@@ -582,6 +584,7 @@ static const struct snd_soc_dapm_route q6afe_dapm_routes[] = {
 	{"SLIMBUS_4_TX", NULL, "Slimbus4 Capture"},
 	{"SLIMBUS_5_TX", NULL, "Slimbus5 Capture"},
 	{"SLIMBUS_6_TX", NULL, "Slimbus6 Capture"},
+	{"SLIMBUS_7_TX", NULL, "Slimbus7 Capture"},
 
 	{"Primary MI2S Playback", NULL, "PRI_MI2S_RX"},
 	{"Secondary MI2S Playback", NULL, "SEC_MI2S_RX"},
@@ -833,6 +836,7 @@ static const struct snd_soc_dapm_widget q6afe_dai_widgets[] = {
 	SND_SOC_DAPM_AIF_IN("SLIMBUS_4_RX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("SLIMBUS_5_RX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("SLIMBUS_6_RX", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("SLIMBUS_7_RX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_OUT("SLIMBUS_0_TX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_OUT("SLIMBUS_1_TX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_OUT("SLIMBUS_2_TX", NULL, 0, SND_SOC_NOPM, 0, 0),
@@ -840,6 +844,7 @@ static const struct snd_soc_dapm_widget q6afe_dai_widgets[] = {
 	SND_SOC_DAPM_AIF_OUT("SLIMBUS_4_TX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_OUT("SLIMBUS_5_TX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_OUT("SLIMBUS_6_TX", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_OUT("SLIMBUS_7_TX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("SEN_MI2S_RX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_OUT("SEN_MI2S_TX", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("QUIN_MI2S_RX", NULL,

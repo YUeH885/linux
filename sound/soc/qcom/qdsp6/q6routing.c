@@ -77,6 +77,7 @@
 	{ mix_name, "SLIMBUS_4_TX", "SLIMBUS_4_TX" },		\
 	{ mix_name, "SLIMBUS_5_TX", "SLIMBUS_5_TX" },		\
 	{ mix_name, "SLIMBUS_6_TX", "SLIMBUS_6_TX" },		\
+	{ mix_name, "SLIMBUS_7_TX", "SLIMBUS_7_TX" },		\
 	{ mix_name, "PRIMARY_TDM_TX_0", "PRIMARY_TDM_TX_0"},	\
 	{ mix_name, "PRIMARY_TDM_TX_1", "PRIMARY_TDM_TX_1"},	\
 	{ mix_name, "PRIMARY_TDM_TX_2", "PRIMARY_TDM_TX_2"},	\
@@ -172,6 +173,9 @@
 		id, 1, 0, msm_routing_get_audio_mixer,			\
 		msm_routing_put_audio_mixer),				\
 	SOC_SINGLE_EXT("SLIMBUS_6_TX", SLIMBUS_6_TX,			\
+		id, 1, 0, msm_routing_get_audio_mixer,			\
+		msm_routing_put_audio_mixer),				\
+	SOC_SINGLE_EXT("SLIMBUS_7_TX", SLIMBUS_7_TX,			\
 		id, 1, 0, msm_routing_get_audio_mixer,			\
 		msm_routing_put_audio_mixer),				\
 	SOC_SINGLE_EXT("PRIMARY_TDM_TX_0", PRIMARY_TDM_TX_0,		\
@@ -641,6 +645,9 @@ static const struct snd_kcontrol_new slimbus_5_rx_mixer_controls[] = {
 static const struct snd_kcontrol_new slimbus_6_rx_mixer_controls[] = {
 	Q6ROUTING_RX_MIXERS(SLIMBUS_6_RX) };
 
+static const struct snd_kcontrol_new slimbus_7_rx_mixer_controls[] = {
+	Q6ROUTING_RX_MIXERS(SLIMBUS_7_RX) };
+
 static const struct snd_kcontrol_new pri_tdm_rx_0_mixer_controls[] = {
 	Q6ROUTING_RX_MIXERS(PRIMARY_TDM_RX_0) };
 
@@ -867,6 +874,9 @@ static const struct snd_soc_dapm_widget msm_qdsp6_widgets[] = {
 	SND_SOC_DAPM_MIXER("SLIMBUS_6_RX Audio Mixer", SND_SOC_NOPM, 0, 0,
 			   slimbus_6_rx_mixer_controls,
 			   ARRAY_SIZE(slimbus_6_rx_mixer_controls)),
+	SND_SOC_DAPM_MIXER("SLIMBUS_7_RX Audio Mixer", SND_SOC_NOPM, 0, 0,
+			   slimbus_7_rx_mixer_controls,
+			   ARRAY_SIZE(slimbus_7_rx_mixer_controls)),
 	SND_SOC_DAPM_MIXER("PRI_MI2S_RX Audio Mixer", SND_SOC_NOPM, 0, 0,
 			   primary_mi2s_rx_mixer_controls,
 			   ARRAY_SIZE(primary_mi2s_rx_mixer_controls)),
@@ -1090,6 +1100,7 @@ static const struct snd_soc_dapm_route intercon[] = {
 	Q6ROUTING_RX_DAPM_ROUTE("SLIMBUS_4_RX Audio Mixer", "SLIMBUS_4_RX"),
 	Q6ROUTING_RX_DAPM_ROUTE("SLIMBUS_5_RX Audio Mixer", "SLIMBUS_5_RX"),
 	Q6ROUTING_RX_DAPM_ROUTE("SLIMBUS_6_RX Audio Mixer", "SLIMBUS_6_RX"),
+	Q6ROUTING_RX_DAPM_ROUTE("SLIMBUS_7_RX Audio Mixer", "SLIMBUS_7_RX"),
 	Q6ROUTING_RX_DAPM_ROUTE("QUAT_MI2S_RX Audio Mixer", "QUAT_MI2S_RX"),
 	Q6ROUTING_RX_DAPM_ROUTE("QUIN_MI2S_RX Audio Mixer", "QUIN_MI2S_RX"),
 	Q6ROUTING_RX_DAPM_ROUTE("TERT_MI2S_RX Audio Mixer", "TERT_MI2S_RX"),

@@ -136,6 +136,27 @@
 
 static struct snd_soc_dai_driver q6dsp_audio_fe_dais[] = {
 	{
+		.name = "SLIMBUS_7_RX",
+		.id = SLIMBUS_7_RX,
+		.playback = {
+			.stream_name = "Slimbus7 Playback",
+			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+			.channels_min = 1,
+			.channels_max = 1,
+		},
+	}, {
+		.name = "SLIMBUS_7_TX",
+		.id = SLIMBUS_7_TX,
+		.capture = {
+			.stream_name = "Slimbus7 Capture",
+			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+			.channels_min = 1,
+			.channels_max = 1,
+		},
+	},
+	{
 		.playback = {
 			.stream_name = "USB Playback",
 			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_11025 |
@@ -716,6 +737,7 @@ struct snd_soc_dai_driver *q6dsp_audio_ports_set_config(struct device *dev,
 			q6dsp_audio_fe_dais[i].ops = cfg->q6hdmi_ops;
 			break;
 		case SLIMBUS_0_RX ... SLIMBUS_6_TX:
+		case SLIMBUS_7_RX ... SLIMBUS_7_TX:
 			q6dsp_audio_fe_dais[i].ops = cfg->q6slim_ops;
 			break;
 		case SENARY_MI2S_RX ... SENARY_MI2S_TX:
