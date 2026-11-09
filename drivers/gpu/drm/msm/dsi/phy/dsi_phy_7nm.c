@@ -413,6 +413,12 @@ static void dsi_pll_disable_pll_bias(struct dsi_pll_7nm *pll)
 		return;
 	} /* else: == 0 */
 
+	/* Firmware may still be scanning out while clocks are registered. */
+	if (readl(pll->phy->base + REG_DSI_7nm_PHY_CMN_PLL_CNTRL) & BIT(0)) {
+		spin_unlock_irqrestore(&pll->pll_enable_lock, flags);
+		return;
+	}
+
 	data = readl(pll->phy->base + REG_DSI_7nm_PHY_CMN_CTRL_0);
 	data &= ~DSI_7nm_PHY_CMN_CTRL_0_PLL_SHUTDOWNB;
 	writel(0, pll->phy->pll_base + REG_DSI_7nm_PHY_PLL_SYSTEM_MUXES);
@@ -541,6 +547,15 @@ static int dsi_pll_7nm_vco_prepare(struct clk_hw *hw)
 	dsi_pll_enable_pll_bias(pll_7nm);
 	if (pll_7nm->slave)
 		dsi_pll_enable_pll_bias(pll_7nm->slave);
+
+	/* Preserve the standalone firmware link during child clock reparenting. */
+	if (pll_7nm->phy->usecase == MSM_DSI_PHY_STANDALONE &&
+	    (readl(pll_7nm->phy->base + REG_DSI_7nm_PHY_CMN_PLL_CNTRL) & BIT(0)) &&
+	    (readl(pll_7nm->phy->pll_base +
+		   REG_DSI_7nm_PHY_PLL_COMMON_STATUS_ONE) & BIT(0))) {
+		pll_7nm->phy->pll_on = true;
+		return 0;
+	}
 
 	/* Start PLL */
 	writel(BIT(0), pll_7nm->phy->base + REG_DSI_7nm_PHY_CMN_PLL_CNTRL);
