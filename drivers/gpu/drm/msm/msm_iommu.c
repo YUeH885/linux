@@ -812,27 +812,25 @@ struct msm_mmu *msm_iommu_disp_new(struct device *dev, unsigned long quirks,
 	if (IS_ERR(iommu))
 		return ERR_CAST(iommu);
 
-	ret = iommu_attach_device(iommu->domain, dev);
-	if (ret) {
-		msm_iommu_free(iommu);
-		return ERR_PTR(ret);
-	}
-
 	/*
 	 * The bootloader hands the firmware framebuffer to the display
 	 * controller and keeps scanning it out by physical address until the
-	 * first commit installs a buffer of our own.  Map it one-to-one right
-	 * after attaching, so the ongoing scanout keeps working instead of
-	 * faulting until then.
+	 * first commit installs a buffer of our own. Map it one-to-one before
+	 * attaching, so the ongoing scanout never sees an empty page table.
 	 */
 	if (fb_size) {
 		ret = iommu_map(iommu->domain, fb_base, fb_base, fb_size,
 				IOMMU_READ | IOMMU_NOEXEC, GFP_KERNEL);
 		if (ret) {
-			iommu_detach_device(iommu->domain, dev);
 			msm_iommu_free(iommu);
 			return ERR_PTR(ret);
 		}
+	}
+
+	ret = iommu_attach_device(iommu->domain, dev);
+	if (ret) {
+		msm_iommu_free(iommu);
+		return ERR_PTR(ret);
 	}
 
 	iommu_set_fault_handler(iommu->domain, msm_disp_fault_handler, iommu);
