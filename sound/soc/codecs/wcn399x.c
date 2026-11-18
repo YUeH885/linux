@@ -295,6 +295,7 @@ static struct slim_driver wcn399x_driver = {
 	},
 	.probe = wcn399x_probe,
 	.id_table = wcn399x_slim_id,
+	.defer_laddr = true,
 };
 module_slim_driver(wcn399x_driver);
 

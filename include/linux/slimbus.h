@@ -80,6 +80,8 @@ struct slim_device {
  * @driver: SLIMbus device drivers should initialize name and owner field of
  *	    this structure
  * @id_table: List of SLIMbus devices supported by this driver
+ * @defer_laddr: Skip logical address lookup during probe; the driver resolves
+ *		 it on demand
  */
 
 struct slim_driver {
@@ -90,6 +92,7 @@ struct slim_driver {
 				 enum slim_device_status s);
 	struct device_driver		driver;
 	const struct slim_device_id	*id_table;
+	bool				defer_laddr;
 };
 #define to_slim_driver(d) container_of_const(d, struct slim_driver, driver)
 
