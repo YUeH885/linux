@@ -13,6 +13,7 @@ struct vfe_line;
 #define VFE_17X_STATS_IRQ_MASK GENMASK(16, 14)
 
 int vfe_17x_stats_start(struct vfe_line *line);
+void vfe_17x_stats_stop(struct vfe_line *line);
 void vfe_17x_stats_isr(struct vfe_device *vfe, u32 status);
 long vfe_17x_get_stats(struct camss_video *vid,
 		       struct v4l2_qcom_camss_stats *stats);

@@ -158,20 +158,29 @@ static int camss_request_config(struct camss_buffer *buffer, bool update)
 	if (!handler)
 		return ret;
 	mutex_lock(handler->lock);
+	if (!update)
+		buffer->ife_crop_valid = false;
 	list_for_each_entry(ref, &handler->ctrl_refs, node) {
-		if (ref->ctrl->id != V4L2_CID_QCOM_CAMSS_IFE_CONFIG ||
-		    !ref->p_req_valid)
+		if (!ref->p_req_valid)
 			continue;
-		if (ref->p_req_array_enomem) {
-			ret = -ENOMEM;
-			break;
+		if (ref->ctrl->id == V4L2_CID_QCOM_CAMSS_IFE_CONFIG) {
+			if (ref->p_req_array_enomem) {
+				ret = -ENOMEM;
+				break;
+			}
+			if (update)
+				memcpy(ref->p_req.p, &buffer->ife, sizeof(buffer->ife));
+			else
+				memcpy(&buffer->ife, ref->p_req.p, sizeof(buffer->ife));
+			ret = 0;
+		} else if (!update && ref->ctrl->id == V4L2_CID_QCOM_CAMSS_IFE_CROP) {
+			if (ref->p_req_array_enomem) {
+				ret = -ENOMEM;
+				break;
+			}
+			memcpy(&buffer->ife_crop, ref->p_req.p, sizeof(buffer->ife_crop));
+			buffer->ife_crop_valid = true;
 		}
-		if (update)
-			memcpy(ref->p_req.p, &buffer->ife, sizeof(buffer->ife));
-		else
-			memcpy(&buffer->ife, ref->p_req.p, sizeof(buffer->ife));
-		ret = 0;
-		break;
 	}
 	mutex_unlock(handler->lock);
 	v4l2_ctrl_request_hdl_put(handler);

@@ -65,6 +65,8 @@ enum vfe_stats_type {
 #define VFE_STATS_BF_OFFSET (VFE_STATS_AWB_SIZE + VFE_STATS_HIST_SIZE)
 #define VFE_STATS_SIZE (VFE_STATS_BF_OFFSET + V4L2_QCOM_CAMSS_BF_SIZE)
 #define VFE_STATS_DMA_SIZE ALIGN(VFE_STATS_SIZE, 64)
+/* Two DMA addresses, one completed plane, one snapshot and one pinned read. */
+#define VFE_STATS_SLOTS 5
 #define VFE_STATS_ALL_DONE GENMASK(VFE_STATS_COUNT - 1, 0)
 
 static const struct {
@@ -80,14 +82,13 @@ static const struct {
 struct vfe_17x_stats {
 	void *cpu;
 	dma_addr_t dma;
-	void *pending;
-	void *snapshot;
-	void *reader;
-	/* Serializes copy_to_user() reads through stats->reader. */
 	struct mutex read_lock;
-	/* Protects snapshot publication and metadata between ISR and readers. */
 	spinlock_t lock;
-	u8 slot[VFE_STATS_COUNT];
+	u8 queued[VFE_STATS_COUNT][2];
+	u8 completed[VFE_STATS_COUNT];
+	u8 snapshot[VFE_STATS_COUNT];
+	bool reading;
+	u8 reader[VFE_STATS_COUNT];
 	u8 done;
 	u32 pending_sequence;
 	u32 sequence;
@@ -232,23 +233,9 @@ int vfe_17x_stats_start(struct vfe_line *line)
 		if (!stats)
 			return -ENOMEM;
 		stats->cpu = dmam_alloc_coherent(vfe->camss->dev,
-						 2 * VFE_STATS_DMA_SIZE,
-						 &stats->dma, GFP_KERNEL);
-		stats->pending = devm_kzalloc(vfe->camss->dev, VFE_STATS_SIZE,
-					      GFP_KERNEL);
-		stats->snapshot = devm_kzalloc(vfe->camss->dev, VFE_STATS_SIZE,
-					       GFP_KERNEL);
-		stats->reader = devm_kzalloc(vfe->camss->dev, VFE_STATS_SIZE,
-					     GFP_KERNEL);
-		if (!stats->cpu || !stats->pending || !stats->snapshot ||
-		    !stats->reader) {
-			devm_kfree(vfe->camss->dev, stats->reader);
-			devm_kfree(vfe->camss->dev, stats->snapshot);
-			devm_kfree(vfe->camss->dev, stats->pending);
-			if (stats->cpu)
-				dmam_free_coherent(vfe->camss->dev,
-						   2 * VFE_STATS_DMA_SIZE,
-						   stats->cpu, stats->dma);
+						  VFE_STATS_SLOTS * VFE_STATS_DMA_SIZE,
+						  &stats->dma, GFP_KERNEL);
+		if (!stats->cpu) {
 			devm_kfree(vfe->camss->dev, stats);
 			return -ENOMEM;
 		}
@@ -257,12 +244,17 @@ int vfe_17x_stats_start(struct vfe_line *line)
 		/* Publish the initialized buffers and lock to concurrent readers. */
 		smp_store_release(&line->stats, stats);
 	}
+	mutex_lock(&stats->read_lock);
 	spin_lock_irqsave(&stats->lock, flags);
 	stats->ready = false;
 	stats->done = 0;
-	memset(stats->slot, 0, sizeof(stats->slot));
+	for (i = 0; i < VFE_STATS_COUNT; i++) {
+		stats->queued[i][0] = 0;
+		stats->queued[i][1] = 1;
+	}
 	spin_unlock_irqrestore(&stats->lock, flags);
-	memset(stats->cpu, 0, 2 * VFE_STATS_DMA_SIZE);
+	memset(stats->cpu, 0, VFE_STATS_SLOTS * VFE_STATS_DMA_SIZE);
+	mutex_unlock(&stats->read_lock);
 
 	/* Stats clock gating is controlled explicitly while streaming. */
 	writel_relaxed(~0U, vfe->base + VFE_MODULE_STATS_CGC_OVERRIDE);
@@ -319,54 +311,77 @@ int vfe_17x_stats_start(struct vfe_line *line)
 	return 0;
 }
 
+void vfe_17x_stats_stop(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	unsigned int i;
+
+	lockdep_assert_held(&vfe->output_lock);
+	if (!line->stats)
+		return;
+	writel_relaxed(0, vfe->base + VFE_MODULE_STATS_EN);
+	for (i = 0; i < VFE_STATS_COUNT; i++)
+		writel(0, vfe->base + VFE_BUS_WM_CFG(vfe_stats_output[i].wm));
+}
+
 void vfe_17x_stats_isr(struct vfe_device *vfe, u32 status)
 {
 	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
-	/* Pair with the buffer publication in vfe_17x_stats_start(). */
-	struct vfe_17x_stats *stats = smp_load_acquire(&line->stats);
-	u32 sequence = line->output.sof_sequence ? line->output.sof_sequence - 1 : 0;
-	struct vfe_sensor_state sensor;
-	bool sensor_valid;
+	struct vfe_17x_stats *stats;
 	unsigned long flags;
 	unsigned int i;
+	u32 sequence;
 
-	if (!stats || line->output.state != VFE_OUTPUT_ON)
+	if (!(status & VFE_17X_STATS_IRQ_MASK))
 		return;
 
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	stats = line->stats;
+	if (!stats || line->output.state != VFE_OUTPUT_ON)
+		goto unlock_output;
+
+	sequence = line->output.sof_sequence ? line->output.sof_sequence - 1 : 0;
+	spin_lock(&stats->lock);
 	if (stats->pending_sequence != sequence) {
 		stats->pending_sequence = sequence;
 		stats->done = 0;
 	}
 	for (i = 0; i < VFE_STATS_COUNT; i++) {
-		u32 offset = vfe_stats_output[i].offset;
-		u32 slot_offset = stats->slot[i] * VFE_STATS_DMA_SIZE;
+		unsigned long busy;
+		unsigned int next;
 
 		if (!(status & BIT(vfe_stats_output[i].wm)))
 			continue;
 
 		dma_rmb();
-		memcpy(stats->pending + offset, stats->cpu + slot_offset + offset,
-		       vfe_stats_output[i].size);
-		/* Two queued buffers keep DMA away from the completed buffer. */
+		stats->completed[i] = stats->queued[i][0];
+		stats->queued[i][0] = stats->queued[i][1];
+		busy = BIT(stats->completed[i]) | BIT(stats->queued[i][0]);
+		if (stats->ready)
+			busy |= BIT(stats->snapshot[i]);
+		if (stats->reading)
+			busy |= BIT(stats->reader[i]);
+
+		next = ffz(busy);
+		stats->queued[i][1] = next;
 		vfe_stats_wm_queue(vfe, vfe_stats_output[i].wm,
-				   stats->dma + slot_offset + offset);
-		stats->slot[i] ^= 1;
+				   stats->dma + next * VFE_STATS_DMA_SIZE +
+				   vfe_stats_output[i].offset);
 		stats->done |= BIT(i);
 	}
-	if (stats->done != VFE_STATS_ALL_DONE)
-		return;
+	if (stats->done == VFE_STATS_ALL_DONE) {
+		stats->sensor_valid = vfe_sensor_state(line, sequence ? sequence - 1 : 0,
+						       &stats->sensor);
+		memcpy(stats->snapshot, stats->completed, sizeof(stats->snapshot));
+		stats->sequence = sequence;
+		stats->timestamp = ktime_get_ns();
+		stats->ready = true;
+		stats->done = 0;
+	}
+	spin_unlock(&stats->lock);
 
-	sensor_valid = vfe_sensor_state(line, sequence ? sequence - 1 : 0, &sensor);
-	spin_lock_irqsave(&stats->lock, flags);
-	stats->sensor_valid = sensor_valid;
-	if (sensor_valid)
-		stats->sensor = sensor;
-	memcpy(stats->snapshot, stats->pending, VFE_STATS_SIZE);
-	stats->sequence = sequence;
-	stats->timestamp = ktime_get_ns();
-	stats->ready = true;
-	spin_unlock_irqrestore(&stats->lock, flags);
-	stats->done = 0;
+unlock_output:
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
 }
 
 long vfe_17x_get_stats(struct camss_video *vid,
@@ -376,8 +391,15 @@ long vfe_17x_get_stats(struct camss_video *vid,
 	/* Pair with the buffer publication in vfe_17x_stats_start(). */
 	struct vfe_17x_stats *stats = smp_load_acquire(&line->stats);
 	unsigned long flags;
+	void __user *destinations[] = {
+		u64_to_user_ptr(request->awb_bg),
+		u64_to_user_ptr(request->bhist),
+		u64_to_user_ptr(request->bf),
+	};
+	unsigned int i;
 	long ret = 0;
 
+	BUILD_BUG_ON(ARRAY_SIZE(destinations) != VFE_STATS_COUNT);
 	if (line->id != VFE_LINE_PIX || !stats)
 		return -ENODATA;
 	if (request->version != V4L2_QCOM_CAMSS_STATS_VERSION || request->reserved)
@@ -392,7 +414,8 @@ long vfe_17x_get_stats(struct camss_video *vid,
 	if (!stats->ready) {
 		ret = -EAGAIN;
 	} else {
-		memcpy(stats->reader, stats->snapshot, VFE_STATS_SIZE);
+		memcpy(stats->reader, stats->snapshot, sizeof(stats->reader));
+		stats->reading = true;
 		request->sequence = stats->sequence;
 		request->timestamp = stats->timestamp;
 		request->flags = stats->sensor_valid ? V4L2_QCOM_CAMSS_STATS_SENSOR_CONTROLS : 0;
@@ -407,13 +430,18 @@ long vfe_17x_get_stats(struct camss_video *vid,
 	request->awb_bg_regions = V4L2_QCOM_CAMSS_AWB_BG_REGIONS;
 	request->bhist_bins = V4L2_QCOM_CAMSS_BHIST_BINS;
 	request->bf_regions = V4L2_QCOM_CAMSS_BF_ROIS;
-	if (copy_to_user(u64_to_user_ptr(request->awb_bg), stats->reader,
-			 VFE_STATS_AWB_SIZE) ||
-	    copy_to_user(u64_to_user_ptr(request->bhist),
-			 stats->reader + VFE_STATS_AWB_SIZE, VFE_STATS_HIST_SIZE) ||
-	    copy_to_user(u64_to_user_ptr(request->bf),
-			 stats->reader + VFE_STATS_BF_OFFSET, V4L2_QCOM_CAMSS_BF_SIZE))
-		ret = -EFAULT;
+	for (i = 0; i < VFE_STATS_COUNT; i++) {
+		const void *src = stats->cpu + stats->reader[i] * VFE_STATS_DMA_SIZE +
+				  vfe_stats_output[i].offset;
+
+		if (copy_to_user(destinations[i], src, vfe_stats_output[i].size)) {
+			ret = -EFAULT;
+			break;
+		}
+	}
+	spin_lock_irqsave(&stats->lock, flags);
+	stats->reading = false;
+	spin_unlock_irqrestore(&stats->lock, flags);
 out:
 	mutex_unlock(&stats->read_lock);
 	return ret;

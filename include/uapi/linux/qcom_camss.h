@@ -12,7 +12,25 @@
 #define V4L2_CID_QCOM_CAMSS_IFE_CONFIG \
 	(V4L2_CID_USER_QCOM_CAMSS_BASE + 0)
 
-#define V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION	4
+#define V4L2_CID_QCOM_CAMSS_IFE_CROP \
+	(V4L2_CID_USER_QCOM_CAMSS_BASE + 1)
+
+/*
+ * Per-request geometry for the NV12 PIX stream. Scale the sensor frame
+ * to compose_width x compose_height before cropping at left, top.
+ * Offsets are in scaled luma pixels. All four fields must be even,
+ * compose_width x compose_height must lie within [negotiated compose, sink],
+ * and the negotiated output size is fixed.
+ * If omitted, that request uses the negotiated compose and crop.
+ */
+struct v4l2_qcom_camss_ife_crop {
+	__u16 compose_width;
+	__u16 compose_height;
+	__u16 left;
+	__u16 top;
+};
+
+#define V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION	6
 
 #define V4L2_QCOM_CAMSS_IFE_CONFIG_BLACK_LEVEL	(1U << 0)
 #define V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE	(1U << 1)
@@ -39,10 +57,11 @@
  * Request controls require frame_sequence zero and both WHITE_BALANCE and
  * CCM flags. sensor_delay must be two for requests and zero for global tuning. A
  * request contains one NV12 PIX buffer, this control and the sensor
- * exposure and analogue gain control handler. The
+ * exposure, analogue gain and vertical blanking control handler. The
  * completed request returns the applied input frame in frame_sequence and its
- * CAMIF SOF time in sensor_timestamp (CLOCK_BOOTTIME nanoseconds). Both
- * sensor_timestamp and reserved2 must be zero on submission.
+ * CAMIF SOF time in sensor_timestamp (CLOCK_MONOTONIC nanoseconds). Both
+ * sensor_timestamp and frame_duration_us must be zero on submission.
+ * frame_duration_us is derived from two successive CAMIF SOF timestamps.
  * Gamma is supplied as 65 10-bit samples per channel in R, G, B order;
  * the driver derives the 64 hardware
  * base/delta entries from consecutive samples.
@@ -61,7 +80,7 @@ struct v4l2_qcom_camss_ife_config {
 	__s16 ccm_offset[3];
 	__u16 gamma[V4L2_QCOM_CAMSS_IFE_GAMMA_CHANNELS]
 		[V4L2_QCOM_CAMSS_IFE_GAMMA_ENTRIES];
-	__u32 reserved2;
+	__u32 frame_duration_us;
 	__aligned_u64 sensor_timestamp;
 };
 

@@ -5272,7 +5272,11 @@ static int camss_link_entities(struct camss *camss)
 				}
 	} else {
 		for (i = 0; i < camss->res->csid_num; i++)
-			for (k = 0; k < camss->res->vfe_num; k++)
+			for (k = 0; k < camss->res->vfe_num; k++) {
+				/* Titan 175 delivers each CSID to the matching VFE. */
+				if (camss->res->version == CAMSS_8150 && i != k)
+					continue;
+
 				for (j = 0; j < camss->vfe[k].res->line_num; j++) {
 					struct v4l2_subdev *csid = &camss->csid[i].subdev;
 					struct v4l2_subdev *vfe = &camss->vfe[k].line[j].subdev;
@@ -5289,6 +5293,7 @@ static int camss_link_entities(struct camss *camss)
 						return ret;
 					}
 				}
+			}
 	}
 
 	return 0;

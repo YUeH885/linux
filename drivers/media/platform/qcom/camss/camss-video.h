@@ -28,14 +28,17 @@ struct camss_buffer {
 	dma_addr_t addr[3];
 	struct list_head queue;
 	struct v4l2_qcom_camss_ife_config ife;
+	struct v4l2_qcom_camss_ife_crop ife_crop;
 	struct work_struct complete_work;
 	struct work_struct sensor_work;
 	struct v4l2_ctrl_handler *sensor_controls;
 	s32 sensor_exposure;
 	s32 sensor_gain;
+	s32 sensor_vblank;
 	bool sensor_applied;
 	enum vb2_buffer_state completion_state;
 	u32 input_sequence;
+	bool ife_crop_valid;
 	bool ife_valid;
 	bool ife_applied;
 	bool request_completed;
