@@ -211,6 +211,8 @@
 #define		STATUS0_COMP_OVERWRITE		BIT(12)
 #define		STATUS0_OVERFLOW		BIT(13)
 #define		STATUS0_VIOLATION		BIT(14)
+#define VFE_BUS_ERROR_MASK (STATUS0_COMP_ERROR | STATUS0_COMP_OVERWRITE | \
+			    STATUS0_OVERFLOW | STATUS0_VIOLATION)
 /* WM_CLIENT_BUF_DONE defined for buffers 0:19 */
 #define		STATUS1_WM_CLIENT_BUF_DONE(n)		BIT(n)
 #define		STATUS1_EARLY_DONE			BIT(24)
@@ -765,15 +767,18 @@ static int vfe_start_requests(struct camss_video *video)
 {
 	struct vfe_line *line = container_of(video, struct vfe_line, video_out);
 	const struct v4l2_pix_format_mplane *format = &video->active_fmt.fmt.pix_mp;
-	struct camss_buffer *buf;
-	unsigned int i;
+	struct vfe_output *output = &line->output;
+	u32 sequence = video->recovering ? output->sof_sequence : 0;
+	struct camss_buffer *buf, *first;
+	unsigned int i, dummy = 0;
 	int ret;
 
 	line->sensor_count = 0;
 	if (!video->vb2_q.uses_requests ||
 	    format->pixelformat != V4L2_PIX_FMT_NV12 || format->num_planes != 1)
 		return 0;
-	if (list_empty(&line->output.pending_bufs))
+	first = list_first_entry_or_null(&output->pending_bufs, struct camss_buffer, queue);
+	if (!first && !video->recovering)
 		return -EINVAL;
 	line->dummy_size = format->plane_fmt[0].sizeimage;
 	line->dummy_memory = dma_alloc_coherent(video->camss->dev, line->dummy_size,
@@ -786,20 +791,25 @@ static int vfe_start_requests(struct camss_video *video)
 		buf->addr[0] = line->dummy_buffer[0].addr[0];
 		buf->addr[1] = buf->addr[0] + format->plane_fmt[0].bytesperline * format->height;
 	}
-	buf = list_first_entry(&line->output.pending_bufs, struct camss_buffer, queue);
-	ret = v4l2_ctrl_request_setup(buf->vb.vb2_buf.request, buf->sensor_controls);
-	if (ret) {
-		dma_free_coherent(video->camss->dev, line->dummy_size,
-				  line->dummy_memory, line->dummy_buffer[0].addr[0]);
-		line->dummy_memory = NULL;
-		return ret;
+	if (first) {
+		ret = v4l2_ctrl_request_setup(first->vb.vb2_buf.request, first->sensor_controls);
+		if (ret) {
+			dma_free_coherent(video->camss->dev, line->dummy_size,
+					  line->dummy_memory, line->dummy_buffer[0].addr[0]);
+			line->dummy_memory = NULL;
+			return ret;
+		}
+		first->input_sequence = sequence;
+		first->sensor_applied = true;
+		vfe_sensor_record(line, sequence, first, true);
+		line->sensor_vblank = first->sensor_vblank;
+	} else {
+		line->dummy_buffer[dummy].input_sequence = sequence;
+		vfe_buf_add_pending(output, &line->dummy_buffer[dummy++]);
 	}
-	buf->sensor_applied = true;
-	vfe_sensor_record(line, 0, buf, true);
-	line->sensor_next = 0;
-	line->sensor_vblank = buf->sensor_vblank;
-	line->dummy_buffer[0].input_sequence = 1;
-	vfe_buf_add_pending(&line->output, &line->dummy_buffer[0]);
+	line->sensor_next = sequence;
+	line->dummy_buffer[dummy].input_sequence = sequence + 1;
+	vfe_buf_add_pending(output, &line->dummy_buffer[dummy]);
 	return 0;
 }
 
@@ -814,6 +824,112 @@ static void vfe_stop_requests(struct camss_video *video)
 				  line->dummy_memory, line->dummy_buffer[0].addr[0]);
 		line->dummy_memory = NULL;
 	}
+}
+
+static void vfe_requeue_buffers(struct vfe_line *line)
+{
+	struct camss_video *video = &line->video_out;
+	struct vfe_output *output = &line->output;
+	struct camss_buffer *buf, *next;
+	int i;
+
+	/* No write master still owns these addresses after the reset. */
+	for (i = ARRAY_SIZE(output->buf) - 1; i >= 0; i--) {
+		buf = output->buf[i];
+		if (buf && !buf->dummy)
+			list_add(&buf->queue, &output->pending_bufs);
+		output->buf[i] = NULL;
+	}
+	if (!video->vb2_q.uses_requests)
+		return;
+
+	list_for_each_entry_safe(buf, next, &output->pending_bufs, queue) {
+		if (buf->dummy) {
+			list_del(&buf->queue);
+			continue;
+		}
+		buf->sensor_applied = false;
+		buf->ife_applied = false;
+		buf->ife.sensor_timestamp = 0;
+		buf->ife.frame_duration_us = 0;
+	}
+	buf = vfe_buf_get_pending(output);
+	list_splice_init(&output->pending_bufs, &line->sensor_pending);
+	if (buf)
+		vfe_buf_add_pending(output, buf);
+	vfe_stop_requests(video);
+}
+
+static void vfe_recover(struct work_struct *work)
+{
+	struct vfe_device *vfe = container_of(work, struct vfe_device, recover_work);
+	struct camss *camss = vfe->camss;
+	unsigned long active = 0, flags;
+	int i, ret = 0;
+
+	mutex_lock(&camss->stream_lock);
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	if (!vfe->fault_pending || vfe->recovery_disabled) {
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		goto unlock;
+	}
+	if (vfe->recovery_attempted)
+		ret = -EIO;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	/* Keep the configured links stable when the last reference is dropped. */
+	mutex_lock(&camss->media_dev.graph_mutex);
+	for (i = 0; i < vfe->res->line_num; i++) {
+		struct camss_video *video = &vfe->line[i].video_out;
+		int error;
+
+		if (!video->pipeline_running)
+			continue;
+		__set_bit(i, &active);
+		error = camss_video_stop_pipeline(video);
+		if (error && !ret)
+			ret = error;
+	}
+	if (ret || !active)
+		goto finish;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	vfe->recovery_attempted = true;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	/* The PIX request must program the sensor before the first CSID port starts. */
+	for (i = vfe->res->line_num - 1; i >= 0; i--) {
+		struct vfe_line *line = &vfe->line[i];
+		struct camss_video *video = &line->video_out;
+
+		if (!test_bit(i, &active))
+			continue;
+		vfe_requeue_buffers(line);
+		video->recovering = true;
+		ret = camss_video_start_pipeline(video);
+		video->recovering = false;
+		if (ret)
+			break;
+	}
+
+finish:
+	if (ret) {
+		for_each_set_bit(i, &active, vfe->res->line_num) {
+			struct camss_video *video = &vfe->line[i].video_out;
+
+			camss_video_stop_pipeline(video);
+			vb2_queue_error(&video->vb2_q);
+			camss_video_flush_pipeline(video, VB2_BUF_STATE_ERROR);
+		}
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		vfe->fault_pending = false;
+		vfe->recovery_attempted = false;
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		dev_err(camss->dev, "VFE%u recovery failed: %d\n", vfe->id, ret);
+	}
+	mutex_unlock(&camss->media_dev.graph_mutex);
+unlock:
+	mutex_unlock(&camss->stream_lock);
 }
 
 static void vfe_ife_apply_request(struct vfe_line *line, struct camss_buffer *buf)
@@ -1298,8 +1414,7 @@ static void vfe_enable_irq_common(struct vfe_device *vfe)
 		mask |= STATUS_0_CAMIF_SOF | STATUS_0_PIX_REG_UPDATE;
 	writel_relaxed(mask, vfe->base + VFE_IRQ_MASK_0);
 	writel_relaxed(STATUS_1_VIOLATION, vfe->base + VFE_IRQ_MASK_1);
-	writel_relaxed(STATUS0_COMP_ERROR | STATUS0_COMP_OVERWRITE |
-		       STATUS0_OVERFLOW | STATUS0_VIOLATION, vfe->base + VFE_BUS_IRQ_MASK(0));
+	writel_relaxed(VFE_BUS_ERROR_MASK, vfe->base + VFE_BUS_IRQ_MASK(0));
 	writel_relaxed(vfe->res->is_lite ? 0 : VFE_17X_STATS_IRQ_MASK,
 		       vfe->base + VFE_BUS_IRQ_MASK(1));
 	writel_relaxed(0, vfe->base + VFE_BUS_IRQ_MASK(2));
@@ -1354,6 +1469,27 @@ static void vfe_pix_complete(struct vfe_device *vfe, bool completed)
 		vfe->isr_ops.wm_done(vfe, 3);
 }
 
+static void vfe_schedule_recovery(struct vfe_device *vfe)
+{
+	unsigned int i;
+
+	lockdep_assert_held(&vfe->output_lock);
+	if (vfe->camss->res->version != CAMSS_8150 || vfe->recovery_disabled ||
+	    vfe->fault_pending)
+		return;
+
+	for (i = 0; i < vfe->res->line_num; i++) {
+		if (vfe->line[i].output.state == VFE_OUTPUT_ON) {
+			vfe->fault_pending = true;
+			/* Keep reset acknowledgment enabled while discarding frame IRQs. */
+			writel_relaxed(STATUS_0_RESET_ACK, vfe->base + VFE_IRQ_MASK_0);
+			writel(0, vfe->base + VFE_IRQ_MASK_1);
+			schedule_work(&vfe->recover_work);
+			break;
+		}
+	}
+}
+
 /*
  * vfe_isr - VFE module interrupt handler
  * @irq: Interrupt line
@@ -1365,6 +1501,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 {
 	struct vfe_device *vfe = dev;
 	u32 status0, status1, vfe_bus_status[3];
+	bool fault_pending;
 	int i, wm;
 
 	status0 = readl_relaxed(vfe->base + VFE_IRQ_STATUS_0);
@@ -1385,12 +1522,14 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	writel_relaxed(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
 	writel_relaxed(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
+	if ((status1 & STATUS_1_VIOLATION) || (vfe_bus_status[0] & VFE_BUS_ERROR_MASK))
+		vfe_schedule_recovery(vfe);
+	fault_pending = vfe->fault_pending;
 	spin_unlock(&vfe->output_lock);
 
 	if (status1 & STATUS_1_VIOLATION)
 		vfe_violation_read(vfe);
-	if (vfe_bus_status[0] & (STATUS0_COMP_ERROR | STATUS0_COMP_OVERWRITE |
-				 STATUS0_OVERFLOW | STATUS0_VIOLATION))
+	if (vfe_bus_status[0] & VFE_BUS_ERROR_MASK)
 		dev_err_ratelimited(vfe->camss->dev,
 				    "VFE%u bus error %08x comp=%08x overwrite=%08x dbg=%08x\n",
 				    vfe->id, vfe_bus_status[0],
@@ -1400,6 +1539,8 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	if (status0 & STATUS_0_RESET_ACK)
 		vfe->isr_ops.reset_ack(vfe);
+	if (fault_pending)
+		return IRQ_HANDLED;
 
 	for (i = VFE_LINE_RDI0; i < (vfe->res->is_lite ? 4 : 3); i++)
 		if (status0 & STATUS_0_RDI_REG_UPDATE(i))
@@ -1498,6 +1639,14 @@ static int vfe_enable(struct vfe_line *line)
 	mutex_lock(&vfe->stream_lock);
 
 	if (!vfe->stream_count) {
+		if (!line->video_out.recovering) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&vfe->output_lock, flags);
+			vfe->fault_pending = false;
+			vfe->recovery_attempted = false;
+			spin_unlock_irqrestore(&vfe->output_lock, flags);
+		}
 		vfe_init_bus(vfe);
 		vfe_enable_irq_common(vfe);
 	}
@@ -1519,7 +1668,8 @@ static int vfe_enable(struct vfe_line *line)
 	ret = vfe_enable_output_v2(line);
 	if (ret < 0)
 		goto error_enable_output;
-	if (line->video_out.vb2_q.uses_requests && line->output.buf[0]) {
+	if (line->video_out.vb2_q.uses_requests && line->output.buf[0] &&
+	    !line->output.buf[0]->dummy) {
 		unsigned long flags;
 
 		spin_lock_irqsave(&vfe->output_lock, flags);
@@ -1662,6 +1812,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 					    ready_buf->ife_applied, ready_buf->sensor_applied);
 			state = VB2_BUF_STATE_ERROR;
 		}
+		if (state == VB2_BUF_STATE_DONE)
+			vfe->recovery_attempted = false;
 	}
 
 	index = 0;
@@ -1773,6 +1925,7 @@ static void vfe_subdev_init(struct device *dev, struct vfe_device *vfe)
 {
 	vfe->isr_ops = vfe_isr_ops_170;
 	vfe->video_ops = vfe_video_ops_170;
+	INIT_WORK(&vfe->recover_work, vfe_recover);
 }
 
 const struct vfe_hw_ops vfe_ops_170 = {
