@@ -18,6 +18,8 @@
 #include <media/v4l2-mediabus.h>
 #include <media/v4l2-subdev.h>
 
+#define CSID_GRP_ID 2
+
 #define MSM_CSID_PAD_SINK 0
 #define MSM_CSID_PAD_FIRST_SRC 1
 #define MSM_CSID_PADS_NUM 5
@@ -80,6 +82,9 @@ struct csid_hw_ops {
 	 * @csid: CSID device
 	 */
 	void (*configure_stream)(struct csid_device *csid, u8 enable);
+
+	int (*set_port)(struct csid_device *csid, unsigned int port,
+			bool enable, bool other_ports_active);
 
 	/*
 	 * configure_testgen_pattern - Validates and configures output pattern mode
@@ -170,6 +175,8 @@ struct csid_device {
 };
 
 struct camss_subdev_resources;
+
+int msm_csid_set_port(struct media_pad *pad, bool enable, bool other_ports_active);
 
 /*
  * csid_find_code - Find a format code in an array using array index or format code

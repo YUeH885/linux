@@ -794,33 +794,56 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 	return ret;
 }
 
-/*
- * csid_set_stream - Enable/disable streaming on CSID module
- * @sd: CSID V4L2 subdevice
- * @enable: Requested streaming state
- *
- * Main configuration of CSID module is also done here.
- *
- * Return 0 on success or a negative error code otherwise
- */
+static int csid_prepare_stream(struct csid_device *csid)
+{
+	int ret;
+
+	if (csid->testgen.nmodes != CSID_PAYLOAD_MODE_DISABLED) {
+		ret = v4l2_ctrl_handler_setup(&csid->ctrls);
+		if (ret < 0) {
+			dev_err(csid->camss->dev,
+				"could not sync v4l2 controls: %d\n", ret);
+			return ret;
+		}
+	}
+
+	if (!csid->testgen.enabled &&
+	    !media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_SINK]))
+		return -ENOLINK;
+
+	return 0;
+}
+
+int msm_csid_set_port(struct media_pad *pad, bool enable, bool other_ports_active)
+{
+	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(pad->entity);
+	struct csid_device *csid = v4l2_get_subdevdata(sd);
+	int ret;
+
+	if (WARN_ON(!csid->res->hw_ops->set_port ||
+		    pad->index < MSM_CSID_PAD_FIRST_SRC))
+		return -EOPNOTSUPP;
+
+	if (enable && !other_ports_active) {
+		ret = csid_prepare_stream(csid);
+		if (ret)
+			return ret;
+	}
+
+	return csid->res->hw_ops->set_port(csid,
+					   pad->index - MSM_CSID_PAD_FIRST_SRC,
+					   enable, other_ports_active);
+}
+
 static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct csid_device *csid = v4l2_get_subdevdata(sd);
 	int ret;
 
 	if (enable) {
-		if (csid->testgen.nmodes != CSID_PAYLOAD_MODE_DISABLED) {
-			ret = v4l2_ctrl_handler_setup(&csid->ctrls);
-			if (ret < 0) {
-				dev_err(csid->camss->dev,
-					"could not sync v4l2 controls: %d\n", ret);
-				return ret;
-			}
-		}
-
-		if (!csid->testgen.enabled &&
-		    !media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_SINK]))
-			return -ENOLINK;
+		ret = csid_prepare_stream(csid);
+		if (ret)
+			return ret;
 	}
 
 	if (csid->phy.need_vc_update) {
@@ -1429,6 +1452,7 @@ int msm_csid_register_entity(struct csid_device *csid,
 	for (i = MSM_CSID_PAD_FIRST_SRC; i < MSM_CSID_PADS_NUM; ++i)
 		pads[i].flags = MEDIA_PAD_FL_SOURCE;
 
+	sd->grp_id = CSID_GRP_ID;
 	sd->entity.function = MEDIA_ENT_F_PROC_VIDEO_PIXEL_FORMATTER;
 	sd->entity.ops = &csid_media_ops;
 	ret = media_entity_pads_init(&sd->entity, MSM_CSID_PADS_NUM, pads);

@@ -73,6 +73,7 @@
 #define VFE_IRQ_STATUS_0				(0x06c)
 #define		STATUS_0_CAMIF_SOF			BIT(0)
 #define		STATUS_0_RDI_REG_UPDATE(n)		BIT((n) + 5)
+#define		STATUS_0_BUS_WR_IRQ			BIT(9)
 #define		STATUS_0_IMAGE_MASTER_PING_PONG(n)	BIT((n) + 8)
 #define		STATUS_0_IMAGE_COMPOSITE_DONE(n)	BIT((n) + 25)
 #define		STATUS_0_RESET_ACK			BIT(31)
@@ -1127,27 +1128,36 @@ static void vfe_global_reset(struct vfe_device *vfe)
 	writel_relaxed(reset_bits, vfe->base + VFE_GLOBAL_RESET_CMD);
 }
 
+static void vfe_wm_done_irq(struct vfe_device *vfe, u8 wm, bool enable)
+{
+	bool composite = !vfe->res->is_lite && wm >= 3;
+	unsigned int bank = composite ? 0 : 1;
+	u32 bit = composite ? STATUS0_COMP0_BUF_DONE : STATUS1_WM_CLIENT_BUF_DONE(wm);
+	u32 mask;
+
+	/* The two PIX planes share one completion interrupt. */
+	if (composite && wm != 3)
+		return;
+
+	lockdep_assert_held(&vfe->output_lock);
+	mask = readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK(bank));
+	if (enable) {
+		writel_relaxed(bit, vfe->base + VFE_BUS_IRQ_CLEAR(bank));
+		writel(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
+		mask |= bit;
+	} else {
+		mask &= ~bit;
+	}
+	writel(mask, vfe->base + VFE_BUS_IRQ_MASK(bank));
+}
+
 static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 {
 	u32 val;
 
-	/*Set Debug Registers*/
-	val = DEBUG_STATUS_CFG_STATUS0(1) |
-	      DEBUG_STATUS_CFG_STATUS0(7);
-	writel_relaxed(val, vfe->base + VFE_BUS_WM_DEBUG_STATUS_CFG);
-
-	/* BUS_WM_INPUT_IF_ADDR_SYNC_FRAME_HEADER */
-	writel_relaxed(0, vfe->base + VFE_BUS_WM_ADDR_SYNC_FRAME_HEADER);
-
-	/* no clock gating at bus input */
-	val = WM_CGC_OVERRIDE_ALL;
-	writel_relaxed(val, vfe->base + VFE_BUS_WM_CGC_OVERRIDE);
-
-	writel_relaxed(0x0, vfe->base + VFE_BUS_WM_TEST_BUS_CTRL);
-
-	/* if addr_no_sync has default value then config the addr no sync reg */
-	val = WM_ADDR_NO_SYNC_DEFAULT_VAL;
-	writel_relaxed(val, vfe->base + VFE_BUS_WM_ADDR_SYNC_NO_SYNC);
+	if (!vfe->res->is_lite && wm == 3)
+		line->pix_done_pending = false;
+	vfe_wm_done_irq(vfe, wm, true);
 
 	writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
 
@@ -1191,8 +1201,9 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 
 static void vfe_wm_stop(struct vfe_device *vfe, u8 wm)
 {
-	/* Disable WM */
-	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(wm));
+	vfe_wm_done_irq(vfe, wm, false);
+	writel(0, vfe->base + VFE_BUS_WM_CFG(wm));
+	readl(vfe->base + VFE_BUS_WM_CFG(wm));
 }
 
 static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
@@ -1251,10 +1262,35 @@ static inline void vfe_reg_update_clear(struct vfe_device *vfe,
 	vfe->reg_update &= ~vfe_reg_update_line(vfe, line_id);
 }
 
+static void vfe_init_bus(struct vfe_device *vfe)
+{
+	u32 val;
+
+	val = DEBUG_STATUS_CFG_STATUS0(1) |
+	      DEBUG_STATUS_CFG_STATUS0(7);
+	writel_relaxed(val, vfe->base + VFE_BUS_WM_DEBUG_STATUS_CFG);
+
+	/* BUS_WM_INPUT_IF_ADDR_SYNC_FRAME_HEADER */
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_ADDR_SYNC_FRAME_HEADER);
+
+	/* no clock gating at bus input */
+	val = WM_CGC_OVERRIDE_ALL;
+	writel_relaxed(val, vfe->base + VFE_BUS_WM_CGC_OVERRIDE);
+
+	writel_relaxed(0x0, vfe->base + VFE_BUS_WM_TEST_BUS_CTRL);
+
+	val = WM_ADDR_NO_SYNC_DEFAULT_VAL;
+	writel_relaxed(val, vfe->base + VFE_BUS_WM_ADDR_SYNC_NO_SYNC);
+}
+
 static void vfe_enable_irq_common(struct vfe_device *vfe)
 {
 	u32 mask = STATUS_0_RESET_ACK;
 	unsigned int i;
+
+	/* Bus completions can occur independently of the frame boundary. */
+	if (vfe->camss->res->version == CAMSS_8150)
+		mask |= STATUS_0_BUS_WR_IRQ;
 
 	for (i = 0; i < (vfe->res->is_lite ? 4 : 3); i++)
 		mask |= STATUS_0_RDI_REG_UPDATE(i) | STATUS_1_RDI_SOF(i);
@@ -1262,11 +1298,9 @@ static void vfe_enable_irq_common(struct vfe_device *vfe)
 		mask |= STATUS_0_CAMIF_SOF | STATUS_0_PIX_REG_UPDATE;
 	writel_relaxed(mask, vfe->base + VFE_IRQ_MASK_0);
 	writel_relaxed(STATUS_1_VIOLATION, vfe->base + VFE_IRQ_MASK_1);
-	writel_relaxed(STATUS0_COMP0_BUF_DONE | STATUS0_COMP_ERROR |
-		       STATUS0_COMP_OVERWRITE | STATUS0_OVERFLOW | STATUS0_VIOLATION,
-		       vfe->base + VFE_BUS_IRQ_MASK(0));
-	writel_relaxed(vfe->res->is_lite ? GENMASK(3, 0) :
-		       (GENMASK(2, 0) | VFE_17X_STATS_IRQ_MASK),
+	writel_relaxed(STATUS0_COMP_ERROR | STATUS0_COMP_OVERWRITE |
+		       STATUS0_OVERFLOW | STATUS0_VIOLATION, vfe->base + VFE_BUS_IRQ_MASK(0));
+	writel_relaxed(vfe->res->is_lite ? 0 : VFE_17X_STATS_IRQ_MASK,
 		       vfe->base + VFE_BUS_IRQ_MASK(1));
 	writel_relaxed(0, vfe->base + VFE_BUS_IRQ_MASK(2));
 }
@@ -1296,6 +1330,30 @@ static void vfe_violation_read(struct vfe_device *vfe)
 	pr_err_ratelimited("VFE: violation = 0x%08x\n", violation);
 }
 
+static void vfe_pix_complete(struct vfe_device *vfe, bool completed)
+{
+	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
+	struct vfe_output *output = &line->output;
+	struct camss_buffer *buffer;
+	bool ready;
+
+	spin_lock(&vfe->output_lock);
+	line->pix_done_pending |= completed;
+	buffer = output->buf[0];
+	ready = line->pix_done_pending && output->state == VFE_OUTPUT_ON;
+
+	/* Request timing needs the SOF following the captured frame. */
+	if (ready && line->video_out.vb2_q.uses_requests && buffer &&
+	    (s32)(output->sof_sequence - (buffer->input_sequence + 2)) < 0)
+		ready = false;
+	if (ready)
+		line->pix_done_pending = false;
+	spin_unlock(&vfe->output_lock);
+
+	if (ready)
+		vfe->isr_ops.wm_done(vfe, 3);
+}
+
 /*
  * vfe_isr - VFE module interrupt handler
  * @irq: Interrupt line
@@ -1315,9 +1373,11 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	writel_relaxed(status0, vfe->base + VFE_IRQ_CLEAR_0);
 	writel_relaxed(status1, vfe->base + VFE_IRQ_CLEAR_1);
 
-	for (i = VFE_LINE_RDI0; i < 3; i++) {
+	spin_lock(&vfe->output_lock);
+	for (i = 0; i < ARRAY_SIZE(vfe_bus_status); i++) {
 		vfe_bus_status[i] = readl_relaxed(vfe->base + VFE_BUS_IRQ_STATUS(i));
 		writel_relaxed(vfe_bus_status[i], vfe->base + VFE_BUS_IRQ_CLEAR(i));
+		vfe_bus_status[i] &= readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK(i));
 	}
 
 	/* Enforce ordering between IRQ reading and interpretation */
@@ -1325,6 +1385,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	writel_relaxed(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
 	writel_relaxed(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
+	spin_unlock(&vfe->output_lock);
 
 	if (status1 & STATUS_1_VIOLATION)
 		vfe_violation_read(vfe);
@@ -1362,9 +1423,9 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	if (!vfe->res->is_lite)
 		vfe_17x_stats_isr(vfe, vfe_bus_status[1]);
 
-	if (!vfe->res->is_lite &&
-	    (vfe_bus_status[0] & STATUS0_COMP0_BUF_DONE))
-		vfe->isr_ops.wm_done(vfe, 3);
+	if (!vfe->res->is_lite && vfe->res->line_num > VFE_LINE_PIX &&
+	    ((status0 & STATUS_0_CAMIF_SOF) || (vfe_bus_status[0] & STATUS0_COMP0_BUF_DONE)))
+		vfe_pix_complete(vfe, vfe_bus_status[0] & STATUS0_COMP0_BUF_DONE);
 
 	return IRQ_HANDLED;
 }
@@ -1436,8 +1497,10 @@ static int vfe_enable(struct vfe_line *line)
 
 	mutex_lock(&vfe->stream_lock);
 
-	if (!vfe->stream_count)
+	if (!vfe->stream_count) {
+		vfe_init_bus(vfe);
 		vfe_enable_irq_common(vfe);
+	}
 
 	vfe->stream_count++;
 

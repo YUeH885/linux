@@ -5686,6 +5686,7 @@ static int camss_probe(struct platform_device *pdev)
 		sizeof(camss->media_dev.model));
 	camss->media_dev.ops = &camss_media_ops;
 	media_device_init(&camss->media_dev);
+	mutex_init(&camss->stream_lock);
 
 	camss->v4l2_dev.mdev = &camss->media_dev;
 	ret = v4l2_device_register(camss->dev, &camss->v4l2_dev);

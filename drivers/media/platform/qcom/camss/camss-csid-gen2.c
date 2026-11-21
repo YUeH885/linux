@@ -121,6 +121,11 @@
 #define CSID_RDI_RPP_LINE_DROP_PERIOD(rdi)		((csid_is_lite(csid) ? 0x230 : 0x330)\
 							+ 0x100 * (rdi))
 
+#define CSID_RDI_STATUS(port)		(CSID_RDI_CFG0(port) + 0x50)
+#define CSID_PATH_HALTED		BIT(0)
+#define CSID_HALT_AT_FRAME_BOUNDARY	0
+#define CSID_HALT_IMMEDIATELY		2
+
 #define CSID_PXL_IRQ_STATUS		0x30
 #define CSID_PXL_IRQ_CLEAR		0x38
 #define CSID_PXL_IRQ_RESET_DONE		BIT(1)
@@ -129,6 +134,7 @@
 #define CSID_PXL_CFG0			0x200
 #define CSID_PXL_CFG1			0x204
 #define CSID_PXL_CTRL			0x208
+#define CSID_PXL_STATUS			0x254
 #define CSID_PXL_RST_STROBES		0x240
 #define CSID_PXL_FRM_DROP_PERIOD	0x210
 #define CSID_PXL_FRM_DROP_PATTERN	0x20c
@@ -425,6 +431,50 @@ static void csid_configure_stream(struct csid_device *csid, u8 enable)
 		}
 }
 
+static int csid_gen2_set_port(struct csid_device *csid, unsigned int port,
+			      bool enable, bool other_ports_active)
+{
+	bool pixel = !csid_is_lite(csid) && port == MSM_CSID_MAX_SRC_STREAMS - 1;
+	u32 status = pixel ? CSID_PXL_STATUS : CSID_RDI_STATUS(port);
+	u32 ctrl = pixel ? CSID_PXL_CTRL : CSID_RDI_CTRL(port);
+	u32 cfg = pixel ? CSID_PXL_CFG0 : CSID_RDI_CFG0(port);
+	u32 path_enable = pixel ? CSID_PXL_CFG0_PATH_EN | CSID_PXL_CFG0_STORE_EN
+				: BIT(RDI_CFG0_ENABLE);
+	u32 value;
+	int ret;
+
+	if (enable) {
+		if (!other_ports_active)
+			__csid_configure_rx(csid, &csid->phy, 0);
+		if (pixel) {
+			__csid_configure_pix_stream(csid, 1, port, 0);
+		} else {
+			__csid_configure_rdi_stream(csid, 1, port, 0);
+			__csid_ctrl_rdi(csid, 1, port);
+		}
+		if (csid->testgen.enabled && !other_ports_active)
+			__csid_configure_testgen(csid, 1, port, 0);
+		return 0;
+	}
+
+	writel(CSID_HALT_AT_FRAME_BOUNDARY, csid->base + ctrl);
+	ret = readl_poll_timeout(csid->base + status, value,
+				 value & CSID_PATH_HALTED, 100, 100000);
+	if (ret) {
+		writel(CSID_HALT_IMMEDIATELY, csid->base + ctrl);
+		ret = readl_poll_timeout(csid->base + status, value,
+					 value & CSID_PATH_HALTED, 100, 10000);
+	}
+
+	value = readl(csid->base + cfg);
+	writel(value & ~path_enable, csid->base + cfg);
+
+	if (csid->testgen.enabled && !other_ports_active)
+		__csid_configure_testgen(csid, 0, port, 0);
+
+	return ret;
+}
+
 static int csid_configure_testgen_pattern(struct csid_device *csid, s32 val)
 {
 	if (val > 0 && val <= csid->testgen.nmodes)
@@ -535,6 +585,7 @@ static void csid_subdev_init(struct csid_device *csid)
 
 const struct csid_hw_ops csid_ops_gen2 = {
 	.configure_stream = csid_configure_stream,
+	.set_port = csid_gen2_set_port,
 	.configure_testgen_pattern = csid_configure_testgen_pattern,
 	.hw_version = csid_hw_version,
 	.isr = csid_isr,

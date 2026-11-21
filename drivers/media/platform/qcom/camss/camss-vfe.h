@@ -113,6 +113,7 @@ struct vfe_line {
 	void *dummy_memory;
 	size_t dummy_size;
 	u8 ife_gamma_bank;
+	bool pix_done_pending;
 	struct vfe_17x_stats *stats;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
 	struct v4l2_mbus_framefmt fmt[MSM_VFE_PADS_NUM];

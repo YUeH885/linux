@@ -869,15 +869,17 @@ static void vfe_disable_output(struct vfe_line *line)
 	unsigned int i;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
-	for (i = 0; i < output->wm_num; i++) {
+	for (i = 0; i < output->wm_num; i++)
 		vfe->res->hw_ops->vfe_wm_stop(vfe, output->wm_idx[i]);
-		vfe_release_wm(vfe, output->wm_idx[i]);
-	}
 	if (vfe->res->hw_ops->stats_stop)
 		vfe->res->hw_ops->stats_stop(line);
 	output->gen2.active_num = 0;
 	output->state = VFE_OUTPUT_OFF;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	/* An IRQ may still have a completion for a disabled master. */
+	synchronize_irq(vfe->irq);
+	vfe_put_output(line);
 }
 
 /*
