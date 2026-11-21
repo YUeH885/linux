@@ -245,10 +245,11 @@ unlock:
 static int irs2381c_init_controls(struct irs2381c *irs2381c)
 {
 	struct v4l2_ctrl_handler *ctrl_hdlr = &irs2381c->ctrl_handler;
+	struct v4l2_fwnode_device_properties props;
 	s64 pixel_rate_val;
 	int ret;
 
-	v4l2_ctrl_handler_init(ctrl_hdlr, 2);
+	v4l2_ctrl_handler_init(ctrl_hdlr, 4);
 
 	irs2381c->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr, NULL,
 						     V4L2_CID_LINK_FREQ,
@@ -262,15 +263,20 @@ static int irs2381c_init_controls(struct irs2381c *irs2381c)
 						 V4L2_CID_PIXEL_RATE, pixel_rate_val,
 						 pixel_rate_val, 1, pixel_rate_val);
 
-	if (ctrl_hdlr->error) {
-		ret = ctrl_hdlr->error;
-		dev_err(irs2381c->dev, "controls initialization failed: %d\n", ret);
-		v4l2_ctrl_handler_free(ctrl_hdlr);
-		return ret;
-	}
+	ret = v4l2_fwnode_device_parse(irs2381c->dev, &props);
+	if (ret)
+		goto free_handler;
+
+	ret = v4l2_ctrl_new_fwnode_properties(ctrl_hdlr, NULL, &props);
+	if (ret)
+		goto free_handler;
 
 	irs2381c->sd.ctrl_handler = ctrl_hdlr;
 	return 0;
+
+free_handler:
+	v4l2_ctrl_handler_free(ctrl_hdlr);
+	return ret;
 }
 
 static int irs2381c_enum_mbus_code(struct v4l2_subdev *sd,
@@ -577,7 +583,24 @@ static void irs2381c_remove(struct i2c_client *client)
 	pm_runtime_set_suspended(irs2381c->dev);
 }
 
+static int __maybe_unused irs2381c_suspend(struct device *dev)
+{
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+	struct irs2381c *irs2381c = to_irs2381c(sd);
+
+	bool streaming;
+
+	mutex_lock(sd->state_lock);
+	streaming = irs2381c->streaming;
+	mutex_unlock(sd->state_lock);
+	if (streaming)
+		return -EBUSY;
+
+	return pm_runtime_force_suspend(dev);
+}
+
 static const struct dev_pm_ops irs2381c_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(irs2381c_suspend, pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(irs2381c_power_off, irs2381c_power_on, NULL)
 };
 

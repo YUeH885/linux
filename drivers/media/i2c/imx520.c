@@ -105,11 +105,11 @@ struct imx520 {
 	struct v4l2_ctrl *link_freq;
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *hblank;
-	struct v4l2_ctrl *vblank;
-	/* Keep the controls adjacent for v4l2_ctrl_cluster(). */
+	/* Frame length and exposure must be validated and latched together. */
 	struct {
 		struct v4l2_ctrl *exposure;
 		struct v4l2_ctrl *analogue_gain;
+		struct v4l2_ctrl *vblank;
 	};
 	struct v4l2_ctrl *digital_gain;
 	struct v4l2_ctrl *vflip;
@@ -629,12 +629,23 @@ static const struct imx520_mode imx520_supported_modes[] = {
 	},
 };
 
+static int imx520_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct imx520 *sensor = container_of(ctrl->handler, struct imx520, ctrl_handler);
+
+	if (ctrl->id == V4L2_CID_EXPOSURE) {
+		int max_exposure = sensor->mode->height + sensor->vblank->val - IMX520_EXPOSURE_MARGIN;
+
+		ctrl->val = min(ctrl->val, max_exposure);
+	}
+	return 0;
+}
+
 static int imx520_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct imx520 *imx520 = container_of(ctrl->handler, struct imx520,
 					     ctrl_handler);
 	const struct imx520_mode *mode = imx520->mode;
-	s64 exposure_max;
 	int ret, release;
 
 	/* Propagate change of current control to all related controls */
@@ -643,15 +654,6 @@ static int imx520_set_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_VFLIP:
 		/* The orientation settings are applied along with streaming */
 		return 0;
-	case V4L2_CID_VBLANK:
-		/* Update max exposure while meeting expected vblanking */
-		exposure_max = mode->height + ctrl->val - IMX520_EXPOSURE_MARGIN;
-		__v4l2_ctrl_modify_range(imx520->exposure,
-					 imx520->exposure->minimum,
-					 exposure_max,
-					 imx520->exposure->step,
-					 imx520->exposure->default_value);
-		break;
 	}
 
 	/* V4L2 controls are applied, when sensor is powered up for streaming */
@@ -665,6 +667,8 @@ static int imx520_set_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_EXPOSURE:
 		ret = cci_write(imx520->regmap, IMX520_REG_GROUP_HOLD, 1, NULL);
+		cci_write(imx520->regmap, IMX520_REG_VTS,
+			  imx520->vblank->val + mode->height, &ret);
 		cci_write(imx520->regmap, IMX520_REG_EXPOSURE,
 			  imx520->exposure->val, &ret);
 		cci_write(imx520->regmap, IMX520_REG_ANALOGUE_GAIN,
@@ -672,10 +676,6 @@ static int imx520_set_ctrl(struct v4l2_ctrl *ctrl)
 		release = cci_write(imx520->regmap, IMX520_REG_GROUP_HOLD, 0, NULL);
 		if (!ret)
 			ret = release;
-		break;
-	case V4L2_CID_VBLANK:
-		ret = cci_write(imx520->regmap, IMX520_REG_VTS,
-				ctrl->val + mode->height, NULL);
 		break;
 	default:
 		ret = -EINVAL;
@@ -689,6 +689,7 @@ static int imx520_set_ctrl(struct v4l2_ctrl *ctrl)
 
 static const struct v4l2_ctrl_ops imx520_ctrl_ops = {
 	.s_ctrl = imx520_set_ctrl,
+	.try_ctrl = imx520_try_ctrl,
 };
 
 static int imx520_init_controls(struct imx520 *imx520)
@@ -739,7 +740,7 @@ static int imx520_init_controls(struct imx520 *imx520)
 						 IMX520_DIGITAL_GAIN_STEP,
 						 IMX520_DIGITAL_GAIN_DEFAULT);
 
-	exposure_max = mode->vts - IMX520_EXPOSURE_MARGIN;
+	exposure_max = IMX520_VTS_MAX - IMX520_EXPOSURE_MARGIN;
 	imx520->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &imx520_ctrl_ops,
 					     V4L2_CID_EXPOSURE,
 					     IMX520_EXPOSURE_MIN,
@@ -770,7 +771,7 @@ static int imx520_init_controls(struct imx520 *imx520)
 		ret = ctrl_hdlr->error;
 		goto error_free_hdlr;
 	}
-	v4l2_ctrl_cluster(2, &imx520->exposure);
+	v4l2_ctrl_cluster(3, &imx520->exposure);
 
 	imx520->sd.ctrl_handler = ctrl_hdlr;
 
@@ -814,6 +815,9 @@ static int imx520_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		goto error;
 
+	__v4l2_ctrl_grab(imx520->hflip, true);
+	__v4l2_ctrl_grab(imx520->vflip, true);
+
 	return 0;
 
 error:
@@ -835,6 +839,8 @@ static int imx520_disable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		dev_err(imx520->dev, "failed to stop streaming: %d\n", ret);
 
+	__v4l2_ctrl_grab(imx520->hflip, false);
+	__v4l2_ctrl_grab(imx520->vflip, false);
 	pm_runtime_put_autosuspend(imx520->dev);
 
 	return ret;
@@ -868,7 +874,7 @@ static int imx520_set_pad_format(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct imx520 *imx520 = to_imx520(sd);
-	s64 hblank, vblank, exposure_max;
+	s64 hblank, vblank;
 	const struct imx520_mode *mode;
 
 	mode = v4l2_find_nearest_size(imx520_supported_modes,
@@ -895,10 +901,9 @@ static int imx520_set_pad_format(struct v4l2_subdev *sd,
 				 IMX520_VTS_MAX - mode->height, 1, vblank);
 	__v4l2_ctrl_s_ctrl(imx520->vblank, vblank);
 
-	exposure_max = mode->vts - IMX520_EXPOSURE_MARGIN;
 	__v4l2_ctrl_modify_range(imx520->exposure, IMX520_EXPOSURE_MIN,
-				 exposure_max, IMX520_EXPOSURE_STEP,
-				 mode->exposure);
+				 IMX520_VTS_MAX - IMX520_EXPOSURE_MARGIN,
+				 IMX520_EXPOSURE_STEP, mode->exposure);
 	__v4l2_ctrl_s_ctrl(imx520->exposure, mode->exposure);
 
 	if (imx520->sd.ctrl_handler->error)
@@ -973,7 +978,7 @@ static int imx520_get_selection(struct v4l2_subdev *sd,
 	case V4L2_SEL_TGT_NATIVE_SIZE:
 	case V4L2_SEL_TGT_CROP_BOUNDS:
 	case V4L2_SEL_TGT_CROP_DEFAULT:
-		sel->r = imx520_supported_modes[0].crop;
+		sel->r = (struct v4l2_rect){ 0, 0, 3280, 2464 };
 		return 0;
 	default:
 		return -EINVAL;
@@ -1294,7 +1299,22 @@ static void imx520_remove(struct i2c_client *client)
 	}
 }
 
+static int __maybe_unused imx520_suspend(struct device *dev)
+{
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+
+	struct v4l2_subdev_state *state = v4l2_subdev_lock_and_get_active_state(sd);
+	bool streaming = v4l2_subdev_is_streaming(sd);
+
+	v4l2_subdev_unlock_state(state);
+	if (streaming)
+		return -EBUSY;
+
+	return pm_runtime_force_suspend(dev);
+}
+
 static const struct dev_pm_ops imx520_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(imx520_suspend, pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(imx520_power_off, imx520_power_on, NULL)
 };
 

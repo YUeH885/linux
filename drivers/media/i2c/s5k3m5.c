@@ -117,11 +117,11 @@ struct s5k3m5 {
 	struct v4l2_ctrl *link_freq;
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *hblank;
-	struct v4l2_ctrl *vblank;
-	/* Keep the controls adjacent for v4l2_ctrl_cluster(). */
+	/* Frame length and exposure must be validated and latched together. */
 	struct {
 		struct v4l2_ctrl *exposure;
 		struct v4l2_ctrl *analogue_gain;
+		struct v4l2_ctrl *vblank;
 	};
 	struct v4l2_ctrl *vflip;
 	struct v4l2_ctrl *hflip;
@@ -298,12 +298,23 @@ static const struct s5k3m5_mode s5k3m5_supported_modes[] = {
 	},
 };
 
+static int s5k3m5_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct s5k3m5 *sensor = container_of(ctrl->handler, struct s5k3m5, ctrl_handler);
+
+	if (ctrl->id == V4L2_CID_EXPOSURE) {
+		int max_exposure = sensor->mode->height + sensor->vblank->val - S5K3M5_EXPOSURE_MARGIN;
+
+		ctrl->val = min(ctrl->val, max_exposure);
+	}
+	return 0;
+}
+
 static int s5k3m5_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct s5k3m5 *s5k3m5 = container_of(ctrl->handler, struct s5k3m5,
 					     ctrl_handler);
 	const struct s5k3m5_mode *mode = s5k3m5->mode;
-	s64 exposure_max;
 	int ret, release;
 
 	/* Propagate change of current control to all related controls */
@@ -312,15 +323,6 @@ static int s5k3m5_set_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_VFLIP:
 		/* The orientation settings are applied along with streaming */
 		return 0;
-	case V4L2_CID_VBLANK:
-		/* Update max exposure while meeting expected vblanking */
-		exposure_max = mode->height + ctrl->val - S5K3M5_EXPOSURE_MARGIN;
-		__v4l2_ctrl_modify_range(s5k3m5->exposure,
-					 s5k3m5->exposure->minimum,
-					 exposure_max,
-					 s5k3m5->exposure->step,
-					 s5k3m5->exposure->default_value);
-		break;
 	}
 
 	/* V4L2 controls are applied, when sensor is powered up for streaming */
@@ -330,6 +332,8 @@ static int s5k3m5_set_ctrl(struct v4l2_ctrl *ctrl)
 	switch (ctrl->id) {
 	case V4L2_CID_EXPOSURE:
 		ret = cci_write(s5k3m5->regmap, S5K3M5_REG_GROUP_HOLD, 0x0100, NULL);
+		cci_write(s5k3m5->regmap, S5K3M5_REG_VTS,
+			  s5k3m5->vblank->val + mode->height, &ret);
 		cci_write(s5k3m5->regmap, S5K3M5_REG_EXPOSURE,
 			  s5k3m5->exposure->val, &ret);
 		cci_write(s5k3m5->regmap, S5K3M5_REG_AGAIN,
@@ -337,10 +341,6 @@ static int s5k3m5_set_ctrl(struct v4l2_ctrl *ctrl)
 		release = cci_write(s5k3m5->regmap, S5K3M5_REG_GROUP_HOLD, 0, NULL);
 		if (!ret)
 			ret = release;
-		break;
-	case V4L2_CID_VBLANK:
-		ret = cci_write(s5k3m5->regmap, S5K3M5_REG_VTS,
-				ctrl->val + mode->height, NULL);
 		break;
 	case V4L2_CID_TEST_PATTERN:
 		ret = cci_write(s5k3m5->regmap, S5K3M5_REG_TEST_PATTERN,
@@ -358,6 +358,7 @@ static int s5k3m5_set_ctrl(struct v4l2_ctrl *ctrl)
 
 static const struct v4l2_ctrl_ops s5k3m5_ctrl_ops = {
 	.s_ctrl = s5k3m5_set_ctrl,
+	.try_ctrl = s5k3m5_try_ctrl,
 };
 
 static int s5k3m5_init_controls(struct s5k3m5 *s5k3m5)
@@ -402,7 +403,7 @@ static int s5k3m5_init_controls(struct s5k3m5 *s5k3m5)
 				  S5K3M5_AGAIN_MIN, S5K3M5_AGAIN_MAX,
 				  S5K3M5_AGAIN_STEP, S5K3M5_AGAIN_DEFAULT);
 
-	exposure_max = mode->vts - S5K3M5_EXPOSURE_MARGIN;
+	exposure_max = S5K3M5_VTS_MAX - S5K3M5_EXPOSURE_MARGIN;
 	s5k3m5->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &s5k3m5_ctrl_ops,
 					     V4L2_CID_EXPOSURE,
 					     S5K3M5_EXPOSURE_MIN,
@@ -438,7 +439,7 @@ static int s5k3m5_init_controls(struct s5k3m5 *s5k3m5)
 		ret = ctrl_hdlr->error;
 		goto error_free_hdlr;
 	}
-	v4l2_ctrl_cluster(2, &s5k3m5->exposure);
+	v4l2_ctrl_cluster(3, &s5k3m5->exposure);
 
 	s5k3m5->sd.ctrl_handler = ctrl_hdlr;
 
@@ -487,6 +488,9 @@ static int s5k3m5_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		goto error;
 
+	__v4l2_ctrl_grab(s5k3m5->hflip, true);
+	__v4l2_ctrl_grab(s5k3m5->vflip, true);
+
 	return 0;
 
 error:
@@ -507,6 +511,8 @@ static int s5k3m5_disable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		dev_err(s5k3m5->dev, "failed to stop streaming: %d\n", ret);
 
+	__v4l2_ctrl_grab(s5k3m5->hflip, false);
+	__v4l2_ctrl_grab(s5k3m5->vflip, false);
 	pm_runtime_put_autosuspend(s5k3m5->dev);
 
 	return ret;
@@ -540,7 +546,7 @@ static int s5k3m5_set_pad_format(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct s5k3m5 *s5k3m5 = to_s5k3m5(sd);
-	s64 hblank, vblank, exposure_max;
+	s64 hblank, vblank;
 	const struct s5k3m5_mode *mode;
 
 	mode = v4l2_find_nearest_size(s5k3m5_supported_modes,
@@ -566,10 +572,9 @@ static int s5k3m5_set_pad_format(struct v4l2_subdev *sd,
 				 S5K3M5_VTS_MAX - mode->height, 1, vblank);
 	__v4l2_ctrl_s_ctrl(s5k3m5->vblank, vblank);
 
-	exposure_max = mode->vts - S5K3M5_EXPOSURE_MARGIN;
 	__v4l2_ctrl_modify_range(s5k3m5->exposure, S5K3M5_EXPOSURE_MIN,
-				 exposure_max, S5K3M5_EXPOSURE_STEP,
-				 mode->exposure);
+				 S5K3M5_VTS_MAX - S5K3M5_EXPOSURE_MARGIN,
+				 S5K3M5_EXPOSURE_STEP, mode->exposure);
 	__v4l2_ctrl_s_ctrl(s5k3m5->exposure, mode->exposure);
 
 	if (s5k3m5->sd.ctrl_handler->error)
@@ -955,7 +960,22 @@ static void s5k3m5_remove(struct i2c_client *client)
 	}
 }
 
+static int __maybe_unused s5k3m5_suspend(struct device *dev)
+{
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+
+	struct v4l2_subdev_state *state = v4l2_subdev_lock_and_get_active_state(sd);
+	bool streaming = v4l2_subdev_is_streaming(sd);
+
+	v4l2_subdev_unlock_state(state);
+	if (streaming)
+		return -EBUSY;
+
+	return pm_runtime_force_suspend(dev);
+}
+
 static const struct dev_pm_ops s5k3m5_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(s5k3m5_suspend, pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(s5k3m5_power_off, s5k3m5_power_on, NULL)
 };
 

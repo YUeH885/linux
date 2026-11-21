@@ -104,11 +104,11 @@ struct imx351 {
 	struct v4l2_ctrl *link_freq;
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *hblank;
-	struct v4l2_ctrl *vblank;
-	/* Keep the controls adjacent for v4l2_ctrl_cluster(). */
+	/* Frame length and exposure must be validated and latched together. */
 	struct {
 		struct v4l2_ctrl *exposure;
 		struct v4l2_ctrl *analogue_gain;
+		struct v4l2_ctrl *vblank;
 	};
 	struct v4l2_ctrl *digital_gain;
 	struct v4l2_ctrl *vflip;
@@ -573,12 +573,23 @@ static const struct imx351_mode imx351_supported_modes[] = {
 	},
 };
 
+static int imx351_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct imx351 *sensor = container_of(ctrl->handler, struct imx351, ctrl_handler);
+
+	if (ctrl->id == V4L2_CID_EXPOSURE) {
+		int max_exposure = sensor->mode->height + sensor->vblank->val - IMX351_EXPOSURE_MARGIN;
+
+		ctrl->val = min(ctrl->val, max_exposure);
+	}
+	return 0;
+}
+
 static int imx351_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct imx351 *imx351 = container_of(ctrl->handler, struct imx351,
 					     ctrl_handler);
 	const struct imx351_mode *mode = imx351->mode;
-	s64 exposure_max;
 	int ret, release;
 
 	/* Propagate change of current control to all related controls */
@@ -587,15 +598,6 @@ static int imx351_set_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_VFLIP:
 		/* The orientation settings are applied along with streaming */
 		return 0;
-	case V4L2_CID_VBLANK:
-		/* Update max exposure while meeting expected vblanking */
-		exposure_max = mode->height + ctrl->val - IMX351_EXPOSURE_MARGIN;
-		__v4l2_ctrl_modify_range(imx351->exposure,
-					 imx351->exposure->minimum,
-					 exposure_max,
-					 imx351->exposure->step,
-					 imx351->exposure->default_value);
-		break;
 	}
 
 	/* V4L2 controls are applied, when sensor is powered up for streaming */
@@ -609,6 +611,8 @@ static int imx351_set_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_EXPOSURE:
 		ret = cci_write(imx351->regmap, IMX351_REG_GROUP_HOLD, 1, NULL);
+		cci_write(imx351->regmap, IMX351_REG_VTS,
+			  imx351->vblank->val + mode->height, &ret);
 		cci_write(imx351->regmap, IMX351_REG_EXPOSURE,
 			  imx351->exposure->val, &ret);
 		cci_write(imx351->regmap, IMX351_REG_ANALOGUE_GAIN,
@@ -616,10 +620,6 @@ static int imx351_set_ctrl(struct v4l2_ctrl *ctrl)
 		release = cci_write(imx351->regmap, IMX351_REG_GROUP_HOLD, 0, NULL);
 		if (!ret)
 			ret = release;
-		break;
-	case V4L2_CID_VBLANK:
-		ret = cci_write(imx351->regmap, IMX351_REG_VTS,
-				ctrl->val + mode->height, NULL);
 		break;
 	default:
 		ret = -EINVAL;
@@ -633,6 +633,7 @@ static int imx351_set_ctrl(struct v4l2_ctrl *ctrl)
 
 static const struct v4l2_ctrl_ops imx351_ctrl_ops = {
 	.s_ctrl = imx351_set_ctrl,
+	.try_ctrl = imx351_try_ctrl,
 };
 
 static int imx351_init_controls(struct imx351 *imx351)
@@ -683,7 +684,7 @@ static int imx351_init_controls(struct imx351 *imx351)
 						 IMX351_DIGITAL_GAIN_STEP,
 						 IMX351_DIGITAL_GAIN_DEFAULT);
 
-	exposure_max = mode->vts - IMX351_EXPOSURE_MARGIN;
+	exposure_max = IMX351_VTS_MAX - IMX351_EXPOSURE_MARGIN;
 	imx351->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &imx351_ctrl_ops,
 					     V4L2_CID_EXPOSURE,
 					     IMX351_EXPOSURE_MIN,
@@ -714,7 +715,7 @@ static int imx351_init_controls(struct imx351 *imx351)
 		ret = ctrl_hdlr->error;
 		goto error_free_hdlr;
 	}
-	v4l2_ctrl_cluster(2, &imx351->exposure);
+	v4l2_ctrl_cluster(3, &imx351->exposure);
 
 	imx351->sd.ctrl_handler = ctrl_hdlr;
 
@@ -758,6 +759,9 @@ static int imx351_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		goto error;
 
+	__v4l2_ctrl_grab(imx351->hflip, true);
+	__v4l2_ctrl_grab(imx351->vflip, true);
+
 	return 0;
 
 error:
@@ -779,6 +783,8 @@ static int imx351_disable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		dev_err(imx351->dev, "failed to stop streaming: %d\n", ret);
 
+	__v4l2_ctrl_grab(imx351->hflip, false);
+	__v4l2_ctrl_grab(imx351->vflip, false);
 	pm_runtime_put_autosuspend(imx351->dev);
 
 	return ret;
@@ -812,7 +818,7 @@ static int imx351_set_pad_format(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct imx351 *imx351 = to_imx351(sd);
-	s64 hblank, vblank, exposure_max;
+	s64 hblank, vblank;
 	const struct imx351_mode *mode;
 
 	mode = v4l2_find_nearest_size(imx351_supported_modes,
@@ -839,10 +845,9 @@ static int imx351_set_pad_format(struct v4l2_subdev *sd,
 				 IMX351_VTS_MAX - mode->height, 1, vblank);
 	__v4l2_ctrl_s_ctrl(imx351->vblank, vblank);
 
-	exposure_max = mode->vts - IMX351_EXPOSURE_MARGIN;
 	__v4l2_ctrl_modify_range(imx351->exposure, IMX351_EXPOSURE_MIN,
-				 exposure_max, IMX351_EXPOSURE_STEP,
-				 mode->exposure);
+				 IMX351_VTS_MAX - IMX351_EXPOSURE_MARGIN,
+				 IMX351_EXPOSURE_STEP, mode->exposure);
 	__v4l2_ctrl_s_ctrl(imx351->exposure, mode->exposure);
 
 	if (imx351->sd.ctrl_handler->error)
@@ -1209,7 +1214,22 @@ static void imx351_remove(struct i2c_client *client)
 	}
 }
 
+static int __maybe_unused imx351_suspend(struct device *dev)
+{
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+
+	struct v4l2_subdev_state *state = v4l2_subdev_lock_and_get_active_state(sd);
+	bool streaming = v4l2_subdev_is_streaming(sd);
+
+	v4l2_subdev_unlock_state(state);
+	if (streaming)
+		return -EBUSY;
+
+	return pm_runtime_force_suspend(dev);
+}
+
 static const struct dev_pm_ops imx351_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(imx351_suspend, pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(imx351_power_off, imx351_power_on, NULL)
 };
 
