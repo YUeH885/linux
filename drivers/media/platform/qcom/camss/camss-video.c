@@ -366,18 +366,37 @@ static int video_check_format(struct camss_video *video)
 	return 0;
 }
 
+int camss_video_power_get(struct camss_video *video)
+{
+	int ret;
+
+	lockdep_assert_held(&video->camss->stream_lock);
+	ret = v4l2_pipeline_pm_get(&video->vdev.entity);
+	if (ret < 0)
+		dev_err(video->camss->dev, "Failed to power up pipeline: %d\n",
+			ret);
+	else
+		video->pipeline_powered = true;
+	return ret;
+}
+
+void camss_video_power_put(struct camss_video *video)
+{
+	lockdep_assert_held(&video->camss->stream_lock);
+	if (video->pipeline_powered) {
+		v4l2_pipeline_pm_put(&video->vdev.entity);
+		video->pipeline_powered = false;
+	}
+}
+
 static int video_prepare_streaming(struct vb2_queue *q)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
-	struct video_device *vdev = &video->vdev;
 	int ret;
 
-	ret = v4l2_pipeline_pm_get(&vdev->entity);
-	if (ret < 0) {
-		dev_err(video->camss->dev, "Failed to power up pipeline: %d\n",
-			ret);
-	}
-
+	mutex_lock(&video->camss->stream_lock);
+	ret = camss_video_power_get(video);
+	mutex_unlock(&video->camss->stream_lock);
 	return ret;
 }
 
@@ -555,9 +574,10 @@ static void video_stop_streaming(struct vb2_queue *q)
 static void video_unprepare_streaming(struct vb2_queue *q)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
-	struct video_device *vdev = &video->vdev;
 
-	v4l2_pipeline_pm_put(&vdev->entity);
+	mutex_lock(&video->camss->stream_lock);
+	camss_video_power_put(video);
+	mutex_unlock(&video->camss->stream_lock);
 }
 
 static const struct vb2_ops msm_video_vb2_q_ops = {

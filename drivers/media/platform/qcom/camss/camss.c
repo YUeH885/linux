@@ -6075,7 +6075,31 @@ static int __maybe_unused camss_runtime_resume(struct device *dev)
 	return 0;
 }
 
+static int __maybe_unused camss_system_prepare(struct device *dev)
+{
+	struct camss *camss = dev_get_drvdata(dev);
+	unsigned int i;
+
+	/* The external sensors reject suspend until their streams have stopped. */
+	if (camss->res->version == CAMSS_8150)
+		for (i = 0; i < camss->res->vfe_num; i++)
+			msm_vfe_17x_suspend(&camss->vfe[i]);
+	return 0;
+}
+
+static void __maybe_unused camss_system_complete(struct device *dev)
+{
+	struct camss *camss = dev_get_drvdata(dev);
+	unsigned int i;
+
+	if (camss->res->version == CAMSS_8150)
+		for (i = 0; i < camss->res->vfe_num; i++)
+			msm_vfe_17x_resume(&camss->vfe[i]);
+}
+
 static const struct dev_pm_ops camss_pm_ops = {
+	.prepare = pm_sleep_ptr(camss_system_prepare),
+	.complete = pm_sleep_ptr(camss_system_complete),
 	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
 				pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(camss_runtime_suspend, camss_runtime_resume, NULL)

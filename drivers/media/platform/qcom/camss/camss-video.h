@@ -74,6 +74,7 @@ struct camss_video {
 	struct v4l2_ctrl_handler *request_controls;
 	struct workqueue_struct *request_wq;
 	bool requests_stopping;
+	bool pipeline_powered;
 	bool pipeline_running;
 	bool recovering;
 	struct mutex lock;
@@ -88,6 +89,8 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 		       const char *name);
 
 void msm_video_unregister(struct camss_video *video);
+int camss_video_power_get(struct camss_video *video);
+void camss_video_power_put(struct camss_video *video);
 int camss_video_start_pipeline(struct camss_video *video);
 int camss_video_stop_pipeline(struct camss_video *video);
 void camss_video_flush_pipeline(struct camss_video *video, enum vb2_buffer_state state);

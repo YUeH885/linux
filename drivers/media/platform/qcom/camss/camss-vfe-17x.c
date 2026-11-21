@@ -860,42 +860,27 @@ static void vfe_requeue_buffers(struct vfe_line *line)
 	vfe_stop_requests(video);
 }
 
-static void vfe_recover(struct work_struct *work)
+static int vfe_stop_streams(struct vfe_device *vfe, unsigned long *active)
 {
-	struct vfe_device *vfe = container_of(work, struct vfe_device, recover_work);
-	struct camss *camss = vfe->camss;
-	unsigned long active = 0, flags;
 	int i, ret = 0;
 
-	mutex_lock(&camss->stream_lock);
-	spin_lock_irqsave(&vfe->output_lock, flags);
-	if (!vfe->fault_pending || vfe->recovery_disabled) {
-		spin_unlock_irqrestore(&vfe->output_lock, flags);
-		goto unlock;
-	}
-	if (vfe->recovery_attempted)
-		ret = -EIO;
-	spin_unlock_irqrestore(&vfe->output_lock, flags);
-
-	/* Keep the configured links stable when the last reference is dropped. */
-	mutex_lock(&camss->media_dev.graph_mutex);
 	for (i = 0; i < vfe->res->line_num; i++) {
 		struct camss_video *video = &vfe->line[i].video_out;
 		int error;
 
 		if (!video->pipeline_running)
 			continue;
-		__set_bit(i, &active);
+		__set_bit(i, active);
 		error = camss_video_stop_pipeline(video);
 		if (error && !ret)
 			ret = error;
 	}
-	if (ret || !active)
-		goto finish;
+	return ret;
+}
 
-	spin_lock_irqsave(&vfe->output_lock, flags);
-	vfe->recovery_attempted = true;
-	spin_unlock_irqrestore(&vfe->output_lock, flags);
+static int vfe_restart_streams(struct vfe_device *vfe, unsigned long active)
+{
+	int i, ret;
 
 	/* The PIX request must program the sensor before the first CSID port starts. */
 	for (i = vfe->res->line_num - 1; i >= 0; i--) {
@@ -909,25 +894,115 @@ static void vfe_recover(struct work_struct *work)
 		ret = camss_video_start_pipeline(video);
 		video->recovering = false;
 		if (ret)
-			break;
+			return ret;
 	}
+	return 0;
+}
 
-finish:
-	if (ret) {
-		for_each_set_bit(i, &active, vfe->res->line_num) {
-			struct camss_video *video = &vfe->line[i].video_out;
+static void vfe_fail_streams(struct vfe_device *vfe, unsigned long active)
+{
+	unsigned long flags;
+	unsigned int i;
 
-			camss_video_stop_pipeline(video);
-			vb2_queue_error(&video->vb2_q);
-			camss_video_flush_pipeline(video, VB2_BUF_STATE_ERROR);
-		}
-		spin_lock_irqsave(&vfe->output_lock, flags);
-		vfe->fault_pending = false;
-		vfe->recovery_attempted = false;
+	for_each_set_bit(i, &active, vfe->res->line_num) {
+		struct camss_video *video = &vfe->line[i].video_out;
+
+		camss_video_stop_pipeline(video);
+		vb2_queue_error(&video->vb2_q);
+		camss_video_flush_pipeline(video, VB2_BUF_STATE_ERROR);
+	}
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	vfe->fault_pending = false;
+	vfe->recovery_attempted = false;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+}
+
+static void vfe_recover(struct work_struct *work)
+{
+	struct vfe_device *vfe = container_of(work, struct vfe_device, recover_work);
+	struct camss *camss = vfe->camss;
+	unsigned long active = 0, flags;
+	bool attempted;
+	int ret;
+
+	mutex_lock(&camss->stream_lock);
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	if (!vfe->fault_pending || vfe->recovery_disabled) {
 		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		goto unlock;
+	}
+	attempted = vfe->recovery_attempted;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	/* Keep the configured links stable when the last reference is dropped. */
+	mutex_lock(&camss->media_dev.graph_mutex);
+	ret = vfe_stop_streams(vfe, &active);
+	if (attempted && !ret)
+		ret = -EIO;
+	if (!ret && active) {
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		vfe->recovery_attempted = true;
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		ret = vfe_restart_streams(vfe, active);
+	}
+	if (ret) {
+		vfe_fail_streams(vfe, active);
 		dev_err(camss->dev, "VFE%u recovery failed: %d\n", vfe->id, ret);
 	}
 	mutex_unlock(&camss->media_dev.graph_mutex);
+unlock:
+	mutex_unlock(&camss->stream_lock);
+}
+
+void msm_vfe_17x_suspend(struct vfe_device *vfe)
+{
+	struct camss *camss = vfe->camss;
+	unsigned long active = 0;
+	unsigned int i;
+	int ret;
+
+	mutex_lock(&camss->stream_lock);
+	mutex_lock(&camss->media_dev.graph_mutex);
+	ret = vfe_stop_streams(vfe, &active);
+	if (ret)
+		vfe_fail_streams(vfe, active);
+	mutex_unlock(&camss->media_dev.graph_mutex);
+
+	for_each_set_bit(i, &active, vfe->res->line_num)
+		camss_video_power_put(&vfe->line[i].video_out);
+	vfe->suspended_streams = ret ? 0 : active;
+	mutex_unlock(&camss->stream_lock);
+}
+
+void msm_vfe_17x_resume(struct vfe_device *vfe)
+{
+	struct camss *camss = vfe->camss;
+	unsigned long active;
+	unsigned int i;
+	int ret = 0;
+
+	mutex_lock(&camss->stream_lock);
+	active = vfe->suspended_streams;
+	if (!active)
+		goto unlock;
+
+	for_each_set_bit(i, &active, vfe->res->line_num) {
+		ret = camss_video_power_get(&vfe->line[i].video_out);
+		if (ret)
+			break;
+	}
+	mutex_lock(&camss->media_dev.graph_mutex);
+	if (!ret)
+		ret = vfe_restart_streams(vfe, active);
+	if (ret) {
+		vfe_fail_streams(vfe, active);
+		dev_err(camss->dev, "VFE%u resume failed: %d\n", vfe->id, ret);
+	}
+	mutex_unlock(&camss->media_dev.graph_mutex);
+	if (ret)
+		for_each_set_bit(i, &active, vfe->res->line_num)
+			camss_video_power_put(&vfe->line[i].video_out);
+	vfe->suspended_streams = 0;
 unlock:
 	mutex_unlock(&camss->stream_lock);
 }

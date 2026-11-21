@@ -197,6 +197,7 @@ struct vfe_device {
 	bool fault_pending;
 	bool recovery_attempted;
 	bool recovery_disabled;
+	unsigned long suspended_streams;
 	enum vfe_line_id wm_output_map[MSM_VFE_IMAGE_MASTERS_NUM];
 	struct vfe_line line[VFE_LINE_NUM_MAX];
 	u32 reg_update;
@@ -213,6 +214,8 @@ struct camss_subdev_resources;
 
 int msm_vfe_subdev_init(struct camss *camss, struct vfe_device *vfe,
 			const struct camss_subdev_resources *res, u8 id);
+void msm_vfe_17x_suspend(struct vfe_device *vfe);
+void msm_vfe_17x_resume(struct vfe_device *vfe);
 
 void msm_vfe_genpd_cleanup(struct vfe_device *vfe);
 
