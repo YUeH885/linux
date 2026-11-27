@@ -18,6 +18,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/spinlock_types.h>
 #include <linux/spinlock.h>
+#include <dt-bindings/power/qcom,rpmhpd.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-event.h>
@@ -1008,6 +1009,60 @@ static bool vfe_check_clock_levels(struct camss_clock *clock)
 	return false;
 }
 
+static void vfe_sm8150_rail_corners(const struct vfe_device *vfe,
+				    const char *clk_name, unsigned long rate,
+				    unsigned int *mmcx, unsigned int *mx)
+{
+	if (!strcmp(clk_name, "camnoc_axi")) {
+		unsigned int level;
+
+		if (rate <= 150000000)
+			level = RPMH_REGULATOR_LEVEL_LOW_SVS;
+		else if (rate <= 266666667)
+			level = RPMH_REGULATOR_LEVEL_SVS;
+		else if (rate <= 320000000)
+			level = RPMH_REGULATOR_LEVEL_SVS_L1;
+		else if (rate <= 400000000)
+			level = RPMH_REGULATOR_LEVEL_NOM;
+		else
+			level = RPMH_REGULATOR_LEVEL_TURBO;
+
+		*mmcx = max(*mmcx, level);
+		return;
+	}
+
+	if (vfe->res->is_lite) {
+		unsigned int level;
+
+		if (rate <= 400000000)
+			level = RPMH_REGULATOR_LEVEL_LOW_SVS;
+		else if (rate <= 480000000)
+			level = RPMH_REGULATOR_LEVEL_SVS_L1;
+		else
+			level = RPMH_REGULATOR_LEVEL_NOM;
+
+		*mmcx = max(*mmcx, level);
+		return;
+	}
+
+	if (rate <= 400000000) {
+		*mmcx = max_t(unsigned int, *mmcx, RPMH_REGULATOR_LEVEL_LOW_SVS);
+		*mx = max_t(unsigned int, *mx, RPMH_REGULATOR_LEVEL_SVS);
+	} else if (rate <= 558000000) {
+		*mmcx = max_t(unsigned int, *mmcx, RPMH_REGULATOR_LEVEL_SVS);
+		*mx = max_t(unsigned int, *mx, RPMH_REGULATOR_LEVEL_SVS_L1);
+	} else if (rate <= 637000000) {
+		*mmcx = max_t(unsigned int, *mmcx, RPMH_REGULATOR_LEVEL_SVS_L1);
+		*mx = max_t(unsigned int, *mx, RPMH_REGULATOR_LEVEL_SVS_L1);
+	} else if (rate <= 847000000) {
+		*mmcx = max_t(unsigned int, *mmcx, RPMH_REGULATOR_LEVEL_NOM);
+		*mx = max_t(unsigned int, *mx, RPMH_REGULATOR_LEVEL_NOM);
+	} else {
+		*mmcx = max_t(unsigned int, *mmcx, RPMH_REGULATOR_LEVEL_TURBO);
+		*mx = max_t(unsigned int, *mx, RPMH_REGULATOR_LEVEL_NOM);
+	}
+}
+
 /*
  * vfe_set_clock_rates - Calculate and set clock rates on VFE module
  * @vfe: VFE device
@@ -1019,8 +1074,14 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 	struct vfe_device *src_vfe = vfe->dual_master_vfe ?: vfe;
 	struct device *dev = vfe->camss->dev;
 	u64 pixel_clock[VFE_LINE_NUM_MAX];
+	unsigned long target_rates[16] = {};
+	unsigned int req_mmcx = 0;
+	unsigned int req_mx = 0;
 	int i, j;
 	int ret;
+
+	if (WARN_ON_ONCE(vfe->nclocks > ARRAY_SIZE(target_rates)))
+		return -EINVAL;
 
 	for (i = VFE_LINE_RDI0; i < src_vfe->res->line_num; i++) {
 		struct vfe_line *line = &src_vfe->line[i];
@@ -1082,11 +1143,37 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				return -EINVAL;
 			}
 
-			ret = clk_set_rate(clock->clk, rate);
-			if (ret < 0) {
-				dev_err(dev, "clk set rate failed: %d\n", ret);
-				return ret;
+			target_rates[i] = rate;
+			if (vfe->camss->res->version == CAMSS_8150)
+				vfe_sm8150_rail_corners(vfe, clock->name, rate,
+							&req_mmcx, &req_mx);
+		}
+	}
+
+	if (vfe->camss->res->version == CAMSS_8150) {
+		vfe->req_mmcx_level = req_mmcx;
+		vfe->req_mx_level = req_mx;
+		ret = camss_update_rail_corners(vfe->camss);
+		if (ret < 0) {
+			vfe->req_mmcx_level = 0;
+			vfe->req_mx_level = 0;
+			return ret;
+		}
+	}
+
+	for (i = 0; i < vfe->nclocks; i++) {
+		if (!target_rates[i])
+			continue;
+
+		ret = clk_set_rate(vfe->clock[i].clk, target_rates[i]);
+		if (ret < 0) {
+			dev_err(dev, "clk set rate failed: %d\n", ret);
+			if (vfe->camss->res->version == CAMSS_8150) {
+				vfe->req_mmcx_level = 0;
+				vfe->req_mx_level = 0;
+				camss_update_rail_corners(vfe->camss);
 			}
+			return ret;
 		}
 	}
 
@@ -1205,6 +1292,11 @@ error_reset:
 	camss_disable_clocks(vfe->nclocks, vfe->clock);
 
 error_pm_runtime_get:
+	if (vfe->camss->res->version == CAMSS_8150) {
+		vfe->req_mmcx_level = 0;
+		vfe->req_mx_level = 0;
+		camss_update_rail_corners(vfe->camss);
+	}
 	pm_runtime_put_sync(vfe->camss->dev);
 error_domain_off:
 	vfe->res->hw_ops->pm_domain_off(vfe);
@@ -1232,6 +1324,11 @@ void vfe_put(struct vfe_device *vfe)
 			vfe->res->hw_ops->vfe_halt(vfe);
 		}
 		camss_disable_clocks(vfe->nclocks, vfe->clock);
+		if (vfe->camss->res->version == CAMSS_8150) {
+			vfe->req_mmcx_level = 0;
+			vfe->req_mx_level = 0;
+			camss_update_rail_corners(vfe->camss);
+		}
 		pm_runtime_put_sync(vfe->camss->dev);
 		vfe->res->hw_ops->pm_domain_off(vfe);
 	}

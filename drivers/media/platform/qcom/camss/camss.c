@@ -4966,6 +4966,44 @@ void camss_pm_domain_off(struct camss *camss, int id)
 	}
 }
 
+int camss_update_rail_corners(struct camss *camss)
+{
+	unsigned int max_mmcx = 0;
+	unsigned int max_mx = 0;
+	int i, ret = 0;
+
+	if (!camss->mmcx_genpd && !camss->mx_genpd)
+		return 0;
+
+	mutex_lock(&camss->opp_lock);
+	for (i = 0; i < camss->res->vfe_num; i++) {
+		max_mmcx = max(max_mmcx, camss->vfe[i].req_mmcx_level);
+		max_mx = max(max_mx, camss->vfe[i].req_mx_level);
+	}
+
+	if (camss->mmcx_genpd) {
+		ret = dev_pm_genpd_set_performance_state(camss->mmcx_genpd, max_mmcx);
+		if (ret) {
+			dev_err(camss->dev,
+				"Failed to set MMCX performance state %u: %d\n",
+				max_mmcx, ret);
+			goto out_unlock;
+		}
+	}
+
+	if (camss->mx_genpd) {
+		ret = dev_pm_genpd_set_performance_state(camss->mx_genpd, max_mx);
+		if (ret)
+			dev_err(camss->dev,
+				"Failed to set MX performance state %u: %d\n",
+				max_mx, ret);
+	}
+
+out_unlock:
+	mutex_unlock(&camss->opp_lock);
+	return ret;
+}
+
 static int vfe_parent_dev_ops_get(struct camss *camss, int id)
 {
 	int ret = -EINVAL;
@@ -5498,6 +5536,48 @@ static const struct media_device_ops camss_media_ops = {
 	.req_queue = vb2_request_queue,
 };
 
+static int camss_attach_optional_pd(struct device *dev, const char *name,
+				    struct device **genpd_out,
+				    struct device_link **link_out)
+{
+	struct device *genpd;
+	struct device_link *link;
+
+	if (of_property_match_string(dev->of_node, "power-domain-names", name) < 0)
+		return 0;
+
+	genpd = dev_pm_domain_attach_by_name(dev, name);
+	if (IS_ERR(genpd))
+		return PTR_ERR(genpd);
+	if (!genpd)
+		return 0;
+
+	link = device_link_add(dev, genpd,
+			       DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME |
+			       DL_FLAG_RPM_ACTIVE);
+	if (!link) {
+		dev_pm_domain_detach(genpd, true);
+		return -EINVAL;
+	}
+
+	*genpd_out = genpd;
+	*link_out = link;
+	return 0;
+}
+
+static void camss_detach_optional_pd(struct device **genpd,
+				     struct device_link **link)
+{
+	if (*link) {
+		device_link_del(*link);
+		*link = NULL;
+	}
+	if (*genpd) {
+		dev_pm_domain_detach(*genpd, true);
+		*genpd = NULL;
+	}
+}
+
 static int camss_configure_pd(struct camss *camss)
 {
 	const struct camss_resources *res = camss->res;
@@ -5569,8 +5649,25 @@ static int camss_configure_pd(struct camss *camss)
 		goto fail_pm;
 	}
 
+	ret = camss_attach_optional_pd(camss->dev, "mmcx",
+				       &camss->mmcx_genpd,
+				       &camss->mmcx_genpd_link);
+	if (ret)
+		goto fail_top_link;
+
+	ret = camss_attach_optional_pd(camss->dev, "mx",
+				       &camss->mx_genpd,
+				       &camss->mx_genpd_link);
+	if (ret)
+		goto fail_mmcx;
+
 	return 0;
 
+fail_mmcx:
+	camss_detach_optional_pd(&camss->mmcx_genpd, &camss->mmcx_genpd_link);
+fail_top_link:
+	device_link_del(camss->genpd_link);
+	camss->genpd_link = NULL;
 fail_pm:
 	dev_pm_domain_detach(camss->genpd, true);
 
@@ -5608,6 +5705,9 @@ static void camss_genpd_cleanup(struct camss *camss)
 		return;
 
 	camss_genpd_subdevice_cleanup(camss);
+
+	camss_detach_optional_pd(&camss->mx_genpd, &camss->mx_genpd_link);
+	camss_detach_optional_pd(&camss->mmcx_genpd, &camss->mmcx_genpd_link);
 
 	if (camss->genpd_link)
 		device_link_del(camss->genpd_link);
@@ -5692,6 +5792,7 @@ static int camss_probe(struct platform_device *pdev)
 	camss->media_dev.ops = &camss_media_ops;
 	media_device_init(&camss->media_dev);
 	mutex_init(&camss->stream_lock);
+	mutex_init(&camss->opp_lock);
 
 	camss->v4l2_dev.mdev = &camss->media_dev;
 	ret = v4l2_device_register(camss->dev, &camss->v4l2_dev);

@@ -230,6 +230,8 @@ struct vfe_device {
 	struct camss_video_ops video_ops;
 	struct device *genpd;
 	struct device_link *genpd_link;
+	unsigned int req_mmcx_level;
+	unsigned int req_mx_level;
 	struct vfe_device *dual_master_vfe;
 };
 

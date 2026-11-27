@@ -128,6 +128,8 @@ struct camss {
 	struct media_device media_dev;
 	/* Serializes pipeline transitions across capture queues. */
 	struct mutex stream_lock;
+	/* Serializes shared rail OPP state across VFEs. */
+	struct mutex opp_lock;
 	struct device *dev;
 	struct csiphy_device *csiphy;
 	struct tpg_device *tpg;
@@ -139,6 +141,10 @@ struct camss {
 	int genpd_num;
 	struct device *genpd;
 	struct device_link *genpd_link;
+	struct device *mmcx_genpd;
+	struct device_link *mmcx_genpd_link;
+	struct device *mx_genpd;
+	struct device_link *mx_genpd_link;
 	struct icc_path *icc_path[ICC_SM8250_COUNT];
 	const struct camss_resources *res;
 };
@@ -179,6 +185,7 @@ int camss_get_csi2_pixel_rate(struct media_entity *entity, unsigned int bpp,
 			      u64 *pixel_rate);
 int camss_pm_domain_on(struct camss *camss, int id);
 void camss_pm_domain_off(struct camss *camss, int id);
+int camss_update_rail_corners(struct camss *camss);
 int camss_vfe_get(struct camss *camss, int id);
 void camss_vfe_put(struct camss *camss, int id);
 void camss_delete(struct camss *camss);
