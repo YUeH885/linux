@@ -20461,6 +20461,7 @@ ONSEMI LC898124EP1 AND LC898219XI LENS CONTROLLERS
 M:	yuzu <yuzu23234@gmail.com>
 L:	linux-media@vger.kernel.org
 S:	Maintained
+F:	Documentation/devicetree/bindings/media/i2c/onnn,lc898124ep1.yaml
 F:	Documentation/devicetree/bindings/media/i2c/onnn,lc898219xi.yaml
 F:	drivers/media/i2c/lc898219xi.c
 
