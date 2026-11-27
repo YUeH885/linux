@@ -14,7 +14,7 @@
 
 static u64 iris_vpu2_calc_freq(struct iris_inst *inst, size_t data_size)
 {
-	struct platform_inst_caps *caps = inst->core->iris_platform_data->inst_caps;
+	struct platform_inst_caps *caps = iris_get_inst_caps(inst);
 	struct v4l2_format *inp_f = inst->fmt_src;
 	u32 mbs_per_second, mbpf, height, width;
 	unsigned long vpp_freq, vsp_freq;

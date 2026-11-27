@@ -19,6 +19,11 @@ struct iris_inst_hfi_gen1 {
 	struct hfi_buffer_requirements buffer_requirements[HFI_BUFFER_INTERNAL_RECON + 1];
 };
 
+int iris_hfi_gen1_parse_caps(struct iris_core *core,
+			     const struct hfi_msg_sys_init_done_pkt *pkt);
+
+void iris_hfi_gen1_init_inst_caps(struct iris_inst *inst);
+
 u32 iris_hfi_gen1_get_buffer_size(struct iris_inst *inst, enum iris_buffer_type type);
 u32 iris_hfi_gen1_get_buffer_count(struct iris_inst *inst, enum iris_buffer_type type);
 void iris_hfi_gen1_sys_ops_init(struct iris_core *core);

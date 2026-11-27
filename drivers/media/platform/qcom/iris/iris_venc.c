@@ -10,6 +10,7 @@
 #include "iris_common.h"
 #include "iris_ctrls.h"
 #include "iris_instance.h"
+#include "iris_hfi_gen1.h"
 #include "iris_power.h"
 #include "iris_venc.h"
 #include "iris_vpu_buffer.h"
@@ -75,6 +76,8 @@ int iris_venc_inst_init(struct iris_inst *inst)
 
 	memcpy(&inst->fw_caps[0], &core->inst_fw_caps_enc[0],
 	       INST_FW_CAP_MAX * sizeof(struct platform_inst_fw_cap));
+
+	iris_hfi_gen1_init_inst_caps(inst);
 
 	return iris_ctrls_init(inst);
 }
@@ -374,7 +377,7 @@ int iris_venc_s_selection(struct iris_inst *inst, struct v4l2_selection *s)
 
 int iris_venc_s_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
 {
-	struct platform_inst_caps *caps = inst->core->iris_platform_data->inst_caps;
+	struct platform_inst_caps *caps = iris_get_inst_caps(inst);
 	struct vb2_queue *src_q = v4l2_m2m_get_src_vq(inst->m2m_ctx);
 	struct vb2_queue *dst_q = v4l2_m2m_get_dst_vq(inst->m2m_ctx);
 	struct v4l2_fract *timeperframe = NULL;
