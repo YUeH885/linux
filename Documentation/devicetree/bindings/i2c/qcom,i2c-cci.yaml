@@ -70,6 +70,10 @@ properties:
   reg:
     maxItems: 1
 
+  vbus-supply:
+    description:
+      Supply keeping the SCL/SDA lines powered while the controller clocks run.
+
 patternProperties:
   "^i2c-bus@[01]$":
     $ref: /schemas/i2c/i2c-controller.yaml#
