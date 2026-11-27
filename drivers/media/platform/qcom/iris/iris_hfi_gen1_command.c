@@ -5,6 +5,7 @@
 
 #include <media/v4l2-mem2mem.h>
 
+#include "iris_buffer.h"
 #include "iris_hfi_gen1.h"
 #include "iris_hfi_gen1_defines.h"
 #include "iris_instance.h"
@@ -359,8 +360,12 @@ static int iris_hfi_gen1_session_continue(struct iris_inst *inst, u32 plane)
 		    (inst->sub_state & IRIS_INST_SUB_INPUT_PAUSE))
 			return 0;
 
-		if (inst->sub_state & IRIS_INST_SUB_DRC_LAST) {
+		if (inst->sub_state & (IRIS_INST_SUB_DRC_LAST | IRIS_INST_SUB_FIRST_IPSC)) {
 			ret = iris_queue_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+			if (ret)
+				return ret;
+
+			ret = iris_queue_deferred_buffers(inst, BUF_OUTPUT);
 			if (ret)
 				return ret;
 		}
@@ -537,6 +542,7 @@ static int iris_hfi_gen1_session_unset_buffers(struct iris_inst *inst, struct ir
 	pkt->response_req = true;
 	pkt->buffer_type = buffer_type;
 
+	reinit_completion(&inst->completion);
 	ret = iris_hfi_queue_cmd_write(inst->core, pkt, pkt->shdr.hdr.size);
 	if (ret)
 		goto exit;
@@ -619,20 +625,10 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
 		break;
 	}
 	case HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO: {
+		struct hfi_uncompressed_plane_actual_constraints_info *in = pdata;
 		struct hfi_uncompressed_plane_actual_constraints_info *info = prop_data;
 
-		info->buffer_type = HFI_BUFFER_OUTPUT2;
-		info->num_planes = 2;
-		info->plane_format[0].stride_multiples = 128;
-		info->plane_format[0].max_stride = 8192;
-		info->plane_format[0].min_plane_buffer_height_multiple = 32;
-		info->plane_format[0].buffer_alignment = 256;
-		if (info->num_planes > 1) {
-			info->plane_format[1].stride_multiples = 128;
-			info->plane_format[1].max_stride = 8192;
-			info->plane_format[1].min_plane_buffer_height_multiple = 16;
-			info->plane_format[1].buffer_alignment = 256;
-		}
+		*info = *in;
 
 		packet->shdr.hdr.size += sizeof(*info);
 		break;
@@ -942,7 +938,6 @@ static int iris_hfi_gen1_set_resolution(struct iris_inst *inst, u32 plane)
 		fs.buffer_type = HFI_BUFFER_OUTPUT2;
 	else
 		fs.buffer_type = HFI_BUFFER_OUTPUT;
-
 	fs.width = inst->fmt_dst->fmt.pix_mp.width;
 	fs.height = inst->fmt_dst->fmt.pix_mp.height;
 
@@ -959,62 +954,72 @@ static int iris_hfi_gen1_decide_core(struct iris_inst *inst, u32 plane)
 	return hfi_gen1_set_property(inst, ptype, &cu, sizeof(cu));
 }
 
+static u32 iris_hfi_gen1_raw_format(u32 pixelformat)
+{
+	switch (pixelformat) {
+	case V4L2_PIX_FMT_NV12:
+		return HFI_COLOR_FORMAT_NV12;
+	case V4L2_PIX_FMT_P010:
+		return HFI_COLOR_FORMAT_P010;
+	case V4L2_PIX_FMT_QC08C:
+		return HFI_COLOR_FORMAT_NV12_UBWC;
+	case V4L2_PIX_FMT_QC10C:
+		return HFI_COLOR_FORMAT_YUV420_TP10_UBWC;
+	default:
+		return 0;
+	}
+}
+
 static int iris_hfi_gen1_set_raw_format(struct iris_inst *inst, u32 plane)
 {
 	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_FORMAT_SELECT;
-	struct hfi_uncompressed_format_select fmt;
+	struct hfi_uncompressed_format_select fmt = {0};
 	u32 pixelformat;
 	int ret;
 
-	if (inst->domain == DECODER) {
-		pixelformat = inst->fmt_dst->fmt.pix_mp.pixelformat;
-		if (iris_split_mode_enabled(inst)) {
-			fmt.buffer_type = HFI_BUFFER_OUTPUT;
-			fmt.format = HFI_COLOR_FORMAT_NV12_UBWC;
+	pixelformat = inst->domain == DECODER ? inst->fmt_dst->fmt.pix_mp.pixelformat :
+		inst->fmt_src->fmt.pix_mp.pixelformat;
 
-			ret = hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
-			if (ret)
-				return ret;
-
-			fmt.buffer_type = HFI_BUFFER_OUTPUT2;
-			fmt.format = pixelformat == V4L2_PIX_FMT_NV12 ?
-				HFI_COLOR_FORMAT_NV12 : HFI_COLOR_FORMAT_NV12_UBWC;
-
-			ret = hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
-		} else {
-			fmt.buffer_type = HFI_BUFFER_OUTPUT;
-			fmt.format = pixelformat == V4L2_PIX_FMT_NV12 ?
-				HFI_COLOR_FORMAT_NV12 : HFI_COLOR_FORMAT_NV12_UBWC;
-
-			ret = hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
-		}
-	} else {
-		pixelformat = inst->fmt_src->fmt.pix_mp.pixelformat;
-		fmt.buffer_type = HFI_BUFFER_INPUT;
-		fmt.format = pixelformat == V4L2_PIX_FMT_NV12 ?
-			HFI_COLOR_FORMAT_NV12 : HFI_COLOR_FORMAT_NV12_UBWC;
+	if (inst->domain == DECODER && iris_split_mode_enabled(inst)) {
+		fmt.buffer_type = HFI_BUFFER_OUTPUT;
+		fmt.format = iris_fmt_is_10bit(pixelformat) ?
+			HFI_COLOR_FORMAT_YUV420_TP10_UBWC : HFI_COLOR_FORMAT_NV12_UBWC;
 		ret = hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
+		if (ret)
+			return ret;
+		fmt.buffer_type = HFI_BUFFER_OUTPUT2;
+	} else {
+		fmt.buffer_type = inst->domain == DECODER ? HFI_BUFFER_OUTPUT : HFI_BUFFER_INPUT;
 	}
 
-	return ret;
+	fmt.format = iris_hfi_gen1_raw_format(pixelformat);
+	if (!fmt.format)
+		return -EINVAL;
+
+	return hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
 }
 
 static int iris_hfi_gen1_set_format_constraints(struct iris_inst *inst, u32 plane)
 {
 	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO;
 	struct hfi_uncompressed_plane_actual_constraints_info pconstraint;
+	u32 stride_multiples = 128;
 
-	if (inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC08C)
+	if (inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC08C ||
+	    inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC10C)
 		return 0;
+
+	if (inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_P010)
+		stride_multiples = 256;
 
 	pconstraint.buffer_type = HFI_BUFFER_OUTPUT2;
 	pconstraint.num_planes = 2;
-	pconstraint.plane_format[0].stride_multiples = 128;
+	pconstraint.plane_format[0].stride_multiples = stride_multiples;
 	pconstraint.plane_format[0].max_stride = 8192;
 	pconstraint.plane_format[0].min_plane_buffer_height_multiple = 32;
 	pconstraint.plane_format[0].buffer_alignment = 256;
 
-	pconstraint.plane_format[1].stride_multiples = 128;
+	pconstraint.plane_format[1].stride_multiples = stride_multiples;
 	pconstraint.plane_format[1].max_stride = 8192;
 	pconstraint.plane_format[1].min_plane_buffer_height_multiple = 16;
 	pconstraint.plane_format[1].buffer_alignment = 256;
@@ -1126,6 +1131,14 @@ static int iris_hfi_gen1_set_bufsize(struct iris_inst *inst, u32 plane)
 	const u32 ptype = HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL;
 	struct hfi_buffer_size_actual bufsz;
 	int ret;
+
+	/* Format changes alter firmware DPB and scratch requirements. */
+	if (inst->domain == DECODER && V4L2_TYPE_IS_CAPTURE(plane) &&
+	    inst->core->iris_firmware_data->hfi_4xx) {
+		ret = iris_hfi_gen1_session_get_buffer_requirements(inst);
+		if (ret)
+			return ret;
+	}
 
 	if (iris_split_mode_enabled(inst)) {
 		bufsz.type = HFI_BUFFER_OUTPUT;
