@@ -180,6 +180,9 @@ static int camss_request_config(struct camss_buffer *buffer, bool update)
 			}
 			memcpy(&buffer->ife_crop, ref->p_req.p, sizeof(buffer->ife_crop));
 			buffer->ife_crop_valid = true;
+		} else if (!update) {
+			ret = -EINVAL;
+			break;
 		}
 	}
 	mutex_unlock(handler->lock);

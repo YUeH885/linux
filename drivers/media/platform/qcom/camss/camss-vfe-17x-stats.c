@@ -32,6 +32,10 @@
 #define VFE_STATS_BF_SHIFT_BITS_CFG		(0x0b4c)
 #define		STATS_BHIST_DMI_BANK		(0x3a)
 #define		STATS_BF_DMI_BANK		(0x40)
+#define		VFE_STATS_BF_MARGIN_X		(64)
+#define		VFE_STATS_BF_MARGIN_Y		(32)
+#define		VFE_STATS_BF_MIN_WIDTH		(80)
+#define		VFE_STATS_BF_MIN_HEIGHT		(40)
 #define VFE_STATS_AWB_BG_WM			(15)
 #define VFE_STATS_BHIST_WM			(16)
 #define VFE_STATS_BF_WM				(14)
@@ -89,6 +93,7 @@ struct vfe_17x_stats {
 	u8 snapshot[VFE_STATS_COUNT];
 	bool reading;
 	u8 reader[VFE_STATS_COUNT];
+	bool bf_roi_dirty;
 	u8 done;
 	u32 pending_sequence;
 	u32 sequence;
@@ -175,17 +180,54 @@ static void vfe_stats_bf_filters(struct vfe_device *vfe)
 	writel_relaxed(0x0d, vfe->base + 0x0b4c);
 }
 
+static bool vfe_stats_bf_roi_is_default(const struct v4l2_qcom_camss_bf_roi *roi)
+{
+	return !roi->left && !roi->top && !roi->width && !roi->height;
+}
+
+static int vfe_stats_bf_roi_validate(const struct vfe_line *line,
+				     const struct v4l2_qcom_camss_bf_roi *roi)
+{
+	const struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+
+	if (vfe_stats_bf_roi_is_default(roi))
+		return 0;
+	if ((roi->left | roi->top | roi->width | roi->height) & 1)
+		return -ERANGE;
+	if (roi->left < VFE_STATS_BF_MARGIN_X || roi->top < VFE_STATS_BF_MARGIN_Y ||
+	    roi->width < VFE_STATS_BF_MIN_WIDTH || roi->height < VFE_STATS_BF_MIN_HEIGHT)
+		return -ERANGE;
+	if (sink->width < 2 * VFE_STATS_BF_MARGIN_X + VFE_STATS_BF_MIN_WIDTH ||
+	    sink->height < 2 * VFE_STATS_BF_MARGIN_Y + VFE_STATS_BF_MIN_HEIGHT)
+		return -EINVAL;
+	if ((u32)roi->left + roi->width > sink->width - VFE_STATS_BF_MARGIN_X ||
+	    (u32)roi->top + roi->height > sink->height - VFE_STATS_BF_MARGIN_Y)
+		return -ERANGE;
+	return 0;
+}
+
 static void vfe_stats_bf_dmi(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
 	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
 	const unsigned int h_num = 5;
 	const unsigned int v_num = 5;
-	const unsigned int roi_width = ((sink->width - 128) / h_num) & ~1U;
-	const unsigned int roi_height = ((sink->height - 64) / v_num) & ~1U;
-	const unsigned int left = 64;
-	const unsigned int top = 32;
+	unsigned int left = VFE_STATS_BF_MARGIN_X;
+	unsigned int top = VFE_STATS_BF_MARGIN_Y;
+	unsigned int width = sink->width - 2 * VFE_STATS_BF_MARGIN_X;
+	unsigned int height = sink->height - 2 * VFE_STATS_BF_MARGIN_Y;
+	unsigned int roi_width, roi_height;
 	unsigned int i;
+
+	if (!vfe_stats_bf_roi_is_default(&line->bf_roi) &&
+	    !vfe_stats_bf_roi_validate(line, &line->bf_roi)) {
+		left = line->bf_roi.left;
+		top = line->bf_roi.top;
+		width = line->bf_roi.width;
+		height = line->bf_roi.height;
+	}
+	roi_width = (width / h_num) & ~1U;
+	roi_height = (height / v_num) & ~1U;
 
 	writel_relaxed(DMI_CFG_AUTO_INCREMENT | STATS_BF_DMI_BANK,
 		       vfe->base + VFE_DMI_CFG);
@@ -210,7 +252,28 @@ static void vfe_stats_bf_dmi(struct vfe_line *line)
 	writel(0, vfe->base + VFE_DMI_DATA_LO);
 
 	writel_relaxed(0, vfe->base + VFE_DMI_CFG);
-	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+	writel(0, vfe->base + VFE_DMI_ADDR);
+}
+
+int vfe_17x_stats_set_bf_roi(struct vfe_line *line,
+			     const struct v4l2_qcom_camss_bf_roi *roi)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	unsigned long flags;
+	int ret;
+
+	ret = vfe_stats_bf_roi_validate(line, roi);
+	if (ret)
+		return ret;
+
+	mutex_lock(&line->ife_config_lock);
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	line->bf_roi = *roi;
+	if (line->output.state == VFE_OUTPUT_ON && line->stats)
+		line->stats->bf_roi_dirty = true;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+	mutex_unlock(&line->ife_config_lock);
+	return 0;
 }
 
 int vfe_17x_stats_start(struct vfe_line *line)
@@ -256,6 +319,7 @@ int vfe_17x_stats_start(struct vfe_line *line)
 	memset(stats->cpu, 0, VFE_STATS_SLOTS * VFE_STATS_DMA_SIZE);
 	mutex_unlock(&stats->read_lock);
 
+	mutex_lock(&line->ife_config_lock);
 	/* Stats clock gating is controlled explicitly while streaming. */
 	writel_relaxed(~0U, vfe->base + VFE_MODULE_STATS_CGC_OVERRIDE);
 
@@ -289,16 +353,17 @@ int vfe_17x_stats_start(struct vfe_line *line)
 	writel_relaxed(0, vfe->base + VFE_DMI_CFG);
 	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
 
-	writel_relaxed(BIT(8) | BIT(9) | BIT(13),
-		       vfe->base + VFE_STATS_BF_CFG);
+	writel_relaxed(BIT(8) | BIT(9) | BIT(13), vfe->base + VFE_STATS_BF_CFG);
 	writel_relaxed(0, vfe->base + VFE_STATS_BF_CFG + 4);
 	writel_relaxed(0, vfe->base + VFE_STATS_BF_CFG + 8);
-	writel_relaxed(32 << 16 | 64,
+	writel_relaxed(VFE_STATS_BF_MARGIN_Y << 16 | VFE_STATS_BF_MARGIN_X,
 		       vfe->base + VFE_STATS_BF_ACTIVE_WINDOW_CFG);
-	writel_relaxed((sink->height - 32) << 16 | (sink->width - 64),
+	writel_relaxed((sink->height - VFE_STATS_BF_MARGIN_Y) << 16 |
+		       (sink->width - VFE_STATS_BF_MARGIN_X),
 		       vfe->base + VFE_STATS_BF_ACTIVE_WINDOW_CFG + 4);
 	writel_relaxed(0, vfe->base + VFE_STATS_BF_SHIFT_BITS_CFG);
 	vfe_stats_bf_filters(vfe);
+	stats->bf_roi_dirty = false;
 	vfe_stats_bf_dmi(line);
 
 	writel_relaxed(STATS_AWB_BG_EN | STATS_BHIST_EN | STATS_BF_EN,
@@ -307,6 +372,7 @@ int vfe_17x_stats_start(struct vfe_line *line)
 	for (i = 0; i < VFE_STATS_COUNT; i++)
 		vfe_stats_wm_start(vfe, vfe_stats_output[i].wm,
 				   stats->dma + vfe_stats_output[i].offset);
+	mutex_unlock(&line->ife_config_lock);
 
 	return 0;
 }
@@ -379,6 +445,15 @@ void vfe_17x_stats_isr(struct vfe_device *vfe, u32 status)
 		stats->done = 0;
 	}
 	spin_unlock(&stats->lock);
+
+	/*
+	 * Reprogram BF ROI LUT immediately after WM14 completes so Bank 0 is
+	 * updated during the idle bottom-margin/blanking window between frames.
+	 */
+	if ((status & BIT(VFE_STATS_BF_WM)) && stats->bf_roi_dirty) {
+		vfe_stats_bf_dmi(line);
+		stats->bf_roi_dirty = false;
+	}
 
 unlock_output:
 	spin_unlock_irqrestore(&vfe->output_lock, flags);

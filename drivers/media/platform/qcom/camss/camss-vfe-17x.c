@@ -1117,6 +1117,32 @@ static const struct v4l2_ctrl_ops vfe_ife_crop_ctrl_ops = {
 	.s_ctrl = vfe_ife_crop_s_ctrl,
 };
 
+static int vfe_bf_roi_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	const struct v4l2_qcom_camss_bf_roi *roi = ctrl->p_new.p;
+
+	if (!roi->left && !roi->top && !roi->width && !roi->height)
+		return 0;
+	if (((roi->left | roi->top | roi->width | roi->height) & 1) ||
+	    roi->left < 64 || roi->top < 32 ||
+	    roi->width < 80 || roi->height < 40)
+		return -ERANGE;
+
+	return 0;
+}
+
+static int vfe_bf_roi_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct vfe_line *line = ctrl->priv;
+
+	return vfe_17x_stats_set_bf_roi(line, ctrl->p_new.p);
+}
+
+static const struct v4l2_ctrl_ops vfe_bf_roi_ctrl_ops = {
+	.try_ctrl = vfe_bf_roi_try_ctrl,
+	.s_ctrl = vfe_bf_roi_s_ctrl,
+};
+
 int vfe_ife_ctrl_init(struct vfe_line *line)
 {
 	static const struct v4l2_ctrl_config config_ctrl = {
@@ -1145,12 +1171,26 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
 			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
 	};
+	static const struct v4l2_ctrl_config bf_roi_ctrl = {
+		.ops = &vfe_bf_roi_ctrl_ops,
+		.id = V4L2_CID_QCOM_CAMSS_BF_ROI,
+		.name = "IFE Bayer focus ROI",
+		.type = V4L2_CTRL_TYPE_U8,
+		.min = 0,
+		.max = U8_MAX,
+		.step = 1,
+		.dims = { sizeof(struct v4l2_qcom_camss_bf_roi) },
+		.elem_size = sizeof(u8),
+		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
+			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
+	};
 	struct v4l2_qcom_camss_ife_config *tuning = &line->ife_config;
 	struct v4l2_ctrl *control;
 	int ret;
 
 	INIT_LIST_HEAD(&line->sensor_pending);
 	memset(tuning, 0, sizeof(*tuning));
+	memset(&line->bf_roi, 0, sizeof(line->bf_roi));
 	tuning->version = V4L2_QCOM_CAMSS_IFE_CONFIG_VERSION;
 	tuning->flags = V4L2_QCOM_CAMSS_IFE_CONFIG_ALL;
 	tuning->black_level = VFE_IFE_DEFAULT_BLACK_LEVEL;
@@ -1164,11 +1204,12 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	       sizeof(tuning->ccm_q7));
 	memcpy(tuning->gamma, vfe_ife_default_gamma, sizeof(tuning->gamma));
 
-	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 2);
+	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 3);
 	if (ret)
 		return ret;
 	control = v4l2_ctrl_new_custom(&line->ife_ctrls, &config_ctrl, line);
 	v4l2_ctrl_new_custom(&line->ife_ctrls, &crop_ctrl, line);
+	v4l2_ctrl_new_custom(&line->ife_ctrls, &bf_roi_ctrl, line);
 	ret = line->ife_ctrls.error;
 	if (!ret)
 		ret = v4l2_ctrl_s_ctrl_compound(control, V4L2_CTRL_TYPE_U8, tuning);

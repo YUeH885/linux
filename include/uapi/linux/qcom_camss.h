@@ -15,6 +15,23 @@
 #define V4L2_CID_QCOM_CAMSS_IFE_CROP \
 	(V4L2_CID_USER_QCOM_CAMSS_BASE + 1)
 
+#define V4L2_CID_QCOM_CAMSS_BF_ROI \
+	(V4L2_CID_USER_QCOM_CAMSS_BASE + 2)
+
+/*
+ * Active Bayer Focus statistics grid window for VFE_LINE_PIX in sink pad
+ * sensor pixels. The 5x5 hardware BF grid divides [left, left + width) x
+ * [top, top + height) evenly within the hardware filter margins
+ * ([64, sink_width - 64) x [32, sink_height - 32)). All fields must be even;
+ * all zeros reset to the default full-frame grid.
+ */
+struct v4l2_qcom_camss_bf_roi {
+	__u16 left;
+	__u16 top;
+	__u16 width;
+	__u16 height;
+};
+
 /*
  * Per-request geometry for the NV12 PIX stream. Scale the sensor frame
  * to compose_width x compose_height before cropping at left, top.

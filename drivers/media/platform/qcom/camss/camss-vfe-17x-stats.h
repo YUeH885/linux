@@ -6,6 +6,7 @@
 #include <linux/types.h>
 
 struct camss_video;
+struct v4l2_qcom_camss_bf_roi;
 struct v4l2_qcom_camss_stats;
 struct vfe_device;
 struct vfe_line;
@@ -15,6 +16,8 @@ struct vfe_line;
 int vfe_17x_stats_start(struct vfe_line *line);
 void vfe_17x_stats_stop(struct vfe_line *line);
 void vfe_17x_stats_isr(struct vfe_device *vfe, u32 status);
+int vfe_17x_stats_set_bf_roi(struct vfe_line *line,
+			     const struct v4l2_qcom_camss_bf_roi *roi);
 long vfe_17x_get_stats(struct camss_video *vid,
 		       struct v4l2_qcom_camss_stats *stats);
 

@@ -103,6 +103,7 @@ struct vfe_line {
 	struct mutex ife_config_lock;
 	struct v4l2_qcom_camss_ife_config ife_config;
 	struct v4l2_qcom_camss_ife_crop ife_active_crop;
+	struct v4l2_qcom_camss_bf_roi bf_roi;
 	bool ife_ctrls_initialized;
 	struct camss_buffer dummy_buffer[2];
 	struct list_head sensor_pending;
