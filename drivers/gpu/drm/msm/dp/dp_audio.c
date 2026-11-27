@@ -284,8 +284,8 @@ int msm_dp_audio_prepare(struct drm_bridge *bridge,
 	 * such cases check for connection status and bail out if not
 	 * connected.
 	 */
-	if (!msm_dp_display->power_on)
-		goto end;
+	if (!msm_dp_display->power_on || !connector->display_info.has_audio)
+		return 0;
 
 	audio = msm_dp_audio_get_data(msm_dp_display);
 	if (IS_ERR(audio)) {

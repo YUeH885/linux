@@ -170,7 +170,7 @@ static int msm_dp_test_active_show(struct seq_file *m, void *data)
 	struct msm_dp_debug_private *debug = m->private;
 	struct drm_connector *connector = debug->connector;
 
-	if (connector->status == connector_status_connected) {
+	if (connector && connector->status == connector_status_connected) {
 		if (debug->panel->video_test)
 			seq_puts(m, "1");
 		else
