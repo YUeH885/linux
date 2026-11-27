@@ -334,6 +334,10 @@ static int nci_add_new_protocol(struct nci_dev *ndev,
 		protocol = NFC_PROTO_NFC_DEP_MASK;
 	else if (rf_protocol == NCI_RF_PROTOCOL_T5T)
 		protocol = NFC_PROTO_ISO15693_MASK;
+	/* Some NFCCs report only the NFC-B technology during discovery. */
+	else if (rf_protocol == NCI_RF_PROTOCOL_UNKNOWN &&
+		 rf_tech_and_mode == NCI_NFC_B_PASSIVE_POLL_MODE)
+		protocol = NFC_PROTO_ISO14443_B_MASK;
 	else
 		protocol = nci_get_prop_rf_protocol(ndev, rf_protocol);
 
