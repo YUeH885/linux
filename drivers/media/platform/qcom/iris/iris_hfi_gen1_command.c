@@ -322,9 +322,16 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 
 	if (inst->domain == DECODER) {
 		if (inst->state == IRIS_INST_STREAMING) {
-			if (V4L2_TYPE_IS_OUTPUT(plane))
+			/*
+			 * During DRC the firmware has already paused input, so
+			 * HFI_FLUSH_OUTPUT preserves queued post-DRC input buffers.
+			 * Otherwise flush all ports to avoid dynamic-mode output
+			 * flush assertions while input is still active.
+			 */
+			if (V4L2_TYPE_IS_OUTPUT(plane) ||
+			    !(inst->sub_state & IRIS_INST_SUB_DRC))
 				flush_type = HFI_FLUSH_ALL;
-			else if (V4L2_TYPE_IS_CAPTURE(plane))
+			else
 				flush_type = HFI_FLUSH_OUTPUT;
 
 			reinit_completion(&inst->flush_completion);
