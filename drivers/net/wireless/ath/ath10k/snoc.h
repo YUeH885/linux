@@ -74,6 +74,7 @@ struct ath10k_snoc {
 	size_t mem_len;
 	struct ath10k_snoc_pipe pipe_info[CE_COUNT_MAX];
 	struct ath10k_snoc_ce_irq ce_irqs[CE_COUNT_MAX];
+	bool ce_irqs_enabled;
 	struct ath10k_ce ce;
 	struct timer_list rx_post_retry;
 	struct pwrseq_desc *pwrseq;
