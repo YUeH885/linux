@@ -4101,9 +4101,6 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
 	qphy_clrbits(com, QPHY_V3_DP_COM_SWI_CTRL, 0x03);
 	qphy_clrbits(com, QPHY_V3_DP_COM_SW_RESET, SW_RESET);
 
-	qphy_setbits(qmp->pcs, cfg->regs[QPHY_PCS_POWER_DOWN_CONTROL],
-			SW_PWRDN);
-
 	return 0;
 
 err_disable_clocks:
@@ -4214,6 +4211,25 @@ static int qmp_combo_dp_power_off(struct phy *phy)
 	return 0;
 }
 
+static int qmp_combo_usb_power_off(struct phy *phy)
+{
+	struct qmp_combo *qmp = phy_get_drvdata(phy);
+	const struct qmp_phy_cfg *cfg = qmp->cfg;
+
+	/* PHY reset */
+	qphy_setbits(qmp->pcs, cfg->regs[QPHY_SW_RESET], SW_RESET);
+
+	/* stop SerDes and Phy-Coding-Sublayer */
+	qphy_clrbits(qmp->pcs, cfg->regs[QPHY_START_CTRL],
+			SERDES_START | PCS_START);
+
+	/* Put PHY into POWER DOWN state: active low */
+	qphy_clrbits(qmp->pcs, cfg->regs[QPHY_PCS_POWER_DOWN_CONTROL],
+			SW_PWRDN);
+
+	return 0;
+}
+
 static int qmp_combo_usb_power_on(struct phy *phy)
 {
 	struct qmp_combo *qmp = phy_get_drvdata(phy);
@@ -4228,6 +4244,12 @@ static int qmp_combo_usb_power_on(struct phy *phy)
 	void __iomem *status;
 	unsigned int val;
 	int ret;
+
+	if (qmp->qmpphy_mode == QMPPHY_MODE_DP_ONLY)
+		return 0;
+
+	/* The common block can remain powered while DP is using it. */
+	qphy_setbits(pcs, cfg->regs[QPHY_PCS_POWER_DOWN_CONTROL], SW_PWRDN);
 
 	qmp_configure(qmp->dev, serdes, cfg->serdes_tbl, cfg->serdes_tbl_num);
 
@@ -4260,34 +4282,11 @@ static int qmp_combo_usb_power_on(struct phy *phy)
 			PHY_INIT_COMPLETE_TIMEOUT);
 	if (ret) {
 		dev_err(qmp->dev, "phy initialization timed-out\n");
-		goto err_disable_pipe_clk;
+		qmp_combo_usb_power_off(phy);
 	}
 
-	return 0;
-
-err_disable_pipe_clk:
-	clk_disable_unprepare(qmp->pipe_clk);
-
+	/* Shared clocks are released by qmp_combo_com_exit(). */
 	return ret;
-}
-
-static int qmp_combo_usb_power_off(struct phy *phy)
-{
-	struct qmp_combo *qmp = phy_get_drvdata(phy);
-	const struct qmp_phy_cfg *cfg = qmp->cfg;
-
-	/* PHY reset */
-	qphy_setbits(qmp->pcs, cfg->regs[QPHY_SW_RESET], SW_RESET);
-
-	/* stop SerDes and Phy-Coding-Sublayer */
-	qphy_clrbits(qmp->pcs, cfg->regs[QPHY_START_CTRL],
-			SERDES_START | PCS_START);
-
-	/* Put PHY into POWER DOWN state: active low */
-	qphy_clrbits(qmp->pcs, cfg->regs[QPHY_PCS_POWER_DOWN_CONTROL],
-			SW_PWRDN);
-
-	return 0;
 }
 
 static int qmp_combo_usb_init(struct phy *phy)
@@ -4833,8 +4832,8 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
 			break;
 		}
 	} else {
-		/* No DP SVID => don't care, assume it's just USB3 */
-		new_mode = QMPPHY_MODE_USB3_ONLY;
+		/* Keep USB running when DP is added to the other lane pair. */
+		new_mode = QMPPHY_MODE_USB3DP;
 	}
 
 	if (new_mode == qmp->qmpphy_mode) {
@@ -4864,16 +4863,8 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
 		/* Now everything's powered down, power up the right PHYs */
 		qmp_combo_com_init(qmp, true);
 
-		if (new_mode == QMPPHY_MODE_DP_ONLY) {
-			if (qmp->usb_init_count)
-				qmp->usb_init_count--;
-		}
-
-		if (new_mode == QMPPHY_MODE_USB3DP || new_mode == QMPPHY_MODE_USB3_ONLY) {
+		if (qmp->usb_init_count)
 			qmp_combo_usb_power_on(qmp->usb_phy);
-			if (!qmp->usb_init_count)
-				qmp->usb_init_count++;
-		}
 
 		if (new_mode == QMPPHY_MODE_DP_ONLY || new_mode == QMPPHY_MODE_USB3DP) {
 			if (qmp->dp_init_count)
