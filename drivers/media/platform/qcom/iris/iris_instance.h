@@ -40,6 +40,7 @@ enum iris_fmt_type_cap {
  * @kref: reference count, keeps the instance alive while the IRQ thread uses it
  * @core: pointer to core structure
  * @session_id: id of current video session
+ * @session_closed: session end command has been submitted
  * @hfi_session_ops: iris HFI session ops
  * @ctx_q_lock: lock to serialize queues related ioctls
  * @lock: lock to seralise forward and reverse threads
@@ -88,6 +89,7 @@ struct iris_inst {
 	struct kref			kref;
 	struct iris_core		*core;
 	u32				session_id;
+	bool				session_closed;
 	const struct iris_hfi_session_ops	*hfi_session_ops;
 	struct mutex			ctx_q_lock;/* lock to serialize queues related ioctls */
 	struct mutex			lock; /* lock to serialize forward and reverse threads */

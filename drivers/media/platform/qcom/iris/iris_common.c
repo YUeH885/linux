@@ -192,14 +192,26 @@ static void iris_flush_deferred_buffers(struct iris_inst *inst,
 	}
 }
 
-static void iris_kill_session(struct iris_inst *inst)
+void iris_session_close(struct iris_inst *inst)
 {
 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+	int ret;
 
-	if (!inst->session_id)
+	if (inst->state == IRIS_INST_DEINIT || inst->session_closed)
 		return;
 
-	hfi_ops->session_close(inst);
+	reinit_completion(&inst->completion);
+	ret = hfi_ops->session_close(inst);
+	if (ret)
+		return;
+
+	inst->session_closed = true;
+	iris_wait_for_session_response(inst, false);
+}
+
+static void iris_kill_session(struct iris_inst *inst)
+{
+	iris_session_close(inst);
 	iris_inst_change_state(inst, IRIS_INST_ERROR);
 }
 
@@ -218,6 +230,11 @@ int iris_session_streamoff(struct iris_inst *inst, u32 plane)
 		break;
 	default:
 		return -EINVAL;
+	}
+
+	if (inst->session_closed) {
+		ret = -EIO;
+		goto error;
 	}
 
 	ret = hfi_ops->session_stop(inst, plane);
