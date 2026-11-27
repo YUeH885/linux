@@ -563,6 +563,8 @@ patternProperties:
     description: Seiko Epson Corp.
   "^esp,.*":
     description: Espressif Systems Co. Ltd.
+  "^ess,.*":
+    description: ESS Technology, Inc.
   "^esstech,.*":
     description: ESS Technology, Inc.
   "^est,.*":
