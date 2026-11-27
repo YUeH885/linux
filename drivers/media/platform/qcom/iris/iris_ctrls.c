@@ -154,6 +154,10 @@ static enum platform_inst_fw_cap_type iris_get_cap_id(u32 id)
 		return LAYER4_BITRATE_HEVC;
 	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L5_BR:
 		return LAYER5_BITRATE_HEVC;
+	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE:
+		return DISPLAY_DELAY_ENABLE;
+	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY:
+		return DISPLAY_DELAY;
 	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
 		return REQUEST_SYNC_FRAME;
 	default:
@@ -299,6 +303,10 @@ static u32 iris_get_v4l2_id(enum platform_inst_fw_cap_type cap_id)
 		return V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L4_BR;
 	case LAYER5_BITRATE_HEVC:
 		return V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L5_BR;
+	case DISPLAY_DELAY_ENABLE:
+		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
+	case DISPLAY_DELAY:
+		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY;
 	case REQUEST_SYNC_FRAME:
 		return V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME;
 	default:
@@ -488,6 +496,8 @@ void iris_session_init_caps(struct iris_core *core)
 		core->inst_fw_caps_enc[MIN_FRAME_QP_HEVC].max = MAX_QP;
 		core->inst_fw_caps_enc[MAX_FRAME_QP_HEVC].max = MAX_QP;
 		core->inst_fw_caps_enc[MAX_FRAME_QP_HEVC].value = MAX_QP;
+		core->inst_fw_caps_enc[I_FRAME_QP_HEVC].max = MAX_QP;
+		core->inst_fw_caps_enc[P_FRAME_QP_HEVC].max = MAX_QP;
 		core->inst_fw_caps_enc[GOP_SIZE].min = 1;
 	}
 }
@@ -651,14 +661,15 @@ int iris_set_profile_level_gen1(struct iris_inst *inst, enum platform_inst_fw_ca
 int iris_set_header_mode_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
 {
 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+	u32 prepend_sps_pps = inst->fw_caps[PREPEND_SPSPPS_TO_IDR].value;
 	u32 header_mode = inst->fw_caps[cap_id].value;
 	u32 hfi_id = inst->fw_caps[cap_id].hfi_id;
 	u32 hfi_val;
 
-	if (header_mode == V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE)
-		hfi_val = 0;
-	else
+	if (prepend_sps_pps || header_mode == V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME)
 		hfi_val = 1;
+	else
+		hfi_val = 0;
 
 	return hfi_ops->session_set_property(inst, hfi_id,
 					 HFI_HOST_FLAGS_NONE,
@@ -1086,6 +1097,82 @@ int iris_set_frame_qp(struct iris_inst *inst, enum platform_inst_fw_cap_type cap
 				     iris_get_port_info(inst, cap_id),
 				     HFI_PAYLOAD_32_PACKED,
 				     &hfi_val, sizeof(u32));
+}
+
+int iris_set_frame_qp_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
+{
+	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+	enum platform_inst_fw_cap_type i_cap, p_cap;
+	struct hfi_quantization_v2 quant = { 0 };
+	u32 i_qp, p_qp, b_qp, enable = 0;
+	struct vb2_queue *q;
+
+	if (inst->codec == V4L2_PIX_FMT_H264) {
+		if (cap_id != I_FRAME_QP_H264 && cap_id != P_FRAME_QP_H264)
+			return 0;
+		i_cap = I_FRAME_QP_H264;
+		p_cap = P_FRAME_QP_H264;
+	} else if (inst->codec == V4L2_PIX_FMT_HEVC) {
+		if (cap_id != I_FRAME_QP_HEVC && cap_id != P_FRAME_QP_HEVC)
+			return 0;
+		i_cap = I_FRAME_QP_HEVC;
+		p_cap = P_FRAME_QP_HEVC;
+	} else {
+		return 0;
+	}
+
+	q = v4l2_m2m_get_dst_vq(inst->m2m_ctx);
+	if (vb2_is_streaming(q)) {
+		if (inst->hfi_rc_type != HFI_RATE_CONTROL_OFF)
+			return 0;
+	} else if (cap_id != i_cap) {
+		return 0;
+	}
+
+	if (inst->hfi_rc_type == HFI_RATE_CONTROL_OFF) {
+		enable = 7;
+	} else {
+		if (inst->fw_caps[i_cap].flags & CAP_FLAG_CLIENT_SET)
+			enable |= BIT(0);
+		if (inst->fw_caps[p_cap].flags & CAP_FLAG_CLIENT_SET)
+			enable |= BIT(1);
+	}
+
+	if (!enable)
+		return 0;
+
+	i_qp = inst->fw_caps[i_cap].value;
+	p_qp = inst->fw_caps[p_cap].value;
+	b_qp = p_qp;
+
+	quant.qp_packed = (i_qp & 0xff) | ((p_qp & 0xff) << 8) | ((b_qp & 0xff) << 16);
+	quant.layer_id = 0xff;
+	quant.enable = enable;
+
+	return hfi_ops->session_set_property(inst, HFI_PROPERTY_CONFIG_VENC_FRAME_QP,
+					     HFI_HOST_FLAGS_NONE,
+					     iris_get_port_info(inst, cap_id),
+					     HFI_PAYLOAD_STRUCTURE,
+					     &quant, sizeof(quant));
+}
+
+int iris_set_decode_order_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
+{
+	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+	struct platform_inst_fw_cap *cap = &inst->fw_caps[cap_id];
+	u32 order;
+
+	/* Leave the firmware default display-order output untouched unless requested. */
+	if (!(cap->flags & CAP_FLAG_CLIENT_SET))
+		return 0;
+
+	order = cap->value ? HFI_OUTPUT_ORDER_DECODE : HFI_OUTPUT_ORDER_DISPLAY;
+
+	return hfi_ops->session_set_property(inst, cap->hfi_id,
+					     HFI_HOST_FLAGS_NONE,
+					     iris_get_port_info(inst, cap_id),
+					     HFI_PAYLOAD_U32,
+					     &order, sizeof(order));
 }
 
 int iris_set_qp_range(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)

@@ -15,6 +15,23 @@
 
 static struct platform_inst_fw_cap inst_fw_cap_sm8250_dec[] = {
 	{
+		.cap_id = DISPLAY_DELAY_ENABLE,
+		.min = 0,
+		.max = 1,
+		.step_or_mask = 1,
+		.value = 0,
+		.hfi_id = HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
+		.flags = CAP_FLAG_INPUT_PORT,
+		.set = iris_set_decode_order_gen1,
+	},
+	{
+		.cap_id = DISPLAY_DELAY,
+		.min = 0,
+		.max = 0,
+		.step_or_mask = 1,
+		.value = 0,
+	},
+	{
 		.cap_id = BIT_DEPTH,
 		.min = BIT_DEPTH_8,
 		.max = BIT_DEPTH_10,
@@ -135,6 +152,14 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
 		.set = iris_set_header_mode_gen1,
 	},
 	{
+		.cap_id = PREPEND_SPSPPS_TO_IDR,
+		.min = 0,
+		.max = 1,
+		.step_or_mask = 1,
+		.value = 0,
+		.flags = CAP_FLAG_OUTPUT_PORT,
+	},
+	{
 		.cap_id = BITRATE,
 		.min = BITRATE_MIN,
 		.max = BITRATE_MAX,
@@ -144,6 +169,15 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
 		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_INPUT_PORT |
 			CAP_FLAG_DYNAMIC_ALLOWED,
 		.set = iris_set_bitrate_gen1,
+	},
+	{
+		.cap_id = BITRATE_PEAK,
+		.min = BITRATE_MIN,
+		.max = BITRATE_MAX,
+		.step_or_mask = BITRATE_STEP,
+		.value = BITRATE_DEFAULT,
+		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_INPUT_PORT |
+			CAP_FLAG_DYNAMIC_ALLOWED,
 	},
 	{
 		.cap_id = BITRATE_MODE,
@@ -175,7 +209,7 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
 	{
 		.cap_id = GOP_SIZE,
 		.min = 0,
-		.max = (1 << 16) - 1,
+		.max = INT_MAX,
 		.step_or_mask = 1,
 		.value = 30,
 		.hfi_id = HFI_PROPERTY_CONFIG_VENC_INTRA_PERIOD,
@@ -232,6 +266,50 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
 		.hfi_id = HFI_PROPERTY_PARAM_VENC_SESSION_QP_RANGE_V2,
 		.flags = CAP_FLAG_OUTPUT_PORT,
 		.set = iris_set_qp_range,
+	},
+	{
+		.cap_id = I_FRAME_QP_H264,
+		.min = MIN_QP_8BIT,
+		.max = MAX_QP,
+		.step_or_mask = 1,
+		.value = DEFAULT_QP,
+		.hfi_id = HFI_PROPERTY_CONFIG_VENC_FRAME_QP,
+		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_INPUT_PORT |
+			CAP_FLAG_DYNAMIC_ALLOWED,
+		.set = iris_set_frame_qp_gen1,
+	},
+	{
+		.cap_id = I_FRAME_QP_HEVC,
+		.min = MIN_QP_8BIT,
+		.max = MAX_QP_HEVC,
+		.step_or_mask = 1,
+		.value = DEFAULT_QP,
+		.hfi_id = HFI_PROPERTY_CONFIG_VENC_FRAME_QP,
+		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_INPUT_PORT |
+			CAP_FLAG_DYNAMIC_ALLOWED,
+		.set = iris_set_frame_qp_gen1,
+	},
+	{
+		.cap_id = P_FRAME_QP_H264,
+		.min = MIN_QP_8BIT,
+		.max = MAX_QP,
+		.step_or_mask = 1,
+		.value = DEFAULT_QP,
+		.hfi_id = HFI_PROPERTY_CONFIG_VENC_FRAME_QP,
+		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_INPUT_PORT |
+			CAP_FLAG_DYNAMIC_ALLOWED,
+		.set = iris_set_frame_qp_gen1,
+	},
+	{
+		.cap_id = P_FRAME_QP_HEVC,
+		.min = MIN_QP_8BIT,
+		.max = MAX_QP_HEVC,
+		.step_or_mask = 1,
+		.value = DEFAULT_QP,
+		.hfi_id = HFI_PROPERTY_CONFIG_VENC_FRAME_QP,
+		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_INPUT_PORT |
+			CAP_FLAG_DYNAMIC_ALLOWED,
+		.set = iris_set_frame_qp_gen1,
 	},
 	{
 		.cap_id = IR_TYPE,

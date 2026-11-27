@@ -928,6 +928,24 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
 		packet->shdr.hdr.size += sizeof(u32);
 		break;
 	}
+	case HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER: {
+		u32 *in = pdata;
+
+		if (*in != HFI_OUTPUT_ORDER_DECODE && *in != HFI_OUTPUT_ORDER_DISPLAY)
+			return -EINVAL;
+
+		packet->data[1] = *in;
+		packet->shdr.hdr.size += sizeof(u32);
+		break;
+	}
+	case HFI_PROPERTY_CONFIG_VENC_FRAME_QP: {
+		struct hfi_quantization_v2 *quant = prop_data;
+		struct hfi_quantization_v2 *in = pdata;
+
+		*quant = *in;
+		packet->shdr.hdr.size += sizeof(*quant);
+		break;
+	}
 	case HFI_PROPERTY_CONFIG_VENC_REQUEST_SYNC_FRAME: {
 		break;
 	}
