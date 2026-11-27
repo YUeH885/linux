@@ -7,6 +7,7 @@
 
 struct camss_video;
 struct v4l2_qcom_camss_bf_roi;
+struct v4l2_qcom_camss_pdaf_buf;
 struct v4l2_qcom_camss_stats;
 struct vfe_device;
 struct vfe_line;
@@ -20,5 +21,12 @@ int vfe_17x_stats_set_bf_roi(struct vfe_line *line,
 			     const struct v4l2_qcom_camss_bf_roi *roi);
 long vfe_17x_get_stats(struct camss_video *vid,
 		       struct v4l2_qcom_camss_stats *stats);
+
+int vfe_17x_pdaf_start(struct vfe_line *line);
+void vfe_17x_pdaf_stop(struct vfe_line *line);
+void vfe_17x_pdaf_cleanup(struct vfe_line *line);
+void vfe_17x_pdaf_isr(struct vfe_device *vfe);
+long vfe_17x_get_pdaf(struct camss_video *vid,
+		      struct v4l2_qcom_camss_pdaf_buf *buf);
 
 #endif

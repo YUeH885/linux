@@ -176,6 +176,9 @@ struct csid_device {
 	struct v4l2_mbus_framefmt saved_pix_fmt;
 	u16 pxl_hcrop_start;
 	u16 pxl_hcrop_end;
+	bool pdaf_enabled;
+	u8 pdaf_vc;
+	u8 pdaf_dt;
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *testgen_mode;
 	const struct csid_subdev_resources *res;
@@ -187,6 +190,7 @@ int msm_csid_set_port(struct media_pad *pad, bool enable, bool other_ports_activ
 int msm_csid_dual_setup(struct csid_device *master, struct csid_device *slave,
 			u16 left_end, u16 right_start, u16 right_end);
 void msm_csid_dual_cleanup(struct csid_device *master);
+void msm_csid_pdaf_setup(struct csid_device *csid, bool enable, u8 vc, u8 dt);
 
 /*
  * csid_find_code - Find a format code in an array using array index or format code

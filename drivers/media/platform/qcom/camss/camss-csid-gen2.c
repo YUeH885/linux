@@ -435,6 +435,54 @@ static void csid_configure_stream(struct csid_device *csid, u8 enable)
 		}
 }
 
+static void __csid_configure_pdaf_stream(struct csid_device *csid, u8 enable)
+{
+	const u8 port = 1;
+	u32 val;
+
+	if (!enable) {
+		writel(CSID_HALT_AT_FRAME_BOUNDARY,
+		       csid->base + CSID_RDI_CTRL(port));
+		if (readl_poll_timeout(csid->base + CSID_RDI_STATUS(port), val,
+				       val & CSID_PATH_HALTED, 100, 100000)) {
+			writel(CSID_HALT_IMMEDIATELY,
+			       csid->base + CSID_RDI_CTRL(port));
+			readl_poll_timeout(csid->base + CSID_RDI_STATUS(port),
+					   val, val & CSID_PATH_HALTED,
+					   100, 10000);
+		}
+		val = readl(csid->base + CSID_RDI_CFG0(port));
+		writel(val & ~BIT(RDI_CFG0_ENABLE),
+		       csid->base + CSID_RDI_CFG0(port));
+		return;
+	}
+
+	val = 1 << RDI_CFG0_BYTE_CNTR_EN;
+	val |= 1 << RDI_CFG0_FORMAT_MEASURE_EN;
+	val |= 1 << RDI_CFG0_TIMESTAMP_EN;
+	val |= DECODE_FORMAT_PAYLOAD_ONLY << RDI_CFG0_DECODE_FORMAT;
+	val |= (u32)csid->pdaf_dt << RDI_CFG0_DATA_TYPE;
+	val |= (u32)csid->pdaf_vc << RDI_CFG0_VIRTUAL_CHANNEL;
+	val |= (port & 0x03) << RDI_CFG0_DT_ID;
+	writel_relaxed(val, csid->base + CSID_RDI_CFG0(port));
+
+	writel_relaxed(2 << RDI_CFG1_TIMESTAMP_STB_SEL,
+		       csid->base + CSID_RDI_CFG1(port));
+	writel_relaxed(1, csid->base + CSID_RDI_FRM_DROP_PERIOD(port));
+	writel_relaxed(0, csid->base + CSID_RDI_FRM_DROP_PATTERN(port));
+	writel_relaxed(1, csid->base + CSID_RDI_IRQ_SUBSAMPLE_PERIOD(port));
+	writel_relaxed(0, csid->base + CSID_RDI_IRQ_SUBSAMPLE_PATTERN(port));
+	writel_relaxed(1, csid->base + CSID_RDI_RPP_PIX_DROP_PERIOD(port));
+	writel_relaxed(0, csid->base + CSID_RDI_RPP_PIX_DROP_PATTERN(port));
+	writel_relaxed(1, csid->base + CSID_RDI_RPP_LINE_DROP_PERIOD(port));
+	writel_relaxed(0, csid->base + CSID_RDI_RPP_LINE_DROP_PATTERN(port));
+	writel_relaxed(0, csid->base + CSID_RDI_CTRL(port));
+
+	val |= BIT(RDI_CFG0_ENABLE);
+	writel_relaxed(val, csid->base + CSID_RDI_CFG0(port));
+	__csid_ctrl_rdi(csid, 1, port);
+}
+
 static int csid_gen2_set_port(struct csid_device *csid, unsigned int port,
 			      bool enable, bool other_ports_active)
 {
@@ -452,6 +500,8 @@ static int csid_gen2_set_port(struct csid_device *csid, unsigned int port,
 			__csid_configure_rx(csid, &csid->phy, 0);
 		if (pixel) {
 			__csid_configure_pix_stream(csid, 1, port, 0);
+			if (csid->pdaf_enabled)
+				__csid_configure_pdaf_stream(csid, 1);
 		} else {
 			__csid_configure_rdi_stream(csid, 1, port, 0);
 			__csid_ctrl_rdi(csid, 1, port);
@@ -460,6 +510,9 @@ static int csid_gen2_set_port(struct csid_device *csid, unsigned int port,
 			__csid_configure_testgen(csid, 1, port, 0);
 		return 0;
 	}
+
+	if (pixel && csid->pdaf_enabled)
+		__csid_configure_pdaf_stream(csid, 0);
 
 	writel(CSID_HALT_AT_FRAME_BOUNDARY, csid->base + ctrl);
 	ret = readl_poll_timeout(csid->base + status, value,
@@ -511,7 +564,8 @@ static irqreturn_t csid_isr(int irq, void *dev)
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
 		u32 status, clear;
 
-		if (!(csid->phy.en_vc & BIT(i)))
+		if (!(csid->phy.en_vc & BIT(i)) &&
+		    !(i == 1 && csid->pdaf_enabled))
 			continue;
 
 		if (!csid_is_lite(csid) && i == MSM_CSID_MAX_SRC_STREAMS - 1) {

@@ -7,6 +7,7 @@
 #include <linux/uaccess.h>
 
 #include "camss.h"
+#include "camss-csid.h"
 #include "camss-vfe.h"
 #include "camss-vfe-17x-stats.h"
 
@@ -54,6 +55,13 @@
 #define VFE_BUS_WM_STRIDE(n)			(0x2228 + (n) * 0x100)
 #define VFE_BUS_WM_FRAME_INC(n)			(0x2258 + (n) * 0x100)
 #define VFE_BUS_WM_BURST_LIMIT(n)		(0x225c + (n) * 0x100)
+#define VFE_BUS_IRQ_MASK_1			(0x2048)
+#define VFE_BUS_IRQ_CLEAR_1			(0x2054)
+#define VFE_BUS_IRQ_CLEAR_GLOBAL		(0x2068)
+
+#define VFE_PDAF_WM				(1)
+#define VFE_PDAF_SLOTS				(4)
+#define VFE_PDAF_MAX_FRAME_BYTES		(6U * 1024U * 1024U)
 
 enum vfe_stats_type {
 	VFE_STATS_AWB,
@@ -392,6 +400,7 @@ void vfe_17x_stats_stop(struct vfe_line *line)
 	writel_relaxed(0, vfe->base + VFE_MODULE_STATS_EN);
 	for (i = 0; i < VFE_STATS_COUNT; i++)
 		writel(0, vfe->base + VFE_BUS_WM_CFG(vfe_stats_output[i].wm));
+	vfe_17x_pdaf_stop(line);
 }
 
 void vfe_17x_stats_isr(struct vfe_device *vfe, u32 status)
@@ -523,5 +532,256 @@ long vfe_17x_get_stats(struct camss_video *vid,
 	spin_unlock_irqrestore(&stats->lock, flags);
 out:
 	mutex_unlock(&stats->read_lock);
+	return ret;
+}
+
+struct vfe_17x_pdaf {
+	void *cpu;
+	dma_addr_t dma;
+	size_t slot_size;
+	u32 width;
+	u32 height;
+	u32 stride;
+	u32 frame_bytes;
+	struct mutex read_lock;
+	spinlock_t lock;
+	u8 queued[2];
+	u8 snapshot;
+	u8 reader;
+	bool reading;
+	bool ready;
+	u32 sequence;
+	u64 timestamp;
+};
+
+static void vfe_pdaf_wm_queue(struct vfe_device *vfe, dma_addr_t addr,
+			      u32 frame_bytes)
+{
+	writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_PDAF_WM));
+	writel_relaxed(frame_bytes, vfe->base + VFE_BUS_WM_FRAME_INC(VFE_PDAF_WM));
+	vfe->res->hw_ops->reg_update(vfe, VFE_LINE_RDI1);
+}
+
+int vfe_17x_pdaf_start(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	const struct v4l2_qcom_camss_pdaf_cfg *cfg = &line->ife_pdaf;
+	struct vfe_17x_pdaf *pdaf = line->pdaf;
+	unsigned long flags;
+	size_t frame_bytes, slot_size;
+	u32 mask;
+
+	if (!cfg->enable || line->dual_ife || vfe->res->is_lite)
+		return 0;
+
+	if (vfe->line[VFE_LINE_RDI1].output.state != VFE_OUTPUT_OFF)
+		return -EBUSY;
+
+	frame_bytes = (size_t)cfg->stride * cfg->height;
+	if (!frame_bytes || frame_bytes > VFE_PDAF_MAX_FRAME_BYTES)
+		return -EINVAL;
+	slot_size = PAGE_ALIGN(frame_bytes + PAGE_SIZE);
+
+	if (!pdaf) {
+		pdaf = devm_kzalloc(vfe->camss->dev, sizeof(*pdaf), GFP_KERNEL);
+		if (!pdaf)
+			return -ENOMEM;
+		spin_lock_init(&pdaf->lock);
+		mutex_init(&pdaf->read_lock);
+		smp_store_release(&line->pdaf, pdaf);
+	}
+
+	mutex_lock(&pdaf->read_lock);
+	if (pdaf->slot_size != slot_size) {
+		if (pdaf->cpu) {
+			dma_free_coherent(vfe->camss->dev,
+					  VFE_PDAF_SLOTS * pdaf->slot_size,
+					  pdaf->cpu, pdaf->dma);
+			pdaf->cpu = NULL;
+			pdaf->dma = 0;
+			pdaf->slot_size = 0;
+		}
+		pdaf->cpu = dma_alloc_coherent(vfe->camss->dev,
+					       VFE_PDAF_SLOTS * slot_size,
+					       &pdaf->dma, GFP_KERNEL);
+		if (!pdaf->cpu) {
+			mutex_unlock(&pdaf->read_lock);
+			return -ENOMEM;
+		}
+		pdaf->slot_size = slot_size;
+	}
+
+	spin_lock_irqsave(&pdaf->lock, flags);
+	pdaf->width = cfg->width;
+	pdaf->height = cfg->height;
+	pdaf->stride = cfg->stride;
+	pdaf->frame_bytes = frame_bytes;
+	pdaf->queued[0] = 0;
+	pdaf->queued[1] = 1;
+	pdaf->snapshot = 0;
+	pdaf->ready = false;
+	pdaf->sequence = 0;
+	pdaf->timestamp = 0;
+	spin_unlock_irqrestore(&pdaf->lock, flags);
+	mutex_unlock(&pdaf->read_lock);
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	vfe->res->hw_ops->reg_update_clear(vfe, VFE_LINE_RDI1);
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_PDAF_WM));
+	writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(VFE_PDAF_WM));
+	writel_relaxed(0xff01, vfe->base + VFE_BUS_WM_BUFFER_WIDTH_CFG(VFE_PDAF_WM));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_BUFFER_HEIGHT_CFG(VFE_PDAF_WM));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_PACKER_CFG(VFE_PDAF_WM));
+	writel_relaxed(0xff01, vfe->base + VFE_BUS_WM_STRIDE(VFE_PDAF_WM));
+	writel_relaxed(0x3, vfe->base + VFE_BUS_WM_CFG(VFE_PDAF_WM));
+
+	vfe_pdaf_wm_queue(vfe, pdaf->dma, pdaf->frame_bytes);
+	vfe_pdaf_wm_queue(vfe, pdaf->dma + pdaf->slot_size, pdaf->frame_bytes);
+
+	writel_relaxed(BIT(VFE_PDAF_WM), vfe->base + VFE_BUS_IRQ_CLEAR_1);
+	writel(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
+	mask = readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK_1);
+	writel(mask | BIT(VFE_PDAF_WM), vfe->base + VFE_BUS_IRQ_MASK_1);
+
+	line->pdaf_active = true;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	if (vfe->id < vfe->camss->res->csid_num)
+		msm_csid_pdaf_setup(&vfe->camss->csid[vfe->id], true,
+				    cfg->vc, cfg->dt);
+
+	return 0;
+}
+
+void vfe_17x_pdaf_stop(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	u32 mask;
+
+	lockdep_assert_held(&vfe->output_lock);
+	if (!line->pdaf_active)
+		return;
+
+	mask = readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK_1);
+	writel(mask & ~BIT(VFE_PDAF_WM), vfe->base + VFE_BUS_IRQ_MASK_1);
+	writel(0, vfe->base + VFE_BUS_WM_CFG(VFE_PDAF_WM));
+	readl(vfe->base + VFE_BUS_WM_CFG(VFE_PDAF_WM));
+	vfe->res->hw_ops->reg_update_clear(vfe, VFE_LINE_RDI1);
+	line->pdaf_active = false;
+}
+
+void vfe_17x_pdaf_cleanup(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	struct vfe_17x_pdaf *pdaf = smp_load_acquire(&line->pdaf);
+
+	if (!pdaf)
+		return;
+
+	mutex_lock(&pdaf->read_lock);
+	if (pdaf->cpu) {
+		dma_free_coherent(vfe->camss->dev,
+				  VFE_PDAF_SLOTS * pdaf->slot_size,
+				  pdaf->cpu, pdaf->dma);
+		pdaf->cpu = NULL;
+		pdaf->dma = 0;
+		pdaf->slot_size = 0;
+	}
+	mutex_unlock(&pdaf->read_lock);
+}
+
+void vfe_17x_pdaf_isr(struct vfe_device *vfe)
+{
+	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
+	struct vfe_17x_pdaf *pdaf;
+	unsigned long flags, busy;
+	unsigned int next;
+	u8 completed;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	pdaf = line->pdaf;
+	if (!pdaf || !line->pdaf_active || line->output.state != VFE_OUTPUT_ON) {
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		return;
+	}
+
+	spin_lock(&pdaf->lock);
+	dma_rmb();
+	completed = pdaf->queued[0];
+	pdaf->queued[0] = pdaf->queued[1];
+	pdaf->snapshot = completed;
+	pdaf->sequence = line->output.sof_sequence ?
+			 line->output.sof_sequence - 1 : 0;
+	pdaf->timestamp = ktime_get_ns();
+	pdaf->ready = true;
+
+	busy = BIT(pdaf->queued[0]) | BIT(pdaf->snapshot);
+	if (pdaf->reading)
+		busy |= BIT(pdaf->reader);
+	next = ffz(busy);
+	if (next >= VFE_PDAF_SLOTS)
+		next = pdaf->queued[0];
+	pdaf->queued[1] = next;
+	vfe_pdaf_wm_queue(vfe, pdaf->dma + next * pdaf->slot_size,
+			  pdaf->frame_bytes);
+	spin_unlock(&pdaf->lock);
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+}
+
+long vfe_17x_get_pdaf(struct camss_video *vid,
+		      struct v4l2_qcom_camss_pdaf_buf *req)
+{
+	struct vfe_line *line = container_of(vid, struct vfe_line, video_out);
+	struct vfe_17x_pdaf *pdaf = smp_load_acquire(&line->pdaf);
+	unsigned long flags;
+	u32 copy_lines, offset_y, stride, height;
+	long ret = 0;
+
+	if (line->id != VFE_LINE_PIX || !pdaf)
+		return -ENODATA;
+	if (req->version != V4L2_QCOM_CAMSS_PDAF_VERSION || req->reserved)
+		return -EINVAL;
+	if (!req->data)
+		return -EINVAL;
+
+	if (mutex_lock_interruptible(&pdaf->read_lock))
+		return -ERESTARTSYS;
+
+	spin_lock_irqsave(&pdaf->lock, flags);
+	if (!pdaf->ready || !pdaf->cpu) {
+		ret = -EAGAIN;
+	} else {
+		height = pdaf->height;
+		stride = pdaf->stride;
+		offset_y = req->offset_y;
+		copy_lines = req->copy_lines ? req->copy_lines : height;
+		if (offset_y >= height || copy_lines > height - offset_y) {
+			ret = -ERANGE;
+		} else {
+			pdaf->reader = pdaf->snapshot;
+			pdaf->reading = true;
+			req->sequence = pdaf->sequence;
+			req->timestamp = pdaf->timestamp;
+			req->width = pdaf->width;
+			req->height = height;
+			req->stride = stride;
+			req->copy_lines = copy_lines;
+		}
+	}
+	spin_unlock_irqrestore(&pdaf->lock, flags);
+	if (ret)
+		goto out;
+
+	if (copy_to_user(u64_to_user_ptr(req->data),
+			 pdaf->cpu + pdaf->reader * pdaf->slot_size +
+			 (size_t)offset_y * stride,
+			 (size_t)copy_lines * stride))
+		ret = -EFAULT;
+
+	spin_lock_irqsave(&pdaf->lock, flags);
+	pdaf->reading = false;
+	spin_unlock_irqrestore(&pdaf->lock, flags);
+out:
+	mutex_unlock(&pdaf->read_lock);
 	return ret;
 }

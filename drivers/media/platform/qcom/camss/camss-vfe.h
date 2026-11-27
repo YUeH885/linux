@@ -109,6 +109,7 @@ struct vfe_line {
 	struct v4l2_qcom_camss_bpc ife_bpc;
 	struct v4l2_qcom_camss_abf ife_abf;
 	struct v4l2_qcom_camss_gtm ife_gtm;
+	struct v4l2_qcom_camss_pdaf_cfg ife_pdaf;
 	bool ife_ctrls_initialized;
 	struct camss_buffer dummy_buffer[2];
 	struct list_head sensor_pending;
@@ -135,6 +136,8 @@ struct vfe_line {
 	u16 dual_right_in_x;
 	u16 dual_right_in_w;
 	struct vfe_17x_stats *stats;
+	struct vfe_17x_pdaf *pdaf;
+	bool pdaf_active;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
 	struct v4l2_mbus_framefmt fmt[MSM_VFE_PADS_NUM];
 	struct v4l2_rect compose;

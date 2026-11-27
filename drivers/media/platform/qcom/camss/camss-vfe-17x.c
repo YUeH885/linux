@@ -2041,6 +2041,41 @@ static const struct v4l2_ctrl_ops vfe_gtm_ctrl_ops = {
 	.s_ctrl = vfe_gtm_s_ctrl,
 };
 
+static int vfe_pdaf_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	const struct v4l2_qcom_camss_pdaf_cfg *cfg = ctrl->p_new.p;
+	size_t min_stride;
+
+	if (cfg->enable > 1 || cfg->reserved)
+		return -EINVAL;
+	if (!cfg->enable)
+		return 0;
+	if (cfg->vc < 1 || cfg->vc > 3 || !cfg->dt || cfg->dt > 0x3f)
+		return -ERANGE;
+	if (!cfg->width || !cfg->height || cfg->width > 8192 || cfg->height > 4096)
+		return -ERANGE;
+	min_stride = ALIGN(((size_t)cfg->width * 10 + 7) / 8, 16);
+	if (cfg->stride < min_stride || (cfg->stride & 15) ||
+	    (size_t)cfg->stride * cfg->height > 6U * 1024U * 1024U)
+		return -ERANGE;
+	return 0;
+}
+
+static int vfe_pdaf_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct vfe_line *line = ctrl->priv;
+
+	mutex_lock(&line->ife_config_lock);
+	line->ife_pdaf = *(const struct v4l2_qcom_camss_pdaf_cfg *)ctrl->p_new.p;
+	mutex_unlock(&line->ife_config_lock);
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops vfe_pdaf_ctrl_ops = {
+	.try_ctrl = vfe_pdaf_try_ctrl,
+	.s_ctrl = vfe_pdaf_s_ctrl,
+};
+
 int vfe_ife_ctrl_init(struct vfe_line *line)
 {
 	static const struct v4l2_ctrl_config config_ctrl = {
@@ -2147,6 +2182,19 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
 			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
 	};
+	static const struct v4l2_ctrl_config pdaf_ctrl = {
+		.ops = &vfe_pdaf_ctrl_ops,
+		.id = V4L2_CID_QCOM_CAMSS_PDAF,
+		.name = "IFE sideband PDAF capture",
+		.type = V4L2_CTRL_TYPE_U8,
+		.min = 0,
+		.max = U8_MAX,
+		.step = 1,
+		.dims = { sizeof(struct v4l2_qcom_camss_pdaf_cfg) },
+		.elem_size = sizeof(u8),
+		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
+			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
+	};
 	struct v4l2_qcom_camss_ife_config *tuning = &line->ife_config;
 	struct v4l2_ctrl *control, *demux_control;
 	int ret;
@@ -2158,6 +2206,7 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	memset(&line->ife_bpc, 0, sizeof(line->ife_bpc));
 	memset(&line->ife_abf, 0, sizeof(line->ife_abf));
 	memset(&line->ife_gtm, 0, sizeof(line->ife_gtm));
+	memset(&line->ife_pdaf, 0, sizeof(line->ife_pdaf));
 	line->ife_demux.gain_q10[0] = 1024;
 	line->ife_demux.gain_q10[1] = 1024;
 	line->ife_demux.gain_q10[2] = 1024;
@@ -2177,7 +2226,7 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	       sizeof(tuning->ccm_q7));
 	memcpy(tuning->gamma, vfe_ife_default_gamma, sizeof(tuning->gamma));
 
-	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 8);
+	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 9);
 	if (ret)
 		return ret;
 	control = v4l2_ctrl_new_custom(&line->ife_ctrls, &config_ctrl, line);
@@ -2188,6 +2237,7 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	v4l2_ctrl_new_custom(&line->ife_ctrls, &bpc_ctrl, line);
 	v4l2_ctrl_new_custom(&line->ife_ctrls, &abf_ctrl, line);
 	v4l2_ctrl_new_custom(&line->ife_ctrls, &gtm_ctrl, line);
+	v4l2_ctrl_new_custom(&line->ife_ctrls, &pdaf_ctrl, line);
 	ret = line->ife_ctrls.error;
 	if (!ret)
 		ret = v4l2_ctrl_s_ctrl_compound(control, V4L2_CTRL_TYPE_U8, tuning);
@@ -2207,6 +2257,7 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 
 void vfe_ife_ctrl_cleanup(struct vfe_line *line)
 {
+	vfe_17x_pdaf_cleanup(line);
 	if (!line->ife_ctrls_initialized)
 		return;
 
@@ -2273,6 +2324,7 @@ static int vfe_pix_program(struct vfe_line *line)
 	struct v4l2_qcom_camss_ife_crop crop = vfe_pix_default_crop(line);
 	u32 val;
 	int pattern;
+	int ret;
 
 	pattern = vfe_pix_pattern(sink->code);
 	if (pattern < 0) {
@@ -2299,7 +2351,7 @@ static int vfe_pix_program(struct vfe_line *line)
 		val |= LENS_ABF_EN;
 	}
 	if (line->ife_lsc.enable) {
-		int ret = vfe_ife_write_lsc(line, &line->ife_lsc, true);
+		ret = vfe_ife_write_lsc(line, &line->ife_lsc, true);
 
 		if (ret) {
 			mutex_unlock(&line->ife_config_lock);
@@ -2332,7 +2384,10 @@ static int vfe_pix_program(struct vfe_line *line)
 				       sink->height);
 	mutex_unlock(&line->ife_config_lock);
 
-	return vfe_17x_stats_start(line);
+	ret = vfe_17x_stats_start(line);
+	if (ret)
+		return ret;
+	return vfe_17x_pdaf_start(line);
 }
 
 static void vfe_global_reset(struct vfe_device *vfe)
@@ -2728,8 +2783,13 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 			vfe->isr_ops.sof(vfe, i);
 
 	for (wm = 0; wm < (vfe->res->is_lite ? 4 : 3); wm++)
-		if (vfe_bus_status[1] & STATUS1_WM_CLIENT_BUF_DONE(wm))
-			vfe->isr_ops.wm_done(vfe, wm);
+		if (vfe_bus_status[1] & STATUS1_WM_CLIENT_BUF_DONE(wm)) {
+			if (!vfe->res->is_lite && wm == 1 &&
+			    vfe->line[VFE_LINE_PIX].pdaf_active)
+				vfe_17x_pdaf_isr(vfe);
+			else
+				vfe->isr_ops.wm_done(vfe, wm);
+		}
 
 	if (!vfe->res->is_lite)
 		vfe_17x_stats_isr(vfe, vfe_bus_status[1]);
@@ -2895,8 +2955,12 @@ static void vfe_dual_release(struct vfe_line *line)
 
 static int vfe_disable_17x(struct vfe_line *line)
 {
+	struct vfe_device *vfe = to_vfe(line);
 	int ret = vfe_disable(line);
 
+	if (line->id == VFE_LINE_PIX && !vfe->res->is_lite &&
+	    vfe->id < vfe->camss->res->csid_num)
+		msm_csid_pdaf_setup(&vfe->camss->csid[vfe->id], false, 0, 0);
 	if (line->id == VFE_LINE_PIX && line->dual_ife)
 		vfe_dual_release(line);
 
@@ -2965,12 +3029,17 @@ static int vfe_enable(struct vfe_line *line)
 	return 0;
 
 error_enable_output:
-	if (line->id == VFE_LINE_PIX && !vfe->res->is_lite && line->stats) {
+	if (line->id == VFE_LINE_PIX && !vfe->res->is_lite) {
 		unsigned long flags;
 
-		spin_lock_irqsave(&vfe->output_lock, flags);
-		vfe_17x_stats_stop(line);
-		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		if (line->stats) {
+			spin_lock_irqsave(&vfe->output_lock, flags);
+			vfe_17x_stats_stop(line);
+			spin_unlock_irqrestore(&vfe->output_lock, flags);
+		}
+		if (vfe->id < vfe->camss->res->csid_num)
+			msm_csid_pdaf_setup(&vfe->camss->csid[vfe->id],
+					    false, 0, 0);
 	}
 	if (line->id == VFE_LINE_PIX && line->dual_ife)
 		vfe_dual_release(line);
@@ -3198,6 +3267,7 @@ static const struct camss_video_ops vfe_video_ops_170 = {
 	.queue_buffer = vfe_queue_request_buffer,
 	.flush_buffers = vfe_flush_buffers,
 	.get_stats = vfe_17x_get_stats,
+	.get_pdaf = vfe_17x_get_pdaf,
 	.get_frame_sequence = vfe_get_frame_sequence,
 	.get_request_sequence = vfe_get_request_sequence,
 	.prepare_request = vfe_prepare_request,

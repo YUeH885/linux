@@ -33,6 +33,25 @@
 #define V4L2_CID_QCOM_CAMSS_GTM \
 	(V4L2_CID_USER_QCOM_CAMSS_BASE + 7)
 
+#define V4L2_CID_QCOM_CAMSS_PDAF \
+	(V4L2_CID_USER_QCOM_CAMSS_BASE + 8)
+
+/*
+ * Sideband CSI-2 virtual-channel PDAF capture via CSID RDI1 + VFE WM1
+ * co-located with VFE_LINE_PIX. Set enable = 1 before starting the PIX
+ * stream to capture sensor VC/DT phase-detection packets (e.g. IMX363
+ * Dual-PD VC=1 DT=0x2b or S5K3M5 sparse tail-mode PDAF VC=1 DT=0x30).
+ */
+struct v4l2_qcom_camss_pdaf_cfg {
+	__u32 enable;
+	__u8 vc;
+	__u8 dt;
+	__u16 reserved;
+	__u32 width;
+	__u32 height;
+	__u32 stride;
+};
+
 #define V4L2_QCOM_CAMSS_LSC_H_NUM	17
 #define V4L2_QCOM_CAMSS_LSC_V_NUM	13
 #define V4L2_QCOM_CAMSS_LSC_POINTS \
@@ -266,5 +285,28 @@ struct v4l2_qcom_camss_stats {
 /* Earliest input target for the next queued request; zero while stopped. */
 #define VIDIOC_QCOM_CAMSS_GET_REQUEST_SEQUENCE \
 	_IOR('V', BASE_VIDIOC_PRIVATE + 2, __u32)
+
+#define V4L2_QCOM_CAMSS_PDAF_VERSION	1
+
+/*
+ * Latest sideband PDAF frame captured on CSID RDI1 / VFE WM1.
+ * Callers may request a vertical slice [offset_y, offset_y + copy_lines)
+ * to copy only the active AF ROI band into userspace.
+ */
+struct v4l2_qcom_camss_pdaf_buf {
+	__u32 version;
+	__u32 sequence;
+	__aligned_u64 timestamp;
+	__u32 width;
+	__u32 height;
+	__u32 stride;
+	__u32 offset_y;
+	__u32 copy_lines;
+	__u32 reserved;
+	__aligned_u64 data;
+};
+
+#define VIDIOC_QCOM_CAMSS_GET_PDAF \
+	_IOWR('V', BASE_VIDIOC_PRIVATE + 3, struct v4l2_qcom_camss_pdaf_buf)
 
 #endif /* _UAPI_LINUX_QCOM_CAMSS_H */

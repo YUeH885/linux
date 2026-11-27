@@ -915,6 +915,16 @@ void msm_csid_dual_cleanup(struct csid_device *master)
 	slave->dual_slave = false;
 }
 
+void msm_csid_pdaf_setup(struct csid_device *csid, bool enable, u8 vc, u8 dt)
+{
+	if (!csid)
+		return;
+
+	csid->pdaf_enabled = enable;
+	csid->pdaf_vc = enable ? vc : 0;
+	csid->pdaf_dt = enable ? dt : 0;
+}
+
 static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct csid_device *csid = v4l2_get_subdevdata(sd);

@@ -53,6 +53,8 @@ struct camss_video_ops {
 			     enum vb2_buffer_state state);
 	long (*get_stats)(struct camss_video *vid,
 			  struct v4l2_qcom_camss_stats *stats);
+	long (*get_pdaf)(struct camss_video *vid,
+			 struct v4l2_qcom_camss_pdaf_buf *pdaf);
 	long (*get_frame_sequence)(struct camss_video *vid, u32 *sequence);
 	long (*get_request_sequence)(struct camss_video *vid, u32 *sequence);
 	int (*prepare_request)(struct camss_video *vid, struct camss_buffer *buf);
