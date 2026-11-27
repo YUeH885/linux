@@ -284,11 +284,29 @@ static void iris_check_num_queued_internal_buffers(struct iris_inst *inst, u32 p
 int iris_close(struct file *filp)
 {
 	struct iris_inst *inst = iris_get_inst(filp);
+	struct v4l2_m2m_ctx *m2m_ctx = inst->m2m_ctx;
 
-	v4l2_ctrl_handler_free(&inst->ctrl_handler);
-	v4l2_m2m_ctx_release(inst->m2m_ctx);
+	if (m2m_ctx) {
+		vb2_queue_release(v4l2_m2m_get_dst_vq(m2m_ctx));
+		vb2_queue_release(v4l2_m2m_get_src_vq(m2m_ctx));
+		/*
+		 * Block IRQ handlers from touching m2m_ctx before freeing it, while
+		 * keeping inst->m2m_ctx valid for v4l2_m2m_ctx_release()->job_abort().
+		 */
+		mutex_lock(&inst->lock);
+		mutex_lock(&inst->core->lock);
+		inst->closing = true;
+		mutex_unlock(&inst->core->lock);
+		mutex_unlock(&inst->lock);
+		v4l2_m2m_ctx_release(m2m_ctx);
+	}
 	v4l2_m2m_release(inst->m2m_dev);
 	mutex_lock(&inst->lock);
+	mutex_lock(&inst->core->lock);
+	inst->closing = true;
+	inst->m2m_ctx = NULL;
+	inst->fh.m2m_ctx = NULL;
+	mutex_unlock(&inst->core->lock);
 	iris_session_close(inst);
 	iris_inst_change_state(inst, IRIS_INST_DEINIT);
 	iris_v4l2_fh_deinit(inst, filp);
@@ -298,6 +316,7 @@ int iris_close(struct file *filp)
 	iris_check_num_queued_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 	iris_remove_session(inst);
 	mutex_unlock(&inst->lock);
+	v4l2_ctrl_handler_free(&inst->ctrl_handler);
 	iris_inst_put(inst);
 
 	return 0;

@@ -238,6 +238,9 @@ static void iris_hfi_gen1_event_seq_changed(struct iris_inst *inst,
 	u32 num_properties_changed;
 	int ret;
 
+	if (inst->closing || !inst->m2m_ctx)
+		return;
+
 	switch (pkt->event_data1) {
 	case HFI_EVENT_DATA_SEQUENCE_CHANGED_SUFFICIENT_BUF_RESOURCES:
 	case HFI_EVENT_DATA_SEQUENCE_CHANGED_INSUFFICIENT_BUF_RESOURCES:
@@ -459,7 +462,7 @@ static void iris_hfi_gen1_session_etb_done(struct iris_inst *inst, void *packet)
 	bool found = false;
 
 	/* EOS buffer sent via drain won't be in v4l2 buffer list */
-	if (pkt->packet_buffer == 0xdeadb000)
+	if (pkt->packet_buffer == 0xdeadb000 || inst->closing || !m2m_ctx)
 		return;
 
 	v4l2_m2m_for_each_src_buf_safe(m2m_ctx, m2m_buffer, n) {
@@ -546,6 +549,9 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 	u64 timestamp_us = 0;
 	bool found = false;
 	u32 flags = 0;
+
+	if (inst->closing || !m2m_ctx)
+		return;
 
 	if (inst->domain == DECODER && uncom_pkt->shdr.hdr.size < sizeof(*uncom_pkt))
 		goto error;

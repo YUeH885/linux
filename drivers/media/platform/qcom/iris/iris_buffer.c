@@ -876,6 +876,9 @@ void iris_vb2_queue_error(struct iris_inst *inst)
 	struct v4l2_m2m_ctx *m2m_ctx = inst->m2m_ctx;
 	struct vb2_queue *q;
 
+	if (inst->closing || !m2m_ctx)
+		return;
+
 	q = v4l2_m2m_get_src_vq(m2m_ctx);
 	vb2_queue_error(q);
 	q = v4l2_m2m_get_dst_vq(m2m_ctx);
@@ -920,6 +923,9 @@ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)
 	struct vb2_v4l2_buffer *vbuf;
 	struct vb2_buffer *vb2;
 	u32 type, state;
+
+	if (inst->closing || !m2m_ctx)
+		return -EINVAL;
 
 	switch (buf->type) {
 	case BUF_INPUT:
