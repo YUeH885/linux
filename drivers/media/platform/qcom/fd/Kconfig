@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_QCOM_FD
+	tristate "Qualcomm Titan 175 Hardware Face Detection (FD501) driver"
+	depends on ARCH_QCOM || COMPILE_TEST
+	depends on COMMON_CLK && INTERCONNECT
+	help
+	  Support for the Qualcomm SM8150 Titan 175 hardware Face Detection
+	  accelerator (FD501), exposing /dev/qcom-fd for hardware-accelerated
+	  face detection on grayscale luma frames.
