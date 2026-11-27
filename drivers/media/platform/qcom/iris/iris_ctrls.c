@@ -484,7 +484,7 @@ void iris_session_init_caps(struct iris_core *core)
 			.hfi_id = HFI_PROPERTY_PARAM_WORK_ROUTE,
 			.set = iris_set_pipe,
 		};
-		/* The SM8150 raw encoder formats carry eight-bit samples. */
+		/* HFI 4xx uses a 0..51 HEVC QP range for both input bit depths. */
 		core->inst_fw_caps_enc[MIN_FRAME_QP_HEVC].max = MAX_QP;
 		core->inst_fw_caps_enc[MAX_FRAME_QP_HEVC].max = MAX_QP;
 		core->inst_fw_caps_enc[MAX_FRAME_QP_HEVC].value = MAX_QP;
