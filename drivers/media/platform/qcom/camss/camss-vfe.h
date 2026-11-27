@@ -107,6 +107,8 @@ struct vfe_line {
 	struct v4l2_qcom_camss_lsc ife_lsc;
 	struct v4l2_qcom_camss_demux ife_demux;
 	struct v4l2_qcom_camss_bpc ife_bpc;
+	struct v4l2_qcom_camss_abf ife_abf;
+	struct v4l2_qcom_camss_gtm ife_gtm;
 	bool ife_ctrls_initialized;
 	struct camss_buffer dummy_buffer[2];
 	struct list_head sensor_pending;
@@ -119,8 +121,11 @@ struct vfe_line {
 	size_t dummy_size;
 	u8 ife_gamma_bank;
 	u8 ife_lsc_bank;
+	u8 ife_abf_bank;
+	u8 ife_gtm_bank;
 	u16 ife_wb_gain_q7[4];
 	u32 ife_lens_en;
+	u32 ife_color_en;
 	bool pix_done_pending;
 	struct vfe_17x_stats *stats;
 	struct media_pad pads[MSM_VFE_PADS_NUM];

@@ -27,6 +27,12 @@
 #define V4L2_CID_QCOM_CAMSS_BPC \
 	(V4L2_CID_USER_QCOM_CAMSS_BASE + 5)
 
+#define V4L2_CID_QCOM_CAMSS_ABF \
+	(V4L2_CID_USER_QCOM_CAMSS_BASE + 6)
+
+#define V4L2_CID_QCOM_CAMSS_GTM \
+	(V4L2_CID_USER_QCOM_CAMSS_BASE + 7)
+
 #define V4L2_QCOM_CAMSS_LSC_H_NUM	17
 #define V4L2_QCOM_CAMSS_LSC_V_NUM	13
 #define V4L2_QCOM_CAMSS_LSC_POINTS \
@@ -70,6 +76,53 @@ struct v4l2_qcom_camss_bpc {
 	__u16 bcc_offset;
 	__u16 offset_hot;
 	__u16 offset_cold;
+};
+
+#define V4L2_QCOM_CAMSS_ABF_LUT_ENTRIES		65
+
+#define V4L2_QCOM_CAMSS_ABF_ENABLE_FILTER	(1U << 0)
+#define V4L2_QCOM_CAMSS_ABF_ENABLE_SINGLE_BPC	(1U << 1)
+#define V4L2_QCOM_CAMSS_ABF_ENABLE_CROSS_PLANE	(1U << 2)
+
+/*
+ * Adaptive Bayer Filter (ABF 3.4) bilateral denoise configuration for
+ * VFE_LINE_PIX. noise_std_lut holds 65 9-bit noise standard deviation
+ * thresholds ([1..511]); the driver derives the 64 hardware base/delta DMI
+ * entries and frame-center radial distance registers automatically.
+ */
+struct v4l2_qcom_camss_abf {
+	__u32 enable;
+	__u8 act_th_r;
+	__u8 act_th_g;
+	__u8 act_th_b;
+	__u8 blk_pix_r;
+	__u8 blk_pix_g;
+	__u8 blk_pix_b;
+	__u8 bpc_max_shft;
+	__u8 bpc_min_shft;
+	__u16 bpc_offset;
+	__u16 reserved;
+	__u8 spatial_wt[4];
+	__u8 curve_offset[8];
+	__u8 edge_softness[4];
+	__u16 noise_preserve_lo;
+	__u16 noise_preserve_span;
+	__u16 noise_preserve_base[2];
+	__u16 noise_std_lut[V4L2_QCOM_CAMSS_ABF_LUT_ENTRIES];
+	__u16 reserved1;
+};
+
+#define V4L2_QCOM_CAMSS_GTM_ENTRIES		65
+
+/*
+ * Global Tone Mapping (GTM 1.0) curve for VFE_LINE_PIX. y_ratio_q12 holds 65
+ * 18-bit unsigned Q12 tone gains ([0..262143], 4096 = 1.0x) sampled at the
+ * 65 hardware luminance knots in [0..16383]; the driver derives the 64
+ * 64-bit base/slope DMI entries automatically.
+ */
+struct v4l2_qcom_camss_gtm {
+	__u32 enable;
+	__u32 y_ratio_q12[V4L2_QCOM_CAMSS_GTM_ENTRIES];
 };
 
 /*

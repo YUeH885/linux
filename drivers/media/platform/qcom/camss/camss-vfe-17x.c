@@ -89,12 +89,14 @@
 #define VFE_MODULE_LENS_EN			(0x040)
 #define		LENS_DEMUX_EN			BIT(2)
 #define		LENS_BPC_EN			BIT(6)
+#define		LENS_ABF_EN			BIT(7)
 #define		LENS_ROLLOFF_EN			BIT(8)
 #define		LENS_DEMOSAIC_EN		BIT(10)
 #define		LENS_BLS_EN			BIT(11)
 
 #define VFE_MODULE_COLOR_EN			(0x048)
 #define		COLOR_CC_EN			BIT(1)
+#define		COLOR_GTM_EN			BIT(2)
 #define		COLOR_GAMMA_EN			BIT(3)
 #define VFE_MODULE_COLOR_CGC_OVERRIDE		(0x034)
 
@@ -131,6 +133,8 @@
 #define VFE_DEMUX_CFG				(0x560)
 
 #define VFE_BPC_CFG_0				(0x5c4)
+#define VFE_ABF_CFG_0				(0x5e8)
+#define VFE_ABF_CFG_1				(0x5f4)
 #define VFE_ROLLOFF_CFG_0			(0x6bc)
 
 #define VFE_DEMO_CFG				(0x6f8)
@@ -148,6 +152,7 @@
 #define VFE_COLOR_CORRECT_OFFSET_0		(0x784)
 #define VFE_COLOR_CORRECT_COEFF_Q		(0x790)
 
+#define VFE_GTM_CFG				(0x794)
 #define VFE_RGB_LUT_CFG			(0x798)
 
 #define VFE_DMI_CFG				(0x0c24)
@@ -155,10 +160,12 @@
 #define VFE_DMI_DATA_HI			(0x0c2c)
 #define VFE_DMI_DATA_LO			(0x0c30)
 #define		DMI_CFG_AUTO_INCREMENT		(0x100)
+#define		DMI_ABF_BANK_0			(0x0c)
 #define		DMI_LSC_BANK_0_T0		(0x0e)
 #define		DMI_LSC_BANK_0_T1		(0x0f)
 #define		DMI_LSC_BANK_1_T0		(0x12)
 #define		DMI_LSC_BANK_1_T1		(0x13)
+#define		DMI_GTM_BANK_0			(0x18)
 #define		DMI_GAMMA_G_BANK_0		(0x1a)
 #define		DMI_GAMMA_B_BANK_0		(0x1c)
 #define		DMI_GAMMA_R_BANK_0		(0x1e)
@@ -457,6 +464,139 @@ static void vfe_ife_write_bpc(struct vfe_line *line,
 		       (bpc->fmax & 0x7f),
 		       vfe->base + VFE_BPC_CFG_0 + 24);
 	writel_relaxed(0, vfe->base + VFE_BPC_CFG_0 + 28);
+}
+
+static void vfe_ife_write_abf(struct vfe_line *line,
+			      const struct v4l2_qcom_camss_abf *abf,
+			      bool reset_bank)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	const struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+	s32 dx = clamp_t(s32, -(s32)(sink->width / 2), -3120, 3110);
+	s32 dy = clamp_t(s32, -(s32)(sink->height / 2), -8192, -5);
+	u32 dist_sq = min_t(u32, (u32)(dx * dx + dy * dy), 0x04948900U);
+	u32 r_sq_shift = 0;
+	u8 bank = reset_bank ? 0 : line->ife_abf_bank ^ 1;
+	u32 cgc_override, cfg0;
+	unsigned int i;
+
+	while ((dist_sq >> r_sq_shift) >= 0x2000 && r_sq_shift < 14)
+		r_sq_shift++;
+
+	/* ABF LUT RAM needs its clock even before the lens module is enabled. */
+	cgc_override = readl_relaxed(vfe->base + VFE_MODULE_LENS_CGC_OVERRIDE);
+	writel(~0U, vfe->base + VFE_MODULE_LENS_CGC_OVERRIDE);
+
+	writel_relaxed(DMI_CFG_AUTO_INCREMENT | (DMI_ABF_BANK_0 + bank),
+		       vfe->base + VFE_DMI_CFG);
+	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+	for (i = 0; i < V4L2_QCOM_CAMSS_ABF_LUT_ENTRIES - 1; i++) {
+		u32 base = clamp_t(u32, abf->noise_std_lut[i], 1, 511);
+		u32 next = clamp_t(u32, abf->noise_std_lut[i + 1], 1, 511);
+		u32 delta = min_t(u32, abs((int)next - (int)base), 511);
+
+		writel_relaxed((delta << 9) | base, vfe->base + VFE_DMI_DATA_LO);
+	}
+	writel_relaxed(0, vfe->base + VFE_DMI_CFG);
+	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+
+	cfg0 = ((abf->enable & V4L2_QCOM_CAMSS_ABF_ENABLE_FILTER) ? BIT(0) : 0) |
+	       ((u32)bank << 1) |
+	       ((abf->enable & V4L2_QCOM_CAMSS_ABF_ENABLE_SINGLE_BPC) ? BIT(2) : 0) |
+	       ((abf->enable & V4L2_QCOM_CAMSS_ABF_ENABLE_CROSS_PLANE) ? BIT(3) : 0) |
+	       ((u32)(abf->bpc_max_shft & 0x7) << 4) |
+	       ((u32)(abf->bpc_min_shft & 0x7) << 8) |
+	       ((u32)(abf->act_th_r & 0x7) << 12) |
+	       ((u32)(abf->act_th_g & 0x3) << 16) |
+	       ((u32)(abf->act_th_b & 0x3) << 18) |
+	       ((u32)(abf->blk_pix_r & 0x7) << 20) |
+	       ((u32)(abf->blk_pix_g & 0x3) << 24) |
+	       ((u32)(abf->blk_pix_b & 0x3) << 26);
+	writel_relaxed(cfg0, vfe->base + VFE_ABF_CFG_0);
+
+	for (i = 0; i < 4; i++)
+		writel_relaxed(abf->spatial_wt[i] & 0x7f,
+			       vfe->base + VFE_ABF_CFG_1 + 4 * i);
+	writel_relaxed((((u32)(dy & 0x3fff)) << 16) | ((u32)(dx & 0x3fff)),
+		       vfe->base + VFE_ABF_CFG_1 + 0x10);
+	writel_relaxed(dist_sq & 0x0fffffffU,
+		       vfe->base + VFE_ABF_CFG_1 + 0x14);
+	writel_relaxed(0x0fff0fffU, vfe->base + VFE_ABF_CFG_1 + 0x18);
+	writel_relaxed(0x0fff0fffU, vfe->base + VFE_ABF_CFG_1 + 0x1c);
+	for (i = 0; i < 8; i++)
+		writel_relaxed(abf->curve_offset[i],
+			       vfe->base + VFE_ABF_CFG_1 + 0x20 + 4 * i);
+	writel_relaxed(r_sq_shift & 0xf,
+		       vfe->base + VFE_ABF_CFG_1 + 0x40);
+	writel_relaxed(((u32)(abf->bpc_offset & 0xfff) << 16) |
+		       ((u32)(abf->edge_softness[1] & 0x3f) << 8) |
+		       (abf->edge_softness[0] & 0x3f),
+		       vfe->base + VFE_ABF_CFG_1 + 0x44);
+	writel_relaxed(((u32)min_t(u16, line->ife_config.black_level, 0xfff) << 8) |
+		       ((u32)(abf->edge_softness[2] & 0xf) << 4) |
+		       (abf->edge_softness[3] & 0xf),
+		       vfe->base + VFE_ABF_CFG_1 + 0x48);
+	writel_relaxed(((u32)(abf->noise_preserve_span & 0x3ff) << 16) |
+		       (abf->noise_preserve_lo & 0x3ff),
+		       vfe->base + VFE_ABF_CFG_1 + 0x4c);
+	writel_relaxed(abf->noise_preserve_base[0] & 0x1ff,
+		       vfe->base + VFE_ABF_CFG_1 + 0x50);
+	writel_relaxed(abf->noise_preserve_base[1] & 0x1ff,
+		       vfe->base + VFE_ABF_CFG_1 + 0x54);
+
+	wmb();
+	writel(cgc_override, vfe->base + VFE_MODULE_LENS_CGC_OVERRIDE);
+	line->ife_abf_bank = bank;
+}
+
+static void vfe_ife_write_gtm(struct vfe_line *line,
+			      const struct v4l2_qcom_camss_gtm *gtm,
+			      bool reset_bank)
+{
+	static const u16 x_knots[V4L2_QCOM_CAMSS_GTM_ENTRIES] = {
+		0, 2, 4, 7, 13, 21, 31, 45,
+		62, 83, 107, 137, 169, 201, 233, 265,
+		297, 329, 361, 428, 463, 499, 538, 578,
+		621, 665, 712, 760, 811, 863, 919, 976,
+		1037, 1098, 1164, 1230, 1300, 1371, 1447, 1524,
+		1605, 1687, 1774, 1861, 1954, 2047, 2146, 2245,
+		2456, 2679, 2915, 3429, 3999, 4630, 5323, 6083,
+		6911, 7812, 8787, 9840, 10975, 12193, 13499, 14894,
+		16383
+	};
+	struct vfe_device *vfe = to_vfe(line);
+	u8 bank = reset_bank ? 0 : line->ife_gtm_bank ^ 1;
+	u32 cgc_override;
+	unsigned int i;
+
+	/* GTM RAM needs its clock even before the color module is enabled. */
+	cgc_override = readl_relaxed(vfe->base + VFE_MODULE_COLOR_CGC_OVERRIDE);
+	writel(~0U, vfe->base + VFE_MODULE_COLOR_CGC_OVERRIDE);
+
+	writel_relaxed(DMI_CFG_AUTO_INCREMENT | (DMI_GTM_BANK_0 + bank),
+		       vfe->base + VFE_DMI_CFG);
+	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+	for (i = 0; i < V4L2_QCOM_CAMSS_GTM_ENTRIES - 1; i++) {
+		u32 base = gtm->y_ratio_q12[i] & 0x3ffff;
+		s32 dx = x_knots[i + 1] - x_knots[i];
+		s32 diff = ((s32)gtm->y_ratio_q12[i + 1] -
+			    (s32)gtm->y_ratio_q12[i]) * 256;
+		s32 slope = (diff >= 0) ? ((diff + dx / 2) / dx) :
+					  ((diff - dx / 2) / dx);
+
+		slope = clamp(slope, -0x2000000, 0x1ffffff);
+		/* DATA_LO commits the 64-bit GTM entry and advances DMI_ADDR. */
+		writel_relaxed((u32)slope & 0x3ffffff,
+			       vfe->base + VFE_DMI_DATA_HI);
+		writel_relaxed(base, vfe->base + VFE_DMI_DATA_LO);
+	}
+	writel_relaxed(0, vfe->base + VFE_DMI_CFG);
+	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+
+	writel_relaxed(bank, vfe->base + VFE_GTM_CFG);
+	wmb();
+	writel(cgc_override, vfe->base + VFE_MODULE_COLOR_CGC_OVERRIDE);
+	line->ife_gtm_bank = bank;
 }
 
 static int vfe_ife_write_lsc(struct vfe_line *line,
@@ -1563,6 +1703,115 @@ static const struct v4l2_ctrl_ops vfe_bpc_ctrl_ops = {
 	.s_ctrl = vfe_bpc_s_ctrl,
 };
 
+static int vfe_abf_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	const struct v4l2_qcom_camss_abf *abf = ctrl->p_new.p;
+	unsigned int i;
+
+	if (abf->enable & ~0x7U)
+		return -EINVAL;
+	if (!abf->enable)
+		return 0;
+
+	if (abf->act_th_r > 7 || abf->act_th_g > 3 || abf->act_th_b > 3 ||
+	    abf->blk_pix_r > 7 || abf->blk_pix_g > 3 || abf->blk_pix_b > 3 ||
+	    abf->bpc_max_shft > 7 || abf->bpc_min_shft > 7 ||
+	    abf->bpc_offset > 0xfff ||
+	    abf->edge_softness[0] > 63 || abf->edge_softness[1] > 63 ||
+	    abf->edge_softness[2] > 15 || abf->edge_softness[3] > 15 ||
+	    abf->noise_preserve_lo > 0x3ff || abf->noise_preserve_span > 0x3ff ||
+	    abf->noise_preserve_base[0] > 256 || abf->noise_preserve_base[1] > 256)
+		return -ERANGE;
+
+	for (i = 0; i < ARRAY_SIZE(abf->spatial_wt); i++)
+		if (abf->spatial_wt[i] > 64)
+			return -ERANGE;
+	for (i = 0; i < ARRAY_SIZE(abf->noise_std_lut); i++)
+		if (abf->noise_std_lut[i] < 1 || abf->noise_std_lut[i] > 511)
+			return -ERANGE;
+
+	return 0;
+}
+
+static int vfe_abf_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct vfe_line *line = ctrl->priv;
+	struct vfe_device *vfe = to_vfe(line);
+	const struct v4l2_qcom_camss_abf *req = ctrl->p_new.p;
+	unsigned long irq_flags;
+
+	mutex_lock(&line->ife_config_lock);
+	spin_lock_irqsave(&vfe->output_lock, irq_flags);
+	line->ife_abf = *req;
+	if (line->output.state == VFE_OUTPUT_ON) {
+		if (req->enable) {
+			vfe_ife_write_abf(line, req, false);
+			line->ife_lens_en |= LENS_ABF_EN;
+		} else {
+			line->ife_lens_en &= ~LENS_ABF_EN;
+		}
+		writel_relaxed(line->ife_lens_en, vfe->base + VFE_MODULE_LENS_EN);
+		vfe->res->hw_ops->reg_update(vfe, VFE_LINE_PIX);
+	}
+	spin_unlock_irqrestore(&vfe->output_lock, irq_flags);
+	mutex_unlock(&line->ife_config_lock);
+
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops vfe_abf_ctrl_ops = {
+	.try_ctrl = vfe_abf_try_ctrl,
+	.s_ctrl = vfe_abf_s_ctrl,
+};
+
+static int vfe_gtm_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	const struct v4l2_qcom_camss_gtm *gtm = ctrl->p_new.p;
+	unsigned int i;
+
+	if (gtm->enable > 1)
+		return -EINVAL;
+	if (!gtm->enable)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(gtm->y_ratio_q12); i++)
+		if (gtm->y_ratio_q12[i] > 0x3ffffU)
+			return -ERANGE;
+
+	return 0;
+}
+
+static int vfe_gtm_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct vfe_line *line = ctrl->priv;
+	struct vfe_device *vfe = to_vfe(line);
+	const struct v4l2_qcom_camss_gtm *req = ctrl->p_new.p;
+	unsigned long irq_flags;
+
+	mutex_lock(&line->ife_config_lock);
+	spin_lock_irqsave(&vfe->output_lock, irq_flags);
+	line->ife_gtm = *req;
+	if (line->output.state == VFE_OUTPUT_ON) {
+		if (req->enable) {
+			vfe_ife_write_gtm(line, req, false);
+			line->ife_color_en |= COLOR_GTM_EN;
+		} else {
+			line->ife_color_en &= ~COLOR_GTM_EN;
+		}
+		writel_relaxed(line->ife_color_en, vfe->base + VFE_MODULE_COLOR_EN);
+		vfe->res->hw_ops->reg_update(vfe, VFE_LINE_PIX);
+	}
+	spin_unlock_irqrestore(&vfe->output_lock, irq_flags);
+	mutex_unlock(&line->ife_config_lock);
+
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops vfe_gtm_ctrl_ops = {
+	.try_ctrl = vfe_gtm_try_ctrl,
+	.s_ctrl = vfe_gtm_s_ctrl,
+};
+
 int vfe_ife_ctrl_init(struct vfe_line *line)
 {
 	static const struct v4l2_ctrl_config config_ctrl = {
@@ -1643,6 +1892,32 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
 			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
 	};
+	static const struct v4l2_ctrl_config abf_ctrl = {
+		.ops = &vfe_abf_ctrl_ops,
+		.id = V4L2_CID_QCOM_CAMSS_ABF,
+		.name = "IFE adaptive Bayer filter",
+		.type = V4L2_CTRL_TYPE_U8,
+		.min = 0,
+		.max = U8_MAX,
+		.step = 1,
+		.dims = { sizeof(struct v4l2_qcom_camss_abf) },
+		.elem_size = sizeof(u8),
+		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
+			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
+	};
+	static const struct v4l2_ctrl_config gtm_ctrl = {
+		.ops = &vfe_gtm_ctrl_ops,
+		.id = V4L2_CID_QCOM_CAMSS_GTM,
+		.name = "IFE global tone mapping",
+		.type = V4L2_CTRL_TYPE_U8,
+		.min = 0,
+		.max = U8_MAX,
+		.step = 1,
+		.dims = { sizeof(struct v4l2_qcom_camss_gtm) },
+		.elem_size = sizeof(u8),
+		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
+			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
+	};
 	struct v4l2_qcom_camss_ife_config *tuning = &line->ife_config;
 	struct v4l2_ctrl *control, *demux_control;
 	int ret;
@@ -1652,6 +1927,8 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	memset(&line->bf_roi, 0, sizeof(line->bf_roi));
 	memset(&line->ife_lsc, 0, sizeof(line->ife_lsc));
 	memset(&line->ife_bpc, 0, sizeof(line->ife_bpc));
+	memset(&line->ife_abf, 0, sizeof(line->ife_abf));
+	memset(&line->ife_gtm, 0, sizeof(line->ife_gtm));
 	line->ife_demux.gain_q10[0] = 1024;
 	line->ife_demux.gain_q10[1] = 1024;
 	line->ife_demux.gain_q10[2] = 1024;
@@ -1671,7 +1948,7 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	       sizeof(tuning->ccm_q7));
 	memcpy(tuning->gamma, vfe_ife_default_gamma, sizeof(tuning->gamma));
 
-	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 6);
+	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 8);
 	if (ret)
 		return ret;
 	control = v4l2_ctrl_new_custom(&line->ife_ctrls, &config_ctrl, line);
@@ -1680,6 +1957,8 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	v4l2_ctrl_new_custom(&line->ife_ctrls, &lsc_ctrl, line);
 	demux_control = v4l2_ctrl_new_custom(&line->ife_ctrls, &demux_ctrl, line);
 	v4l2_ctrl_new_custom(&line->ife_ctrls, &bpc_ctrl, line);
+	v4l2_ctrl_new_custom(&line->ife_ctrls, &abf_ctrl, line);
+	v4l2_ctrl_new_custom(&line->ife_ctrls, &gtm_ctrl, line);
 	ret = line->ife_ctrls.error;
 	if (!ret)
 		ret = v4l2_ctrl_s_ctrl_compound(control, V4L2_CTRL_TYPE_U8, tuning);
@@ -1762,6 +2041,10 @@ static int vfe_pix_program(struct vfe_line *line)
 		vfe_ife_write_bpc(line, &line->ife_bpc);
 		val |= LENS_BPC_EN;
 	}
+	if (line->ife_abf.enable) {
+		vfe_ife_write_abf(line, &line->ife_abf, true);
+		val |= LENS_ABF_EN;
+	}
 	if (line->ife_lsc.enable) {
 		int ret = vfe_ife_write_lsc(line, &line->ife_lsc, true);
 
@@ -1772,6 +2055,12 @@ static int vfe_pix_program(struct vfe_line *line)
 		val |= LENS_ROLLOFF_EN;
 	}
 	line->ife_lens_en = val;
+
+	line->ife_color_en = COLOR_CC_EN | COLOR_GAMMA_EN;
+	if (line->ife_gtm.enable) {
+		vfe_ife_write_gtm(line, &line->ife_gtm, true);
+		line->ife_color_en |= COLOR_GTM_EN;
+	}
 
 	writel_relaxed(0x100, vfe->base + VFE_DEMO_CFG);
 	writel_relaxed(0x00008000, vfe->base + VFE_DEMO_INTERP_COEFF_CFG);
@@ -1789,8 +2078,7 @@ static int vfe_pix_program(struct vfe_line *line)
 	writel_relaxed(val, vfe->base + VFE_FULL_OUT_C_CROP_RND_CLAMP_CFG);
 
 	writel_relaxed(line->ife_lens_en, vfe->base + VFE_MODULE_LENS_EN);
-	writel_relaxed(COLOR_CC_EN | COLOR_GAMMA_EN,
-		       vfe->base + VFE_MODULE_COLOR_EN);
+	writel_relaxed(line->ife_color_en, vfe->base + VFE_MODULE_COLOR_EN);
 	val = ZOOM_CST_EN | ZOOM_SCALE_VID_EN | ZOOM_CROP_VID_EN;
 	writel_relaxed(val, vfe->base + VFE_MODULE_ZOOM_EN);
 
