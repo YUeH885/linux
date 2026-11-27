@@ -3461,6 +3461,7 @@ static struct gdsc usb30_prim_gdsc = {
 	.gdscr = 0xf004,
 	.pd = {
 		.name = "usb30_prim_gdsc",
+		.flags = GENPD_FLAG_ACTIVE_WAKEUP,
 	},
 	.pwrsts = PWRSTS_OFF_ON,
 	.flags = POLL_CFG_GDSCR,
@@ -3470,6 +3471,7 @@ static struct gdsc usb30_sec_gdsc = {
 	.gdscr = 0x10004,
 	.pd = {
 		.name = "usb30_sec_gdsc",
+		.flags = GENPD_FLAG_ACTIVE_WAKEUP,
 	},
 	.pwrsts = PWRSTS_OFF_ON,
 	.flags = POLL_CFG_GDSCR,
