@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/i2c/infineon,irs2381c.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Infineon REAL3 IRS2381C 3D Time-of-Flight Image Sensor
+
+description:
+  The Infineon REAL3 IRS2381C is an HQVGA (224x172) 3D Time-of-Flight (ToF)
+  image sensor that outputs raw depth and amplitude data over a two-lane
+  MIPI CSI-2 interface.
+
+maintainers:
+  - Linux Media Mailing List <linux-media@vger.kernel.org>
+
+allOf:
+  - $ref: /schemas/media/video-interface-devices.yaml#
+
+properties:
+  compatible:
+    const: infineon,irs2381c
+
+  reg:
+    maxItems: 1
+
+  clocks:
+    description: Sensor input clock (typically 24 MHz).
+    maxItems: 1
+
+  reset-gpios:
+    description: Active low GPIO connected to the hardware reset pin.
+    maxItems: 1
+
+  vdda-supply:
+    description: Sensor analogue / illumination power supply (3.3 volts).
+
+  vddd-supply:
+    description: Sensor digital core power supply (3.3 volts).
+
+  vddio-supply:
+    description: Sensor digital I/O power supply (1.8 volts).
+
+  power-domains:
+    maxItems: 1
+
+  orientation: true
+  rotation: true
+
+  port:
+    $ref: /schemas/graph.yaml#/$defs/port-base
+    additionalProperties: false
+
+    properties:
+      endpoint:
+        $ref: /schemas/media/video-interfaces.yaml#
+        unevaluatedProperties: false
+
+        properties:
+          data-lanes:
+            items:
+              - const: 1
+              - const: 2
+
+        required:
+          - link-frequencies
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - reset-gpios
+  - vdda-supply
+  - vddd-supply
+  - vddio-supply
+  - port
+
+unevaluatedProperties: false
+
+examples:
+  - |
+      #include <dt-bindings/gpio/gpio.h>
+
+      i2c {
+          #address-cells = <1>;
+          #size-cells = <0>;
+
+          camera@3d {
+              compatible = "infineon,irs2381c";
+              reg = <0x3d>;
+              clocks = <&camcc 3>;
+              reset-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
+              vdda-supply = <&camera_tof_illu_vdd>;
+              vddd-supply = <&camera_tof_vdd>;
+              vddio-supply = <&vreg_l8c_1p8>;
+              orientation = <0>;
+              rotation = <270>;
+
+              port {
+                  irs2381c_ep: endpoint {
+                      link-frequencies = /bits/ 64 <400000000>;
+                      remote-endpoint = <&csiphy3_ep>;
+                      data-lanes = <1 2>;
+                  };
+              };
+          };
+      };
+...
