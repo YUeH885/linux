@@ -244,6 +244,12 @@ struct iris_core_power {
 struct iris_inst_power {
 	u64 min_freq;
 	u32 icc_bw;
+	u64 dcvs_window_start_ns;
+	u64 dcvs_busy_start_ns;
+	u64 dcvs_busy_ns;
+	u32 dcvs_boost;
+	u32 dcvs_low_windows;
+	bool dcvs_at_max;
 };
 
 struct icc_vote_data {

@@ -10,5 +10,7 @@ struct iris_inst;
 
 int iris_scale_power(struct iris_inst *inst);
 void iris_reset_inst_power(struct iris_inst *inst);
+void iris_power_mark_busy(struct iris_inst *inst);
+void iris_power_mark_idle(struct iris_inst *inst);
 
 #endif

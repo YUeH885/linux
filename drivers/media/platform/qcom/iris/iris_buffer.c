@@ -610,8 +610,11 @@ int iris_queue_buffer(struct iris_inst *inst, struct iris_buffer *buf)
 		return ret;
 
 	buf->attr &= ~BUF_ATTR_DEFERRED;
-	if (!(buf->attr & BUF_ATTR_BUFFER_DONE))
+	if (!(buf->attr & BUF_ATTR_BUFFER_DONE)) {
 		buf->attr |= BUF_ATTR_QUEUED;
+		if (inst->domain == DECODER && buf->type == BUF_INPUT)
+			iris_power_mark_busy(inst);
+	}
 
 	return 0;
 }
@@ -918,6 +921,18 @@ static void iris_get_ts_metadata(struct iris_inst *inst, u64 timestamp_ns,
 	vbuf->timecode = inst->tss[inst->metadata_idx].tc;
 }
 
+static void iris_check_decoder_idle(struct iris_inst *inst)
+{
+	struct v4l2_m2m_buffer *buffer, *n;
+
+	v4l2_m2m_for_each_src_buf_safe(inst->m2m_ctx, buffer, n) {
+		if (to_iris_buffer(&buffer->vb)->attr & BUF_ATTR_QUEUED)
+			return;
+	}
+
+	iris_power_mark_idle(inst);
+}
+
 int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)
 {
 	struct v4l2_m2m_ctx *m2m_ctx = inst->m2m_ctx;
@@ -942,6 +957,9 @@ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)
 	vbuf = iris_helper_find_buf(inst, type, buf->index);
 	if (!vbuf)
 		return -EINVAL;
+
+	if (inst->domain == DECODER && buf->type == BUF_INPUT)
+		iris_check_decoder_idle(inst);
 
 	vb2 = &vbuf->vb2_buf;
 

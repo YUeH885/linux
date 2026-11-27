@@ -133,16 +133,17 @@ static u64 iris_vpu1_calc_freq(struct iris_inst *inst, size_t data_size)
 	struct v4l2_pix_format_mplane *fmt = &inst->fmt_src->fmt.pix_mp;
 	u32 width = max(fmt->width, inst->crop.width);
 	u32 height = max(fmt->height, inst->crop.height);
-	u64 mbs = (u64)NUM_MBS_PER_FRAME(height, width) * inst->frame_rate;
+	u32 fps = max(inst->frame_rate, inst->operating_rate);
+	u64 mbs = (u64)NUM_MBS_PER_FRAME(height, width) * fps;
 	u64 vpp_freq = mbs * (inst->domain == ENCODER ? 675 : caps->mb_cycles_vpp);
 	u64 vsp_freq = mbs * caps->mb_cycles_vsp;
-	u64 fw_freq = (u64)inst->frame_rate * caps->mb_cycles_fw;
-	u64 fw_vpp_freq = (u64)inst->frame_rate * caps->mb_cycles_fw_vpp;
+	u64 fw_freq = (u64)fps * caps->mb_cycles_fw;
+	u64 fw_vpp_freq = (u64)fps * caps->mb_cycles_fw_vpp;
 	u32 pipes = inst->fw_caps[PIPE].value;
 
 	vpp_freq = div_u64(vpp_freq, pipes);
 	if (inst->domain == DECODER)
-		vsp_freq += (u64)inst->frame_rate * data_size * 16;
+		vsp_freq += (u64)fps * data_size * 16;
 	else
 		vsp_freq += (u64)inst->fw_caps[BITRATE].value * 2;
 	/* VPU5 budgets firmware work against the VPP load before pipeline overhead. */
@@ -154,6 +155,17 @@ static u64 iris_vpu1_calc_freq(struct iris_inst *inst, size_t data_size)
 			vpp_freq += div_u64(vpp_freq, 17);
 		else
 			vpp_freq += div_u64(vpp_freq * 14, 1000);
+	}
+
+	if (inst->domain == DECODER && inst->fw_caps[DISPLAY_DELAY_ENABLE].value) {
+		/*
+		 * Decode-order clients synchronize per picture, serializing
+		 * VSP/VPP and client export turnaround without 2-stage overlap.
+		 */
+		u64 serial_freq = vpp_freq + vsp_freq;
+
+		serial_freq += div_u64(serial_freq, 2);
+		return max(serial_freq, fw_freq);
 	}
 
 	return max3(vpp_freq, vsp_freq, fw_freq);
