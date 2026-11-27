@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/qcom,sm8150-iris-cp-nonpixel.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm SM8150 Iris protected non-pixel context
+
+maintainers:
+  - Dikshita Agarwal <dikshita.agarwal@oss.qualcomm.com>
+
+description: |
+  The Iris encoder uses a protected auto register programming buffer,
+  including for non-secure video sessions. This child of the Iris device
+  describes its separate SMMU context for CP non-pixel transactions.
+
+properties:
+  compatible:
+    const: qcom,sm8150-iris-cp-nonpixel
+
+  iommus:
+    maxItems: 1
+
+required:
+  - compatible
+  - iommus
+
+additionalProperties: false
+
+examples:
+  - |
+    cp-nonpixel {
+        compatible = "qcom,sm8150-iris-cp-nonpixel";
+        iommus = <&apps_smmu 0x2304 0x60>;
+    };
