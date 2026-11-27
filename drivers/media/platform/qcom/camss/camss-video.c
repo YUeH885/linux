@@ -712,6 +712,7 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 	struct v4l2_plane_pix_format *p;
 	u32 bytesperline[3] = { 0 };
 	u32 sizeimage[3] = { 0 };
+	u32 colorspace, ycbcr_enc, quantization, xfer_func;
 	u32 width, height;
 	u32 bpl, lines;
 	int i, j;
@@ -737,6 +738,11 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 					       fi->vsub[i].numerator * fi->vsub[i].denominator);
 		}
 
+	colorspace = pix_mp->colorspace;
+	ycbcr_enc = pix_mp->ycbcr_enc;
+	quantization = pix_mp->quantization;
+	xfer_func = pix_mp->xfer_func;
+
 	width = pix_mp->width;
 	height = pix_mp->height;
 
@@ -760,12 +766,42 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 	}
 
 	pix_mp->field = V4L2_FIELD_NONE;
-	pix_mp->colorspace = V4L2_COLORSPACE_SRGB;
 	pix_mp->flags = 0;
-	pix_mp->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(pix_mp->colorspace);
-	pix_mp->quantization = V4L2_MAP_QUANTIZATION_DEFAULT(true,
-					pix_mp->colorspace, pix_mp->ycbcr_enc);
-	pix_mp->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(pix_mp->colorspace);
+	if (video->line_based && fi->pixelformat == V4L2_PIX_FMT_NV12) {
+		switch (colorspace) {
+		case V4L2_COLORSPACE_REC709:
+		case V4L2_COLORSPACE_SMPTE170M:
+		case V4L2_COLORSPACE_SRGB:
+			pix_mp->colorspace = colorspace;
+			break;
+		default:
+			pix_mp->colorspace = V4L2_COLORSPACE_SRGB;
+			break;
+		}
+		if (ycbcr_enc == V4L2_YCBCR_ENC_601 ||
+		    ycbcr_enc == V4L2_YCBCR_ENC_709)
+			pix_mp->ycbcr_enc = ycbcr_enc;
+		else
+			pix_mp->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(pix_mp->colorspace);
+		if (quantization == V4L2_QUANTIZATION_FULL_RANGE ||
+		    quantization == V4L2_QUANTIZATION_LIM_RANGE)
+			pix_mp->quantization = quantization;
+		else if (pix_mp->colorspace == V4L2_COLORSPACE_SRGB)
+			pix_mp->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+		else
+			pix_mp->quantization = V4L2_QUANTIZATION_LIM_RANGE;
+		if (xfer_func == V4L2_XFER_FUNC_SRGB ||
+		    xfer_func == V4L2_XFER_FUNC_709)
+			pix_mp->xfer_func = xfer_func;
+		else
+			pix_mp->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(pix_mp->colorspace);
+	} else {
+		pix_mp->colorspace = V4L2_COLORSPACE_SRGB;
+		pix_mp->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(pix_mp->colorspace);
+		pix_mp->quantization = V4L2_MAP_QUANTIZATION_DEFAULT(true,
+						pix_mp->colorspace, pix_mp->ycbcr_enc);
+		pix_mp->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(pix_mp->colorspace);
+	}
 
 	if (video->line_based)
 		for (i = 0; i < pix_mp->num_planes; i++) {

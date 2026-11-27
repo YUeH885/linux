@@ -18,6 +18,60 @@
 #define V4L2_CID_QCOM_CAMSS_BF_ROI \
 	(V4L2_CID_USER_QCOM_CAMSS_BASE + 2)
 
+#define V4L2_CID_QCOM_CAMSS_LSC \
+	(V4L2_CID_USER_QCOM_CAMSS_BASE + 3)
+
+#define V4L2_CID_QCOM_CAMSS_DEMUX \
+	(V4L2_CID_USER_QCOM_CAMSS_BASE + 4)
+
+#define V4L2_CID_QCOM_CAMSS_BPC \
+	(V4L2_CID_USER_QCOM_CAMSS_BASE + 5)
+
+#define V4L2_QCOM_CAMSS_LSC_H_NUM	17
+#define V4L2_QCOM_CAMSS_LSC_V_NUM	13
+#define V4L2_QCOM_CAMSS_LSC_POINTS \
+	(V4L2_QCOM_CAMSS_LSC_H_NUM * V4L2_QCOM_CAMSS_LSC_V_NUM)
+
+/*
+ * Mesh rolloff (LSC 3.4) 17x13 lens shading table for VFE_LINE_PIX.
+ * Channel gains use unsigned 13-bit Q10 ([1024..8191], 1024 = 1.0x).
+ * Setting enable = 0 disables the hardware LSC block.
+ */
+struct v4l2_qcom_camss_lsc {
+	__u32 enable;
+	__u16 r_q10[V4L2_QCOM_CAMSS_LSC_POINTS];
+	__u16 gr_q10[V4L2_QCOM_CAMSS_LSC_POINTS];
+	__u16 gb_q10[V4L2_QCOM_CAMSS_LSC_POINTS];
+	__u16 b_q10[V4L2_QCOM_CAMSS_LSC_POINTS];
+};
+
+/*
+ * Demux 1.3 per-channel unsigned 15-bit Q10 gains ([0..32767], 1024 = 1.0x)
+ * in R, Gr, Gb, B order. Allows balancing Gr/Gb mismatch before WB12.
+ */
+struct v4l2_qcom_camss_demux {
+	__u16 gain_q10[4];
+};
+
+#define V4L2_QCOM_CAMSS_BPC_ENABLE_BPC		(1U << 0)
+#define V4L2_QCOM_CAMSS_BPC_ENABLE_BCC		(1U << 1)
+#define V4L2_QCOM_CAMSS_BPC_ENABLE_CROSSTALK	(1U << 2)
+
+/*
+ * Bad pixel and bad cluster correction (BPC/BCC 5.0) parameters for
+ * VFE_LINE_PIX. WB cross-channel ratios are derived automatically from the
+ * active WB12 gains.
+ */
+struct v4l2_qcom_camss_bpc {
+	__u32 enable;
+	__u16 sat_value;
+	__u16 fmax;
+	__u16 fmin;
+	__u16 bcc_offset;
+	__u16 offset_hot;
+	__u16 offset_cold;
+};
+
 /*
  * Active Bayer Focus statistics grid window for VFE_LINE_PIX in sink pad
  * sensor pixels. The 5x5 hardware BF grid divides [left, left + width) x
@@ -65,14 +119,14 @@ struct v4l2_qcom_camss_ife_crop {
 /*
  * IFE tuning payload for VFE_LINE_PIX. frame_sequence is the sequence number
  * of the next frame to receive the update; use zero while the line is stopped.
- * black_level and black_level_comp use the IFE 14-bit code domain; the
- * hardware encodes the compensation thresholds at 8-bit precision. White
- * balance gains use unsigned Q7, white balance offsets use signed 15-bit
+ * black_level and black_level_comp use the IFE 14-bit code domain ([0..16383]).
+ * White balance gains use unsigned Q7, white balance offsets use signed 15-bit
  * values. White balance arrays use R, Gr, Gb, B order; Gr and Gb must match
  * because WB12 has a single green channel. CCM coefficients use signed Q7
  * in RGB row-major order and CCM offsets use signed 11-bit RGB values.
- * Request controls require frame_sequence zero and both WHITE_BALANCE and
- * CCM flags. sensor_delay must be two for requests and zero for global tuning. A
+ * Request controls require frame_sequence zero, both WHITE_BALANCE and CCM
+ * flags, and may optionally include BLACK_LEVEL and GAMMA. sensor_delay must
+ * be two for requests and zero for global tuning. A
  * request contains one NV12 PIX buffer, this control and the sensor
  * exposure, analogue gain and vertical blanking control handler. The
  * completed request returns the applied input frame in frame_sequence and its
