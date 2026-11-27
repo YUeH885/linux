@@ -264,6 +264,7 @@ void iris_vpu_power_off(struct iris_core *core)
 	core->power_enabled = false;
 
 	iris_opp_set_rate(core->dev, 0);
+	iris_disable_llcc(core);
 	core->iris_platform_data->vpu_ops->power_off_hw(core);
 	core->iris_platform_data->vpu_ops->power_off_controller(core);
 	iris_unset_icc_bw(core);

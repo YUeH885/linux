@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include <linux/soc/qcom/llcc-qcom.h>
+
 #include "iris_core.h"
 #include "iris_ctrls.h"
 #include "iris_platform_common.h"
@@ -43,6 +45,11 @@ static const struct icc_info iris_icc_info_vpu1[] = {
 	{ "video-mem",  1000, 6533000 },
 };
 
+static const u32 sm8150_llcc_slices[] = {
+	LLCC_VIDSC0,
+	LLCC_VIDSC1,
+};
+
 static const char * const iris_clk_reset_table_vpu1[] = {
 	"bus", "core", "vcodec0", "vcodec1",
 };
@@ -65,6 +72,8 @@ const struct iris_platform_data sm8150_data = {
 	.vpu_ops = &iris_vpu1_ops,
 	.icc_tbl = iris_icc_info_vpu1,
 	.icc_tbl_size = ARRAY_SIZE(iris_icc_info_vpu1),
+	.llcc_slice_tbl = sm8150_llcc_slices,
+	.llcc_slice_tbl_size = ARRAY_SIZE(sm8150_llcc_slices),
 	.clk_rst_tbl = iris_clk_reset_table_vpu1,
 	.clk_rst_tbl_size = ARRAY_SIZE(iris_clk_reset_table_vpu1),
 	.bw_tbl_dec = sm8150_bw_table_dec,

@@ -2,6 +2,7 @@ config VIDEO_QCOM_IRIS
 	tristate "Qualcomm iris V4L2 decoder driver"
 	depends on VIDEO_DEV
 	depends on ARCH_QCOM || COMPILE_TEST
+	depends on QCOM_LLCC || QCOM_LLCC=n
 	depends on QCOM_SMEM || QCOM_SMEM=n
 	select V4L2_MEM2MEM_DEV
 	select QCOM_MDT_LOADER

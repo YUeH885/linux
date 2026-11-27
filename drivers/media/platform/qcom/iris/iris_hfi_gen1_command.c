@@ -3,6 +3,8 @@
  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
+#include <linux/hash.h>
+#include <linux/soc/qcom/llcc-qcom.h>
 #include <media/v4l2-mem2mem.h>
 
 #include "iris_buffer.h"
@@ -155,6 +157,41 @@ static int iris_hfi_gen1_sys_interframe_powercollapse(struct iris_core *core)
 	pkt->num_properties = 1;
 	pkt->data[0] = HFI_PROPERTY_SYS_CODEC_POWER_PLANE_CTRL;
 	hfi->enable = true;
+
+	ret = iris_hfi_queue_cmd_write_locked(core, pkt, pkt->hdr.size);
+	kfree(pkt);
+
+	return ret;
+}
+
+static int iris_hfi_gen1_sys_set_subcaches(struct iris_core *core)
+{
+	struct hfi_resource_syscache_info_type *sc_info;
+	struct hfi_sys_set_resource_pkt *pkt;
+	u32 pkt_size;
+	u32 i;
+	int ret;
+
+	if (!core->llcc_activated || !core->llcc_count)
+		return 0;
+
+	pkt_size = sizeof(*pkt) + sizeof(*sc_info) +
+		   core->llcc_count * sizeof(sc_info->rg_subcache_entries[0]);
+	pkt = kzalloc(pkt_size, GFP_KERNEL);
+	if (!pkt)
+		return -ENOMEM;
+
+	pkt->hdr.size = pkt_size;
+	pkt->hdr.pkt_type = HFI_CMD_SYS_SET_RESOURCE;
+	pkt->resource_handle = hash32_ptr(core->llcc_slices);
+	pkt->resource_type = HFI_RESOURCE_SYSCACHE;
+
+	sc_info = (struct hfi_resource_syscache_info_type *)pkt->resource_data;
+	sc_info->num_entries = core->llcc_count;
+	for (i = 0; i < core->llcc_count; i++) {
+		sc_info->rg_subcache_entries[i].sc_id = llcc_get_slice_id(core->llcc_slices[i]);
+		sc_info->rg_subcache_entries[i].size = llcc_get_slice_size(core->llcc_slices[i]);
+	}
 
 	ret = iris_hfi_queue_cmd_write_locked(core, pkt, pkt->hdr.size);
 	kfree(pkt);
@@ -1366,6 +1403,7 @@ static const struct iris_hfi_sys_ops iris_hfi_gen1_sys_ops = {
 	.sys_init = iris_hfi_gen1_sys_init,
 	.sys_image_version = iris_hfi_gen1_sys_image_version,
 	.sys_interframe_powercollapse = iris_hfi_gen1_sys_interframe_powercollapse,
+	.sys_set_subcaches = iris_hfi_gen1_sys_set_subcaches,
 	.sys_pc_prep = iris_hfi_gen1_sys_pc_prep,
 
 	.sys_hfi_response_handler = iris_hfi_gen1_response_handler,

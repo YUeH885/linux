@@ -321,6 +321,8 @@ struct iris_platform_data {
 	const struct vpu_ops *vpu_ops;
 	const struct icc_info *icc_tbl;
 	unsigned int icc_tbl_size;
+	const u32 *llcc_slice_tbl;
+	unsigned int llcc_slice_tbl_size;
 	const struct bw_info *bw_tbl_dec;
 	unsigned int bw_tbl_dec_size;
 	const char * const *pmdomain_tbl;

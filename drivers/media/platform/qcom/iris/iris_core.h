@@ -36,6 +36,7 @@ enum domain_type {
 
 struct qcom_ubwc_cfg_data;
 struct iris_cp_context;
+struct llcc_slice_desc;
 
 /**
  * struct iris_core - holds core parameters valid for all instances
@@ -52,6 +53,9 @@ struct iris_cp_context;
  * @iris_vb2_ops: iris vb2 ops
  * @icc_tbl: table of iris interconnects
  * @icc_count: count of iris interconnects
+ * @llcc_slices: table of iris LLCC slice descriptors
+ * @llcc_count: count of iris LLCC slices
+ * @llcc_activated: LLCC slices are currently activated
  * @pmdomain_tbl: table of iris power domains
  * @opp_pmdomain_tbl: table of opp power domains
  * @clock_tbl: table of iris clocks
@@ -102,6 +106,9 @@ struct iris_core {
 	const struct vb2_ops			*iris_vb2_ops;
 	struct icc_bulk_data			*icc_tbl;
 	u32					icc_count;
+	struct llcc_slice_desc			**llcc_slices;
+	u32					llcc_count;
+	bool					llcc_activated;
 	struct dev_pm_domain_list		*pmdomain_tbl;
 	struct dev_pm_domain_list		*opp_pmdomain_tbl;
 	struct clk_bulk_data			*clock_tbl;

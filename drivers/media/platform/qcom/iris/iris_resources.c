@@ -10,6 +10,7 @@
 #include <linux/pm_opp.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
+#include <linux/soc/qcom/llcc-qcom.h>
 
 #include "iris_core.h"
 #include "iris_resources.h"
@@ -137,4 +138,99 @@ int iris_disable_unprepare_clock(struct iris_core *core, enum platform_clk_type 
 	clk_disable_unprepare(clock);
 
 	return 0;
+}
+
+static void iris_llcc_release(void *data)
+{
+	struct iris_core *core = data;
+	u32 i;
+
+	iris_disable_llcc(core);
+
+	for (i = 0; i < core->llcc_count; i++) {
+		llcc_slice_putd(core->llcc_slices[i]);
+		core->llcc_slices[i] = NULL;
+	}
+	core->llcc_count = 0;
+}
+
+int iris_init_llcc(struct iris_core *core)
+{
+	const u32 *tbl = core->iris_platform_data->llcc_slice_tbl;
+	unsigned int count = core->iris_platform_data->llcc_slice_tbl_size;
+	struct llcc_slice_desc *desc;
+	unsigned int i;
+	int ret;
+
+	if (!tbl || !count)
+		return 0;
+
+	core->llcc_slices = devm_kcalloc(core->dev, count, sizeof(*core->llcc_slices),
+					 GFP_KERNEL);
+	if (!core->llcc_slices)
+		return -ENOMEM;
+
+	for (i = 0; i < count; i++) {
+		u32 uid = tbl[i];
+
+		desc = llcc_slice_getd(uid);
+		if (IS_ERR_OR_NULL(desc)) {
+			ret = desc ? PTR_ERR(desc) : -ENODEV;
+			while (i--) {
+				llcc_slice_putd(core->llcc_slices[i]);
+				core->llcc_slices[i] = NULL;
+			}
+			if (ret == -EPROBE_DEFER)
+				return -EPROBE_DEFER;
+
+			dev_warn(core->dev, "LLCC slice %u unavailable (%d); continuing without LLCC\n",
+				 uid, ret);
+			return 0;
+		}
+		core->llcc_slices[i] = desc;
+	}
+
+	core->llcc_count = count;
+
+	return devm_add_action_or_reset(core->dev, iris_llcc_release, core);
+}
+
+void iris_enable_llcc(struct iris_core *core)
+{
+	u32 i;
+	int ret;
+
+	if (!core->llcc_count || core->llcc_activated)
+		return;
+
+	for (i = 0; i < core->llcc_count; i++) {
+		ret = llcc_slice_activate(core->llcc_slices[i]);
+		if (ret) {
+			dev_warn(core->dev, "failed to activate LLCC slice %d: %d\n",
+				 llcc_get_slice_id(core->llcc_slices[i]), ret);
+			while (i--)
+				llcc_slice_deactivate(core->llcc_slices[i]);
+			return;
+		}
+	}
+
+	core->llcc_activated = true;
+}
+
+void iris_disable_llcc(struct iris_core *core)
+{
+	u32 i;
+	int ret;
+
+	if (!core->llcc_activated)
+		return;
+
+	for (i = core->llcc_count; i > 0; i--) {
+		ret = llcc_slice_deactivate(core->llcc_slices[i - 1]);
+		if (ret)
+			dev_warn(core->dev, "failed to deactivate LLCC slice %d: %d\n",
+				 llcc_get_slice_id(core->llcc_slices[i - 1]), ret);
+	}
+
+	core->llcc_activated = false;
 }

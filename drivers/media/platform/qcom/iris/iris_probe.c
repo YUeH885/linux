@@ -140,6 +140,10 @@ static int iris_init_resources(struct iris_core *core)
 	if (ret)
 		return ret;
 
+	ret = iris_init_llcc(core);
+	if (ret)
+		return ret;
+
 	ret = iris_init_power_domains(core);
 	if (ret)
 		return ret;

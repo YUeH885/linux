@@ -74,6 +74,16 @@ u32 iris_hfi_get_v4l2_matrix_coefficients(u32 hfi_coefficients)
 	}
 }
 
+static int iris_hfi_enable_subcaches(struct iris_core *core)
+{
+	iris_enable_llcc(core);
+
+	if (core->hfi_sys_ops->sys_set_subcaches)
+		return core->hfi_sys_ops->sys_set_subcaches(core);
+
+	return 0;
+}
+
 int iris_hfi_core_init(struct iris_core *core)
 {
 	const struct iris_hfi_sys_ops *hfi_ops = core->hfi_sys_ops;
@@ -87,7 +97,11 @@ int iris_hfi_core_init(struct iris_core *core)
 	if (ret)
 		return ret;
 
-	return hfi_ops->sys_interframe_powercollapse(core);
+	ret = hfi_ops->sys_interframe_powercollapse(core);
+	if (ret)
+		return ret;
+
+	return iris_hfi_enable_subcaches(core);
 }
 
 irqreturn_t iris_hfi_isr(int irq, void *data)
@@ -173,6 +187,10 @@ int iris_hfi_pm_resume(struct iris_core *core)
 		goto err_suspend_hw;
 
 	ret = ops->sys_interframe_powercollapse(core);
+	if (ret)
+		goto err_suspend_hw;
+
+	ret = iris_hfi_enable_subcaches(core);
 	if (ret)
 		goto err_suspend_hw;
 

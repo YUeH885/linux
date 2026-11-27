@@ -21,6 +21,7 @@
 
 #define HFI_CMD_SYS_INIT				0x10001
 #define HFI_CMD_SYS_PC_PREP				0x10002
+#define HFI_CMD_SYS_SET_RESOURCE			0x10003
 #define HFI_CMD_SYS_SET_PROPERTY			0x10005
 #define HFI_CMD_SYS_GET_PROPERTY			0x10006
 #define HFI_CMD_SYS_SESSION_INIT			0x10007
@@ -86,6 +87,8 @@
 #define HFI_PROPERTY_SYS_DEBUG_CONFIG			0x1
 #define HFI_PROPERTY_SYS_CODEC_POWER_PLANE_CTRL		0x5
 #define HFI_PROPERTY_SYS_IMAGE_VERSION			0x6
+
+#define HFI_RESOURCE_SYSCACHE				0x2
 
 #define HFI_PROPERTY_PARAM_FRAME_SIZE			0x1001
 #define HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_INFO	0x1002
@@ -227,6 +230,23 @@ struct hfi_session_set_property_pkt {
 
 struct hfi_sys_pc_prep_pkt {
 	struct hfi_pkt_hdr hdr;
+};
+
+struct hfi_resource_subcache_type {
+	u32 size;
+	u32 sc_id;
+};
+
+struct hfi_resource_syscache_info_type {
+	u32 num_entries;
+	struct hfi_resource_subcache_type rg_subcache_entries[];
+};
+
+struct hfi_sys_set_resource_pkt {
+	struct hfi_pkt_hdr hdr;
+	u32 resource_handle;
+	u32 resource_type;
+	u32 resource_data[];
 };
 
 struct hfi_session_set_buffers_pkt {
