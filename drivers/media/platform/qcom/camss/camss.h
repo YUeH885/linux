@@ -126,6 +126,8 @@ struct camss {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_async_notifier notifier;
 	struct media_device media_dev;
+	/* Serializes pipeline transitions across capture queues. */
+	struct mutex stream_lock;
 	struct device *dev;
 	struct csiphy_device *csiphy;
 	struct tpg_device *tpg;
