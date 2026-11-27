@@ -63,14 +63,17 @@ static int iris_set_interconnects(struct iris_inst *inst)
 
 static int iris_vote_interconnects(struct iris_inst *inst)
 {
+	const struct vpu_ops *vpu_ops = inst->core->iris_platform_data->vpu_ops;
 	struct icc_vote_data *vote_data = &inst->icc_data;
 	struct v4l2_format *inp_f = inst->fmt_src;
 
 	vote_data->width = inp_f->fmt.pix_mp.width;
 	vote_data->height = inp_f->fmt.pix_mp.height;
-	vote_data->fps = inst->frame_rate;
+	vote_data->fps = max(inst->frame_rate, inst->operating_rate);
 
-	inst->power.icc_bw = iris_calc_bw(inst, vote_data);
+	inst->power.icc_bw = vpu_ops->calc_bw ?
+			     vpu_ops->calc_bw(inst, vote_data) :
+			     iris_calc_bw(inst, vote_data);
 
 	return iris_set_interconnects(inst);
 }
@@ -106,17 +109,38 @@ static int iris_scale_clocks(struct iris_inst *inst)
 	size_t data_size = 0;
 
 	v4l2_m2m_for_each_src_buf_safe(m2m_ctx, buffer, n) {
+		struct vb2_buffer *vb = &buffer->vb.vb2_buf;
+		size_t vb_size = 0;
+
 		buf = to_iris_buffer(&buffer->vb);
-		data_size = max(data_size, buf->data_size);
+		if (vb->planes[0].bytesused > vb->planes[0].data_offset)
+			vb_size = vb->planes[0].bytesused - vb->planes[0].data_offset;
+		data_size = max3(data_size, buf->data_size, vb_size);
 	}
 
-	inst->max_input_data_size = data_size;
+	if (data_size)
+		inst->max_input_data_size = data_size;
 	if (!inst->max_input_data_size)
 		return 0;
 
 	inst->power.min_freq = vpu_ops->calc_freq(inst, inst->max_input_data_size);
 
 	return iris_set_clocks(inst);
+}
+
+void iris_reset_inst_power(struct iris_inst *inst)
+{
+	struct device *dev = inst->core->dev;
+
+	inst->max_input_data_size = 0;
+	inst->power.min_freq = 0;
+	inst->power.icc_bw = 0;
+
+	if (pm_runtime_get_if_active(dev) > 0) {
+		iris_set_clocks(inst);
+		iris_set_interconnects(inst);
+		pm_runtime_put_autosuspend(dev);
+	}
 }
 
 int iris_scale_power(struct iris_inst *inst)

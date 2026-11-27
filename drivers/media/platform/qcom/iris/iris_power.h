@@ -9,5 +9,6 @@
 struct iris_inst;
 
 int iris_scale_power(struct iris_inst *inst);
+void iris_reset_inst_power(struct iris_inst *inst);
 
 #endif

@@ -246,12 +246,16 @@ int iris_session_streamoff(struct iris_inst *inst, u32 plane)
 		goto error;
 
 	iris_flush_deferred_buffers(inst, buffer_type);
+	if (V4L2_TYPE_IS_OUTPUT(plane))
+		iris_reset_inst_power(inst);
 
 	return 0;
 
 error:
 	iris_kill_session(inst);
 	iris_flush_deferred_buffers(inst, buffer_type);
+	if (V4L2_TYPE_IS_OUTPUT(plane))
+		iris_reset_inst_power(inst);
 
 	return ret;
 }

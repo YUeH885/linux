@@ -29,6 +29,7 @@ struct vpu_ops {
 	int (*power_on_controller)(struct iris_core *core);
 	void (*program_bootup_registers)(struct iris_core *core);
 	u64 (*calc_freq)(struct iris_inst *inst, size_t data_size);
+	u32 (*calc_bw)(struct iris_inst *inst, struct icc_vote_data *data);
 	int (*set_hwmode)(struct iris_core *core);
 };
 

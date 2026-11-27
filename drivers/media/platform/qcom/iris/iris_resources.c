@@ -6,6 +6,7 @@
 #include <linux/clk.h>
 #include <linux/devfreq.h>
 #include <linux/interconnect.h>
+#include <linux/math.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_opp.h>
 #include <linux/pm_runtime.h>
@@ -33,13 +34,14 @@ int iris_set_icc_bw(struct iris_core *core, unsigned long icc_bw)
 			bw_kbps = clamp_t(typeof(bw_kbps), bw_kbps,
 					  icc_tbl[i].bw_min_kbps, icc_tbl[i].bw_max_kbps);
 
-			if (abs(bw_kbps - bw_prev) < BW_THRESHOLD && bw_prev)
+			if (abs_diff(bw_kbps, bw_prev) < BW_THRESHOLD && bw_prev)
 				return ret;
 
 			core->icc_tbl[i].avg_bw = bw_kbps;
 
 			core->power.icc_bw = bw_kbps;
-			break;
+		} else {
+			core->icc_tbl[i].avg_bw = icc_tbl[i].bw_min_kbps;
 		}
 	}
 
