@@ -433,6 +433,8 @@ const struct iris_firmware_data iris_hfi_gen1_data = {
 		sm8250_vdec_input_config_param_default,
 	.dec_input_config_params_default_size =
 		ARRAY_SIZE(sm8250_vdec_input_config_param_default),
+	.dec_output_config_params = sm8250_vdec_input_config_param_default,
+	.dec_output_config_params_size = ARRAY_SIZE(sm8250_vdec_input_config_param_default),
 	.enc_input_config_params = sm8250_venc_input_config_param,
 	.enc_input_config_params_size =
 		ARRAY_SIZE(sm8250_venc_input_config_param),
@@ -444,4 +446,40 @@ const struct iris_firmware_data iris_hfi_gen1_data = {
 
 	.enc_ip_int_buf_tbl = sm8250_enc_ip_int_buf_tbl,
 	.enc_ip_int_buf_tbl_size = ARRAY_SIZE(sm8250_enc_ip_int_buf_tbl),
+};
+
+static const u32 sm8150_dec_ip_int_buf_tbl[] = {
+	BUF_BIN, BUF_SCRATCH_1, BUF_SCRATCH_2, BUF_ARP,
+};
+
+static const u32 sm8150_enc_ip_int_buf_tbl[] = {
+	BUF_BIN, BUF_SCRATCH_1, BUF_SCRATCH_2, BUF_PERSIST, BUF_RECON,
+};
+
+static const u32 sm8150_vdec_output_config_params[] = {
+	/* HFI 4XX fixes raw formats and multistream selection before loading resources. */
+	HFI_PROPERTY_PARAM_FRAME_SIZE,
+	HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL,
+	HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL,
+};
+
+const struct iris_firmware_data iris_hfi_sm8150_data = {
+	.init_hfi_ops = iris_hfi_gen1_sys_ops_init,
+	.hfi_4xx = true,
+	.inst_fw_caps_dec = inst_fw_cap_sm8250_dec,
+	.inst_fw_caps_dec_size = ARRAY_SIZE(inst_fw_cap_sm8250_dec),
+	.inst_fw_caps_enc = inst_fw_cap_sm8250_enc,
+	.inst_fw_caps_enc_size = ARRAY_SIZE(inst_fw_cap_sm8250_enc),
+	.dec_input_config_params_default = sm8250_vdec_input_config_param_default,
+	.dec_input_config_params_default_size = ARRAY_SIZE(sm8250_vdec_input_config_param_default),
+	.dec_output_config_params = sm8150_vdec_output_config_params,
+	.dec_output_config_params_size = ARRAY_SIZE(sm8150_vdec_output_config_params),
+	.enc_input_config_params = sm8250_venc_input_config_param,
+	.enc_input_config_params_size = ARRAY_SIZE(sm8250_venc_input_config_param),
+	.dec_ip_int_buf_tbl = sm8150_dec_ip_int_buf_tbl,
+	.dec_ip_int_buf_tbl_size = ARRAY_SIZE(sm8150_dec_ip_int_buf_tbl),
+	.dec_op_int_buf_tbl = sm8250_dec_op_int_buf_tbl,
+	.dec_op_int_buf_tbl_size = ARRAY_SIZE(sm8250_dec_op_int_buf_tbl),
+	.enc_ip_int_buf_tbl = sm8150_enc_ip_int_buf_tbl,
+	.enc_ip_int_buf_tbl_size = ARRAY_SIZE(sm8150_enc_ip_int_buf_tbl),
 };

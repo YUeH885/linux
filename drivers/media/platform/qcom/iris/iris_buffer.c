@@ -486,10 +486,14 @@ int iris_get_buffer_size(struct iris_inst *inst,
 static void iris_fill_internal_buf_info(struct iris_inst *inst,
 					enum iris_buffer_type buffer_type)
 {
+	const struct iris_firmware_desc *desc = inst->core->iris_firmware_desc;
 	struct iris_buffers *buffers = &inst->buffers[buffer_type];
 
-	buffers->size = inst->core->iris_firmware_desc->get_vpu_buffer_size(inst, buffer_type);
-	buffers->min_count = iris_vpu_buf_count(inst, buffer_type);
+	buffers->size = desc->get_vpu_buffer_size(inst, buffer_type);
+	if (desc->get_vpu_buffer_count)
+		buffers->min_count = desc->get_vpu_buffer_count(inst, buffer_type);
+	else
+		buffers->min_count = iris_vpu_buf_count(inst, buffer_type);
 }
 
 static void iris_get_int_buf_tbl(struct iris_inst *inst, u32 plane,

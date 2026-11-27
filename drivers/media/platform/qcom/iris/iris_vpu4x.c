@@ -361,6 +361,13 @@ static int iris_vpu4x_set_hwmode(struct iris_core *core)
 }
 
 const struct vpu_ops iris_vpu4x_ops = {
+	.boot_firmware = iris_vpu2_boot_firmware,
+	.raise_interrupt = iris_vpu2_raise_interrupt,
+	.clear_interrupt = iris_vpu2_clear_interrupt,
+	.interrupt_init = iris_vpu2_interrupt_init,
+	.watchdog = iris_vpu2_watchdog,
+	.prepare_pc = iris_vpu2_prepare_pc,
+	.set_preset_registers = iris_vpu2_set_preset_registers,
 	.power_off_hw = iris_vpu4x_power_off_hardware,
 	.power_on_hw = iris_vpu4x_power_on_hardware,
 	.power_off_controller = iris_vpu35_vpu4x_power_off_controller,

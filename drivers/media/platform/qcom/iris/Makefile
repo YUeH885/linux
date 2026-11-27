@@ -12,6 +12,7 @@ qcom-iris-objs += iris_buffer.o \
              iris_hfi_gen2_packet.o \
              iris_hfi_gen2_response.o \
              iris_hfi_queue.o \
+             iris_platform_vpu1.o \
              iris_platform_vpu2.o \
              iris_platform_vpu3x.o \
              iris_power.o \
@@ -23,6 +24,7 @@ qcom-iris-objs += iris_buffer.o \
              iris_vb2.o \
              iris_vdec.o \
              iris_venc.o \
+             iris_vpu1.o \
              iris_vpu2.o \
              iris_vpu3x.o \
              iris_vpu4x.o \

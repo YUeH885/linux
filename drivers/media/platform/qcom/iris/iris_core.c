@@ -16,6 +16,10 @@ void iris_core_deinit(struct iris_core *core)
 
 	ret = pm_runtime_resume_and_get(core->dev);
 
+	/* The IRQ thread takes the core lock; drain it before taking that lock. */
+	if (!ret)
+		disable_irq(core->irq);
+
 	mutex_lock(&core->lock);
 	if (core->state != IRIS_CORE_DEINIT) {
 		iris_fw_unload(core);
@@ -28,8 +32,10 @@ void iris_core_deinit(struct iris_core *core)
 	}
 	mutex_unlock(&core->lock);
 
-	if (!ret)
+	if (!ret) {
+		enable_irq(core->irq);
 		pm_runtime_put_sync(core->dev);
+	}
 }
 
 static int iris_wait_for_system_response(struct iris_core *core)
@@ -46,7 +52,7 @@ static int iris_wait_for_system_response(struct iris_core *core)
 		return -ETIMEDOUT;
 	}
 
-	return 0;
+	return core->state == IRIS_CORE_ERROR ? -EIO : 0;
 }
 
 int iris_core_init(struct iris_core *core)
@@ -63,6 +69,7 @@ int iris_core_init(struct iris_core *core)
 	}
 
 	core->state = IRIS_CORE_INIT;
+	reinit_completion(&core->core_init_done);
 
 	ret = iris_hfi_queues_init(core);
 	if (ret)

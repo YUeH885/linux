@@ -51,12 +51,14 @@ enum pipe_type {
 };
 
 extern const struct iris_firmware_data iris_hfi_gen1_data;
+extern const struct iris_firmware_data iris_hfi_sm8150_data;
 extern const struct iris_firmware_data iris_hfi_gen2_data;
 extern const struct iris_firmware_data iris_hfi_milos_data;
 
 extern const struct iris_platform_data milos_data;
 extern const struct iris_platform_data qcs8300_data;
 extern const struct iris_platform_data sc7280_data;
+extern const struct iris_platform_data sm8150_data;
 extern const struct iris_platform_data sm8250_data;
 extern const struct iris_platform_data sm8550_data;
 extern const struct iris_platform_data sm8650_data;
@@ -76,6 +78,8 @@ enum platform_clk_type {
 	IRIS_VPP0_HW_CLK,
 	IRIS_VPP1_HW_CLK,
 	IRIS_APV_HW_CLK,
+	IRIS_AXIC_CLK,
+	IRIS_CVP_HW_CLK,
 };
 
 struct platform_clk_data {
@@ -241,6 +245,7 @@ enum platform_pm_domain_type {
 
 struct iris_firmware_data {
 	void (*init_hfi_ops)(struct iris_core *core);
+	bool hfi_4xx;
 
 	u32 core_arch;
 
@@ -288,6 +293,7 @@ struct iris_firmware_data {
 struct iris_firmware_desc {
 	const struct iris_firmware_data *firmware_data;
 	u32 (*get_vpu_buffer_size)(struct iris_inst *inst, enum iris_buffer_type buffer_type);
+	u32 (*get_vpu_buffer_count)(struct iris_inst *inst, enum iris_buffer_type buffer_type);
 	const char *fwname;
 };
 

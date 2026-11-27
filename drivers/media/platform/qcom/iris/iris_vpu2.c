@@ -39,6 +39,13 @@ static u64 iris_vpu2_calc_freq(struct iris_inst *inst, size_t data_size)
 }
 
 const struct vpu_ops iris_vpu2_ops = {
+	.boot_firmware = iris_vpu2_boot_firmware,
+	.raise_interrupt = iris_vpu2_raise_interrupt,
+	.clear_interrupt = iris_vpu2_clear_interrupt,
+	.interrupt_init = iris_vpu2_interrupt_init,
+	.watchdog = iris_vpu2_watchdog,
+	.prepare_pc = iris_vpu2_prepare_pc,
+	.set_preset_registers = iris_vpu2_set_preset_registers,
 	.power_off_hw = iris_vpu_power_off_hw,
 	.power_on_hw = iris_vpu_power_on_hw,
 	.power_off_controller = iris_vpu_power_off_controller,
