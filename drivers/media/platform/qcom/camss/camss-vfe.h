@@ -13,6 +13,7 @@
 #include <linux/clk.h>
 #include <linux/mutex.h>
 #include <linux/spinlock_types.h>
+#include <linux/workqueue.h>
 #include <media/v4l2-ctrls.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
@@ -192,6 +193,10 @@ struct vfe_device {
 	struct mutex stream_lock;
 	int stream_count;
 	spinlock_t output_lock;
+	struct work_struct recover_work;
+	bool fault_pending;
+	bool recovery_attempted;
+	bool recovery_disabled;
 	enum vfe_line_id wm_output_map[MSM_VFE_IMAGE_MASTERS_NUM];
 	struct vfe_line line[VFE_LINE_NUM_MAX];
 	u32 reg_update;

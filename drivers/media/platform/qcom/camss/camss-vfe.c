@@ -585,7 +585,8 @@ int vfe_enable_output_v2(struct vfe_line *line)
 	output->state = VFE_OUTPUT_ON;
 
 	output->sequence = 0;
-	output->sof_sequence = 0;
+	if (!line->video_out.recovering)
+		output->sof_sequence = 0;
 	output->wait_reg_update = 0;
 	reinit_completion(&output->reg_update);
 
@@ -891,14 +892,21 @@ static void vfe_disable_output(struct vfe_line *line)
 int vfe_disable(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
+	unsigned long flags;
 	int ret = 0;
 
 	mutex_lock(&vfe->stream_lock);
 
 	vfe_disable_output(line);
 
-	if (!--vfe->stream_count)
+	if (!--vfe->stream_count) {
 		ret = vfe_reset(vfe);
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		vfe->reg_update = 0;
+		vfe->fault_pending = false;
+		vfe->recovery_attempted = false;
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+	}
 
 	mutex_unlock(&vfe->stream_lock);
 
@@ -2305,10 +2313,15 @@ error_init:
  */
 void msm_vfe_unregister_entities(struct vfe_device *vfe)
 {
+	unsigned long flags;
 	int i;
 
-	mutex_destroy(&vfe->power_lock);
-	mutex_destroy(&vfe->stream_lock);
+	if (vfe->camss->res->version == CAMSS_8150) {
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		vfe->recovery_disabled = true;
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		cancel_work_sync(&vfe->recover_work);
+	}
 
 	for (i = 0; i < vfe->res->line_num; i++) {
 		struct v4l2_subdev *sd = &vfe->line[i].subdev;
@@ -2320,6 +2333,8 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
 		media_entity_cleanup(&sd->entity);
 		mutex_destroy(&vfe->line[i].ife_config_lock);
 	}
+	mutex_destroy(&vfe->power_lock);
+	mutex_destroy(&vfe->stream_lock);
 }
 
 bool vfe_is_lite(struct vfe_device *vfe)

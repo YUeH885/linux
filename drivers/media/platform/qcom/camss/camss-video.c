@@ -330,7 +330,12 @@ static void video_buf_queue(struct vb2_buffer *vb)
 
 	if (!vb->request)
 		buffer->ife_valid = false;
-	video->ops->queue_buffer(video, buffer);
+	mutex_lock(&video->camss->stream_lock);
+	if (video->vb2_q.error)
+		camss_buffer_done(buffer, VB2_BUF_STATE_ERROR);
+	else
+		video->ops->queue_buffer(video, buffer);
+	mutex_unlock(&video->camss->stream_lock);
 }
 
 static int video_check_format(struct camss_video *video)
@@ -376,8 +381,8 @@ static int video_prepare_streaming(struct vb2_queue *q)
 	return ret;
 }
 
-static void video_disable_pipeline(struct camss_video *video,
-				   struct media_entity *failed)
+static int video_disable_pipeline(struct camss_video *video,
+				  struct media_entity *failed)
 {
 	struct video_device *vdev = &video->vdev;
 	struct media_pipeline *pipe = video_device_pipeline(vdev);
@@ -385,13 +390,15 @@ static void video_disable_pipeline(struct camss_video *video,
 	struct media_pad *pad;
 	struct v4l2_subdev *subdev;
 	struct media_pad *csid_pad = video->streaming_csid;
-	int ret;
+	int ret, error = 0;
 
 	/* Stop feeding the write masters before returning their buffers. */
 	if (csid_pad) {
 		ret = msm_csid_set_port(csid_pad, false, pipe->start_count > 1);
-		if (ret)
+		if (ret) {
 			dev_err(video->camss->dev, "CSID port did not halt: %d\n", ret);
+			error = ret;
+		}
 		video->streaming_csid = NULL;
 	}
 
@@ -410,16 +417,19 @@ static void video_disable_pipeline(struct camss_video *video,
 		}
 
 		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
-		if (ret && ret != -ENOIOCTLCMD)
+		if (ret && ret != -ENOIOCTLCMD) {
 			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
+			if (!error)
+				error = ret;
+		}
 		if (entity->function == MEDIA_ENT_F_VID_MUX)
 			break;
 	}
+	return error;
 }
 
-static int video_start_streaming(struct vb2_queue *q, unsigned int count)
+int camss_video_start_pipeline(struct camss_video *video)
 {
-	struct camss_video *video = vb2_get_drv_priv(q);
 	struct video_device *vdev = &video->vdev;
 	struct media_pipeline *pipe;
 	struct media_entity *entity;
@@ -427,18 +437,23 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct v4l2_subdev *subdev;
 	int ret;
 
+	lockdep_assert_held(&video->camss->stream_lock);
+	lockdep_assert_held(&video->camss->media_dev.graph_mutex);
+
 	WRITE_ONCE(video->requests_stopping, false);
 	if (video->request_controls) {
 		ret = video->ops->start_requests(video);
 		if (ret)
-			goto flush_buffers;
+			return ret;
 	}
 
-	mutex_lock(&video->camss->stream_lock);
-	ret = video_device_pipeline_alloc_start(vdev);
+	pipe = video_device_pipeline(vdev);
+	if (!pipe)
+		pipe = &video->pipe;
+	ret = __video_device_pipeline_start(vdev, pipe);
 	if (ret < 0) {
 		dev_err(video->camss->dev, "Failed to start media pipeline: %d\n", ret);
-		goto unlock;
+		return ret;
 	}
 
 	ret = video_check_format(video);
@@ -446,7 +461,6 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 		goto stop_pipeline;
 
 	/* Several outputs can share one CSID and its upstream subdevices. */
-	pipe = video_device_pipeline(vdev);
 	entity = &vdev->entity;
 	while (1) {
 		pad = media_entity_remote_source_pad_unique(entity);
@@ -474,19 +488,55 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 			break;
 	}
 
-	mutex_unlock(&video->camss->stream_lock);
+	video->pipeline_running = true;
 	return 0;
 
 error:
 	video_disable_pipeline(video, entity);
 stop_pipeline:
-	video_device_pipeline_stop(vdev);
-unlock:
-	mutex_unlock(&video->camss->stream_lock);
-flush_buffers:
-	video->ops->flush_buffers(video, VB2_BUF_STATE_QUEUED);
+	__video_device_pipeline_stop(vdev);
+	return ret;
+}
+
+int camss_video_stop_pipeline(struct camss_video *video)
+{
+	int ret;
+
+	lockdep_assert_held(&video->camss->stream_lock);
+	lockdep_assert_held(&video->camss->media_dev.graph_mutex);
+	if (!video->pipeline_running)
+		return 0;
+
+	WRITE_ONCE(video->requests_stopping, true);
+	if (video->vb2_q.uses_requests)
+		flush_workqueue(video->request_wq);
+
+	ret = video_disable_pipeline(video, NULL);
+	__video_device_pipeline_stop(&video->vdev);
+	video->pipeline_running = false;
+	return ret;
+}
+
+void camss_video_flush_pipeline(struct camss_video *video, enum vb2_buffer_state state)
+{
+	lockdep_assert_held(&video->camss->stream_lock);
+	video->ops->flush_buffers(video, state);
 	if (video->request_controls)
 		video->ops->stop_requests(video);
+}
+
+static int video_start_streaming(struct vb2_queue *q, unsigned int count)
+{
+	struct camss_video *video = vb2_get_drv_priv(q);
+	int ret;
+
+	mutex_lock(&video->camss->stream_lock);
+	mutex_lock(&video->camss->media_dev.graph_mutex);
+	ret = camss_video_start_pipeline(video);
+	mutex_unlock(&video->camss->media_dev.graph_mutex);
+	if (ret)
+		camss_video_flush_pipeline(video, VB2_BUF_STATE_QUEUED);
+	mutex_unlock(&video->camss->stream_lock);
 	return ret;
 }
 
@@ -494,18 +544,12 @@ static void video_stop_streaming(struct vb2_queue *q)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
 
-	WRITE_ONCE(video->requests_stopping, true);
-	if (q->uses_requests)
-		flush_workqueue(video->request_wq);
-
 	mutex_lock(&video->camss->stream_lock);
-	video_disable_pipeline(video, NULL);
-	video_device_pipeline_stop(&video->vdev);
+	mutex_lock(&video->camss->media_dev.graph_mutex);
+	camss_video_stop_pipeline(video);
+	mutex_unlock(&video->camss->media_dev.graph_mutex);
+	camss_video_flush_pipeline(video, VB2_BUF_STATE_ERROR);
 	mutex_unlock(&video->camss->stream_lock);
-
-	video->ops->flush_buffers(video, VB2_BUF_STATE_ERROR);
-	if (video->request_controls)
-		video->ops->stop_requests(video);
 }
 
 static void video_unprepare_streaming(struct vb2_queue *q)
