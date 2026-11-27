@@ -6,6 +6,8 @@
 #ifndef _IPA_ENDPOINT_H_
 #define _IPA_ENDPOINT_H_
 
+#include <linux/if_ether.h>
+#include <linux/if_rmnet.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
@@ -22,7 +24,9 @@ struct ipa_gsi_endpoint_data;
 /* Non-zero granularity of counter used to implement aggregation timeout */
 #define IPA_AGGR_GRANULARITY		500	/* microseconds */
 
-#define IPA_MTU			ETH_DATA_LEN
+/* Reserve QMAP + UL csum header bytes so rmnet VND can reach ETH_DATA_LEN */
+#define IPA_MTU			(ETH_DATA_LEN + sizeof(struct rmnet_map_header) + \
+				 sizeof(struct rmnet_map_ul_csum_header))
 
 enum ipa_endpoint_name {
 	IPA_ENDPOINT_AP_COMMAND_TX,
