@@ -69,6 +69,9 @@ static int slim_device_probe(struct device *dev)
 	if (ret)
 		return ret;
 
+	if (sbdrv->defer_laddr)
+		return 0;
+
 	/* try getting the logical address after probe */
 	ret = slim_get_logical_addr(sbdev);
 	if (!ret) {
