@@ -456,13 +456,24 @@ static void iris_hfi_gen1_sys_property_info(struct iris_core *core, void *packet
 static void iris_hfi_gen1_session_etb_done(struct iris_inst *inst, void *packet)
 {
 	struct hfi_msg_session_empty_buffer_done_pkt *pkt = packet;
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
 	struct v4l2_m2m_ctx *m2m_ctx = inst->m2m_ctx;
 	struct v4l2_m2m_buffer *m2m_buffer, *n;
 	struct iris_buffer *buf = NULL;
 	bool found = false;
 
 	/* EOS buffer sent via drain won't be in v4l2 buffer list */
-	if (pkt->packet_buffer == 0xdeadb000 || inst->closing || !m2m_ctx)
+	if (pkt->packet_buffer == 0xdeadb000)
+		return;
+
+	if (inst_hfi->merged_input_active &&
+	    pkt->input_tag == inst_hfi->merged_input_tag) {
+		iris_hfi_gen1_free_merged_input(inst);
+		if (pkt->input_tag == U32_MAX)
+			return;
+	}
+
+	if (inst->closing || !m2m_ctx)
 		return;
 
 	v4l2_m2m_for_each_src_buf_safe(m2m_ctx, m2m_buffer, n) {

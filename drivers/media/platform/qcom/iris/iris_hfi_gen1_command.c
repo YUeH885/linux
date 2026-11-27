@@ -3,7 +3,9 @@
  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
+#include <linux/dma-mapping.h>
 #include <linux/hash.h>
+#include <linux/sizes.h>
 #include <linux/soc/qcom/llcc-qcom.h>
 #include <media/v4l2-mem2mem.h>
 
@@ -259,13 +261,42 @@ static void iris_hfi_gen1_packet_session_cmd(struct iris_inst *inst,
 	packet->shdr.session_id = inst->session_id;
 }
 
+static void iris_hfi_gen1_free_initial_hdr(struct iris_inst *inst)
+{
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
+
+	kfree(inst_hfi->initial_hdr);
+	inst_hfi->initial_hdr = NULL;
+	inst_hfi->initial_hdr_size = 0;
+}
+
+void iris_hfi_gen1_free_merged_input(struct iris_inst *inst)
+{
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
+
+	if (!inst_hfi->merged_input_active)
+		return;
+
+	dma_free_coherent(inst->core->dev, inst_hfi->merged_input_alloc_size,
+			  inst_hfi->merged_input_kvaddr, inst_hfi->merged_input_dma);
+	inst_hfi->merged_input_kvaddr = NULL;
+	inst_hfi->merged_input_dma = 0;
+	inst_hfi->merged_input_alloc_size = 0;
+	inst_hfi->merged_input_tag = U32_MAX;
+	inst_hfi->merged_input_active = false;
+}
+
 static int iris_hfi_gen1_session_close(struct iris_inst *inst)
 {
 	struct hfi_session_pkt packet;
+	int ret;
 
 	iris_hfi_gen1_packet_session_cmd(inst, &packet, HFI_CMD_SYS_SESSION_END);
 
-	return iris_hfi_queue_cmd_write(inst->core, &packet, packet.shdr.hdr.size);
+	ret = iris_hfi_queue_cmd_write(inst->core, &packet, packet.shdr.hdr.size);
+	iris_hfi_gen1_free_initial_hdr(inst);
+	iris_hfi_gen1_free_merged_input(inst);
+	return ret;
 }
 
 static int iris_hfi_gen1_session_start(struct iris_inst *inst, u32 plane)
@@ -394,6 +425,11 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 					 VB2_BUF_STATE_ERROR);
 	}
 
+	if (V4L2_TYPE_IS_OUTPUT(plane) || flush_type == HFI_FLUSH_ALL) {
+		iris_hfi_gen1_free_initial_hdr(inst);
+		iris_hfi_gen1_free_merged_input(inst);
+	}
+
 	return ret;
 }
 
@@ -424,28 +460,172 @@ static int iris_hfi_gen1_session_continue(struct iris_inst *inst, u32 plane)
 	return iris_hfi_queue_cmd_write(inst->core, &packet, packet.shdr.hdr.size);
 }
 
-static int iris_hfi_gen1_queue_input_buffer(struct iris_inst *inst, struct iris_buffer *buf)
+static bool iris_hfi_gen1_is_non_vcl_only(u32 codec, const u8 *data, size_t size)
+{
+	size_t i = 0;
+	bool found_nal = false;
+
+	while (i + 3 < size) {
+		size_t sc_len = 0;
+
+		if (i + 4 <= size && data[i] == 0 && data[i + 1] == 0 &&
+		    data[i + 2] == 0 && data[i + 3] == 1)
+			sc_len = 4;
+		else if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
+			sc_len = 3;
+
+		if (sc_len && i + sc_len < size) {
+			u8 hdr = data[i + sc_len];
+
+			found_nal = true;
+			if (codec == V4L2_PIX_FMT_H264) {
+				u8 nal_type = hdr & 0x1f;
+
+				if (nal_type >= 1 && nal_type <= 5)
+					return false;
+			} else if (codec == V4L2_PIX_FMT_HEVC) {
+				u8 nal_type = (hdr >> 1) & 0x3f;
+
+				if (nal_type < 32)
+					return false;
+			}
+			i += sc_len + 1;
+			continue;
+		}
+		i++;
+	}
+
+	return found_nal;
+}
+
+static int iris_hfi_gen1_write_dec_etb(struct iris_inst *inst, dma_addr_t addr,
+				       u32 alloc_len, u32 filled_len, u32 offset,
+				       u32 tag, u64 ts_ns)
 {
 	struct hfi_session_empty_buffer_compressed_pkt com_ip_pkt = {0};
+	u64 timestamp = div_u64(ts_ns, NSEC_PER_USEC);
+
+	com_ip_pkt.shdr.hdr.size = sizeof(com_ip_pkt);
+	com_ip_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
+	com_ip_pkt.shdr.session_id = inst->session_id;
+	com_ip_pkt.time_stamp_hi = upper_32_bits(timestamp);
+	com_ip_pkt.time_stamp_lo = lower_32_bits(timestamp);
+	com_ip_pkt.offset = offset;
+	com_ip_pkt.alloc_len = alloc_len;
+	com_ip_pkt.filled_len = filled_len;
+	com_ip_pkt.input_tag = tag;
+	com_ip_pkt.packet_buffer = addr;
+
+	return iris_hfi_queue_cmd_write(inst->core, &com_ip_pkt,
+					com_ip_pkt.shdr.hdr.size);
+}
+
+static int iris_hfi_gen1_stage_initial_hdr(struct iris_inst *inst,
+					   struct iris_buffer *buf,
+					   const u8 *data, size_t size)
+{
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
+	u8 *new_hdr;
+
+	if (size > SZ_256K || inst_hfi->initial_hdr_size > SZ_256K - size)
+		return -E2BIG;
+
+	new_hdr = krealloc(inst_hfi->initial_hdr,
+			   inst_hfi->initial_hdr_size + size, GFP_KERNEL);
+	if (!new_hdr)
+		return -ENOMEM;
+
+	memcpy(new_hdr + inst_hfi->initial_hdr_size, data, size);
+	inst_hfi->initial_hdr = new_hdr;
+	inst_hfi->initial_hdr_size += size;
+
+	buf->attr &= ~BUF_ATTR_DEFERRED;
+	buf->attr |= BUF_ATTR_DEQUEUED | BUF_ATTR_BUFFER_DONE;
+	iris_vb2_buffer_done(inst, buf);
+
+	return 0;
+}
+
+static int iris_hfi_gen1_submit_merged_input(struct iris_inst *inst,
+					     const u8 *tail, size_t tail_len,
+					     u32 tag, u64 ts_ns)
+{
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
+	size_t total_len = inst_hfi->initial_hdr_size + tail_len;
+	size_t alloc_size = PAGE_ALIGN(total_len);
+	dma_addr_t dma_addr;
+	void *kvaddr;
+	int ret;
+
+	kvaddr = dma_alloc_coherent(inst->core->dev, alloc_size, &dma_addr, GFP_KERNEL);
+	if (!kvaddr)
+		return -ENOMEM;
+
+	memcpy(kvaddr, inst_hfi->initial_hdr, inst_hfi->initial_hdr_size);
+	if (tail && tail_len)
+		memcpy(kvaddr + inst_hfi->initial_hdr_size, tail, tail_len);
+
+	ret = iris_hfi_gen1_write_dec_etb(inst, dma_addr, alloc_size, total_len,
+					  0, tag, ts_ns);
+	if (ret) {
+		dma_free_coherent(inst->core->dev, alloc_size, kvaddr, dma_addr);
+		return ret;
+	}
+
+	iris_hfi_gen1_free_initial_hdr(inst);
+	inst_hfi->merged_input_kvaddr = kvaddr;
+	inst_hfi->merged_input_dma = dma_addr;
+	inst_hfi->merged_input_alloc_size = alloc_size;
+	inst_hfi->merged_input_tag = tag;
+	inst_hfi->merged_input_active = true;
+
+	return 0;
+}
+
+static int iris_hfi_gen1_queue_input_buffer(struct iris_inst *inst, struct iris_buffer *buf)
+{
 	struct hfi_session_empty_buffer_uncompressed_pkt uncom_ip_pkt = {0};
+	struct iris_inst_hfi_gen1 *inst_hfi = to_iris_inst_hfi_gen1(inst);
 	u64 timestamp = div_u64(buf->timestamp, NSEC_PER_USEC);
 
 	if (inst->domain == DECODER) {
-		com_ip_pkt.shdr.hdr.size = sizeof(struct hfi_session_empty_buffer_compressed_pkt);
-		com_ip_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
-		com_ip_pkt.shdr.session_id = inst->session_id;
-		com_ip_pkt.time_stamp_hi = upper_32_bits(timestamp);
-		com_ip_pkt.time_stamp_lo = lower_32_bits(timestamp);
-		com_ip_pkt.flags = 0;
-		com_ip_pkt.mark_target = 0;
-		com_ip_pkt.mark_data = 0;
-		com_ip_pkt.offset = buf->data_offset;
-		com_ip_pkt.alloc_len = buf->buffer_size;
-		com_ip_pkt.filled_len = buf->data_size;
-		com_ip_pkt.input_tag = buf->index;
-		com_ip_pkt.packet_buffer = buf->device_addr;
-		return iris_hfi_queue_cmd_write(inst->core, &com_ip_pkt,
-						com_ip_pkt.shdr.hdr.size);
+		/*
+		 * HFI 4XX stalls initial sequence detection if leading config/SEI
+		 * NALUs arrive without a coded slice. Stage them until the first
+		 * slice arrives and submit one combined buffer.
+		 */
+		if (inst->core->iris_firmware_data->hfi_4xx && !inst->fw_min_count &&
+		    !inst_hfi->merged_input_active && buf->data_size &&
+		    (inst->codec == V4L2_PIX_FMT_H264 ||
+		     inst->codec == V4L2_PIX_FMT_HEVC) && inst->m2m_ctx) {
+			struct vb2_buffer *vb2 =
+				vb2_get_buffer(v4l2_m2m_get_src_vq(inst->m2m_ctx),
+					       buf->index);
+			const u8 *vaddr = vb2 ? vb2_plane_vaddr(vb2, 0) : NULL;
+
+			if (vaddr) {
+				const u8 *payload = vaddr + buf->data_offset;
+
+				if (iris_hfi_gen1_is_non_vcl_only(inst->codec, payload,
+								  buf->data_size)) {
+					int ret = iris_hfi_gen1_stage_initial_hdr(inst, buf,
+										  payload,
+										  buf->data_size);
+					if (ret != -E2BIG)
+						return ret;
+				}
+				if (inst_hfi->initial_hdr_size)
+					return iris_hfi_gen1_submit_merged_input(inst, payload,
+										 buf->data_size,
+										 buf->index,
+										 buf->timestamp);
+			}
+		}
+
+		return iris_hfi_gen1_write_dec_etb(inst, buf->device_addr,
+						  buf->buffer_size, buf->data_size,
+						  buf->data_offset, buf->index,
+						  buf->timestamp);
 	} else {
 		uncom_ip_pkt.shdr.hdr.size =
 			sizeof(struct hfi_session_empty_buffer_uncompressed_pkt);
@@ -612,6 +792,13 @@ static int iris_hfi_gen1_session_drain(struct iris_inst *inst, u32 plane)
 		struct hfi_session_empty_buffer_compressed_pkt ip_pkt = {0};
 		unsigned long completed, timeout = msecs_to_jiffies(HW_RESPONSE_TIMEOUT_VALUE);
 		int ret;
+
+		if (inst_hfi->initial_hdr_size && !inst_hfi->merged_input_active) {
+			ret = iris_hfi_gen1_submit_merged_input(inst, NULL, 0,
+								U32_MAX, 0);
+			if (ret)
+				return ret;
+		}
 
 		ip_pkt.shdr.hdr.size = sizeof(struct hfi_session_empty_buffer_compressed_pkt);
 		ip_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;

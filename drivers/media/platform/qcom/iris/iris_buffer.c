@@ -610,7 +610,8 @@ int iris_queue_buffer(struct iris_inst *inst, struct iris_buffer *buf)
 		return ret;
 
 	buf->attr &= ~BUF_ATTR_DEFERRED;
-	buf->attr |= BUF_ATTR_QUEUED;
+	if (!(buf->attr & BUF_ATTR_BUFFER_DONE))
+		buf->attr |= BUF_ATTR_QUEUED;
 
 	return 0;
 }

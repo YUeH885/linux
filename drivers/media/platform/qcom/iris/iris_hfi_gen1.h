@@ -19,7 +19,16 @@ struct iris_inst_hfi_gen1 {
 	struct hfi_buffer_requirements buffer_requirements[HFI_BUFFER_INTERNAL_RECON + 1];
 	struct completion initial_src_change;
 	bool output_stopping;
+	u8 *initial_hdr;
+	size_t initial_hdr_size;
+	void *merged_input_kvaddr;
+	dma_addr_t merged_input_dma;
+	size_t merged_input_alloc_size;
+	u32 merged_input_tag;
+	bool merged_input_active;
 };
+
+void iris_hfi_gen1_free_merged_input(struct iris_inst *inst);
 
 int iris_hfi_gen1_parse_caps(struct iris_core *core,
 			     const struct hfi_msg_sys_init_done_pkt *pkt);
