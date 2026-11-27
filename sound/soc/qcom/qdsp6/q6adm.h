@@ -18,7 +18,8 @@ struct route_payload {
 struct q6copp;
 struct q6copp *q6adm_open(struct device *dev, int port_id, int path, int rate,
 			   int channel_mode, int topology, int perf_mode,
-			   uint16_t bit_width, int app_type, int acdb_id);
+			   u16 bit_width, int app_type, int acdb_id,
+			   const u8 *channel_map);
 int q6adm_close(struct device *dev, struct q6copp *copp);
 int q6adm_get_copp_id(struct q6copp *copp);
 int q6adm_matrix_map(struct device *dev, int path,

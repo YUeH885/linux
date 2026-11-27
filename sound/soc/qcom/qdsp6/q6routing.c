@@ -23,6 +23,7 @@
 #include "q6asm.h"
 #include "q6adm.h"
 #include "q6routing.h"
+#include "q6dsp-common.h"
 
 #define DRV_NAME "q6routing-component"
 
@@ -360,6 +361,7 @@ struct session_data {
 	int sample_rate;
 	int bits_per_sample;
 	int channels;
+	u8 channel_map[PCM_MAX_NUM_CHANNEL];
 	int perf_mode;
 	int numcopps;
 	int fedai_id;
@@ -402,7 +404,8 @@ static int q6routing_map_stream(struct msm_routing_data *data,
 
 	copp = q6adm_open(data->dev, session->port_id, pdata->path_type,
 			  pdata->sample_rate, pdata->channels, NULL_COPP_TOPOLOGY,
-			  perf_mode, pdata->bits_per_sample, 0, 0);
+			  perf_mode, pdata->bits_per_sample, 0, 0,
+			  pdata->channel_map[0] ? pdata->channel_map : NULL);
 	if (IS_ERR(copp))
 		return PTR_ERR(copp);
 
@@ -1186,6 +1189,9 @@ static int routing_hw_params(struct snd_soc_component *component,
 	unsigned int be_id = snd_soc_rtd_to_cpu(rtd, 0)->id;
 	struct session_data *session;
 	int path_type;
+	unsigned int tx_num, rx_num, map[PCM_MAX_NUM_CHANNEL];
+	unsigned int i;
+	int ret;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		path_type = ADM_PATH_PLAYBACK;
@@ -1196,8 +1202,20 @@ static int routing_hw_params(struct snd_soc_component *component,
 		return -EINVAL;
 
 	session = &data->port_data[be_id];
+	if (be_id == HDMI_RX || be_id == DISPLAY_PORT_RX) {
+		ret = snd_soc_dai_get_channel_map(snd_soc_rtd_to_cpu(rtd, 0),
+						  &tx_num, NULL, &rx_num, map);
+		if (ret)
+			return ret;
+		if (rx_num != params_channels(params))
+			return -EINVAL;
+	}
 
 	mutex_lock(&data->lock);
+	memset(session->channel_map, 0, sizeof(session->channel_map));
+	if (be_id == HDMI_RX || be_id == DISPLAY_PORT_RX)
+		for (i = 0; i < rx_num; i++)
+			session->channel_map[i] = map[i];
 
 	session->path_type = path_type;
 	session->sample_rate = params_rate(params);
