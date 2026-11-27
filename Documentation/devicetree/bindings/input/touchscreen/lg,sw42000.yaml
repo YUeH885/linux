@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/touchscreen/lg,sw42000.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: LG SW42000 触摸屏控制器
+
+maintainers:
+  - Yuzu <yuzu23234@gmail.com>
+
+properties:
+  compatible:
+    const: lg,sw42000
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  panel: true
+
+  reset-gpios:
+    maxItems: 1
+
+  vcl-supply: true
+
+  vdd-supply: true
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - panel
+  - reset-gpios
+  - vcl-supply
+  - vdd-supply
+
+allOf:
+  - $ref: touchscreen.yaml#
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        touchscreen@28 {
+            compatible = "lg,sw42000";
+            reg = <0x28>;
+            interrupt-parent = <&gpio>;
+            interrupts = <122 IRQ_TYPE_LEVEL_LOW>;
+            panel = <&panel>;
+            reset-gpios = <&gpio 54 GPIO_ACTIVE_LOW>;
+            vcl-supply = <&touch_vcl>;
+            vdd-supply = <&touch_vdd>;
+            touchscreen-size-x = <1440>;
+            touchscreen-size-y = <3120>;
+        };
+    };
