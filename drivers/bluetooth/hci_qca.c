@@ -1217,7 +1217,7 @@ static int qca_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
 	if (test_bit(QCA_DROP_VENDOR_EVENT, &qca->flags)) {
 		struct hci_event_hdr *hdr = (void *)skb->data;
 
-		/* For the WCN3990 the vendor command for a baudrate change
+		/* For WCN3990 and WCN3998 the vendor command for a baudrate change
 		 * isn't sent as synchronous HCI command, because the
 		 * controller sends the corresponding vendor event with the
 		 * new baudrate. The event is received and properly decoded
@@ -1522,6 +1522,7 @@ static int qca_set_speed(struct hci_uart *hu, enum qca_speed_type speed_type)
 
 		switch (soc_type) {
 		case QCA_WCN3990:
+		case QCA_WCN3998:
 			reinit_completion(&qca->drop_ev_comp);
 			set_bit(QCA_DROP_VENDOR_EVENT, &qca->flags);
 			break;
@@ -1557,6 +1558,7 @@ error:
 
 		switch (soc_type) {
 		case QCA_WCN3990:
+		case QCA_WCN3998:
 			/* Wait for the controller to send the vendor event
 			 * for the baudrate change command.
 			 */
