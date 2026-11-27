@@ -10,6 +10,7 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/iopoll.h>
+#include <linux/jiffies.h>
 #include <linux/phy/phy.h>
 #include <linux/phy/phy-dp.h>
 #include <linux/pm_opp.h>
@@ -29,7 +30,7 @@
 #define POLLING_TIMEOUT_US			10000
 
 #define DP_KHZ_TO_HZ 1000
-#define IDLE_PATTERN_COMPLETION_TIMEOUT_JIFFIES	(30 * HZ / 1000) /* 30 ms */
+#define IDLE_PATTERN_COMPLETION_TIMEOUT_MS	100
 #define PSR_OPERATION_COMPLETION_TIMEOUT_JIFFIES       (300 * HZ / 1000) /* 300 ms */
 #define WAIT_FOR_VIDEO_READY_TIMEOUT_JIFFIES (HZ / 2)
 
@@ -380,8 +381,9 @@ void msm_dp_ctrl_push_idle(struct msm_dp_ctrl *msm_dp_ctrl)
 	reinit_completion(&ctrl->idle_comp);
 	msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, DP_STATE_CTRL_PUSH_IDLE);
 
+	/* Idle is sent at a frame boundary; 24 Hz needs more than 30 ms. */
 	if (!wait_for_completion_timeout(&ctrl->idle_comp,
-			IDLE_PATTERN_COMPLETION_TIMEOUT_JIFFIES))
+			msecs_to_jiffies(IDLE_PATTERN_COMPLETION_TIMEOUT_MS)))
 		pr_warn("PUSH_IDLE pattern timedout\n");
 
 	drm_dbg_dp(ctrl->drm_dev, "mainlink off\n");
