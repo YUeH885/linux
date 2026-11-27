@@ -1157,6 +1157,8 @@ static int routing_hw_params(struct snd_soc_component *component,
 			session->bits_per_sample = 16;
 		break;
 	case SNDRV_PCM_FORMAT_S24_LE:
+	case SNDRV_PCM_FORMAT_S32_LE:
+		/* Q6ASM PCM v2 uses 24 valid bits in its 32-bit container. */
 			session->bits_per_sample = 24;
 		break;
 	default:
