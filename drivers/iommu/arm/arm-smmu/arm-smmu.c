@@ -868,10 +868,12 @@ static int arm_smmu_init_domain_context(struct arm_smmu_domain *smmu_domain,
 	if (ret < 0)
 		cfg->irptndx = ARM_SMMU_INVALID_IRPTNDX;
 
+	/*
+	 * Publish the initialized context to concurrent map callers. Pairs with
+	 * the acquire in arm_smmu_map_pages().
+	 */
+	smp_store_release(&smmu_domain->pgtbl_ops, pgtbl_ops);
 	mutex_unlock(&smmu_domain->init_mutex);
-
-	/* Publish page table ops for map/unmap */
-	smmu_domain->pgtbl_ops = pgtbl_ops;
 	return 0;
 
 out_clear_smmu:
@@ -919,17 +921,14 @@ static struct iommu_domain *arm_smmu_domain_alloc_paging(struct device *dev)
 	struct arm_smmu_master_cfg *cfg = dev_iommu_priv_get(dev);
 	struct arm_smmu_device *smmu = cfg->smmu;
 
-	/*
-	 * Allocate the domain and initialise some of its data structures.
-	 * We can't really do anything meaningful until we've added a
-	 * master.
-	 */
+	/* Retain the master so mappings can be installed before attachment. */
 	smmu_domain = kzalloc_obj(*smmu_domain);
 	if (!smmu_domain)
 		return NULL;
 
 	mutex_init(&smmu_domain->init_mutex);
 	spin_lock_init(&smmu_domain->cb_lock);
+	smmu_domain->alloc_dev = get_device(dev);
 	smmu_domain->domain.pgsize_bitmap = smmu->pgsize_bitmap;
 
 	return &smmu_domain->domain;
@@ -944,6 +943,7 @@ static void arm_smmu_domain_free(struct iommu_domain *domain)
 	 * already been detached.
 	 */
 	arm_smmu_destroy_domain_context(smmu_domain);
+	put_device(smmu_domain->alloc_dev);
 	kfree(smmu_domain);
 }
 
@@ -1267,15 +1267,36 @@ static int arm_smmu_map_pages(struct iommu_domain *domain, unsigned long iova,
 			      phys_addr_t paddr, size_t pgsize, size_t pgcount,
 			      int prot, gfp_t gfp, size_t *mapped)
 {
-	struct io_pgtable_ops *ops = to_smmu_domain(domain)->pgtbl_ops;
-	struct arm_smmu_device *smmu = to_smmu_domain(domain)->smmu;
+	struct arm_smmu_domain *smmu_domain = to_smmu_domain(domain);
+	/* Pairs with the release in arm_smmu_init_domain_context(). */
+	struct io_pgtable_ops *ops = smp_load_acquire(&smmu_domain->pgtbl_ops);
+	struct arm_smmu_device *smmu = smmu_domain->smmu;
 	int ret;
 
-	if (!ops)
-		return -ENODEV;
+	if (!ops) {
+		struct device *dev = smmu_domain->alloc_dev;
+		struct arm_smmu_master_cfg *cfg = dev_iommu_priv_get(dev);
 
-	arm_smmu_rpm_get(smmu);
+		/* Firmware mappings must be ready before switching stream routing. */
+		if (!gfpflags_allow_blocking(gfp))
+			return -EWOULDBLOCK;
+		smmu = cfg->smmu;
+	}
+
+	ret = arm_smmu_rpm_get(smmu);
+	if (ret < 0)
+		return ret;
+
+	if (!ops) {
+		ret = arm_smmu_init_domain_context(smmu_domain, smmu,
+						   smmu_domain->alloc_dev);
+		if (ret)
+			goto rpm_put;
+		ops = smmu_domain->pgtbl_ops;
+	}
+
 	ret = ops->map_pages(ops, iova, paddr, pgsize, pgcount, prot, gfp, mapped);
+rpm_put:
 	arm_smmu_rpm_put(smmu);
 
 	return ret;
