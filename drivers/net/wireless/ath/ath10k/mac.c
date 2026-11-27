@@ -2680,6 +2680,27 @@ static void ath10k_peer_assoc_h_vht(struct ath10k *ar,
 			arg->peer_bw_rxnss_override |=
 			FIELD_PREP(WMI_PEER_NSS_80_80MHZ_MASK, (rx_nss - 1));
 		}
+
+		/* WMI-TLV peer_assoc does not carry peer_bw_rxnss_override, and
+		 * WCN3990 bonds both 80 MHz chains into 1x1 at 160/80+80 MHz.
+		 * Clamp peer NSS and VHT MCS maps so firmware rate control does
+		 * not attempt unsupported multi-stream TX rates.
+		 */
+		if (ar->running_fw->fw_file.wmi_op_version ==
+		    ATH10K_FW_WMI_OP_VERSION_TLV &&
+		    hw->vht160_mcs_tx_highest) {
+			arg->peer_num_spatial_streams =
+				min_t(u32, arg->peer_num_spatial_streams,
+				      rx_nss);
+			for (i = rx_nss; i < NL80211_VHT_NSS_MAX; i++) {
+				arg->peer_vht_rates.tx_mcs_set |=
+					IEEE80211_VHT_MCS_NOT_SUPPORTED << (i * 2);
+				arg->peer_vht_rates.rx_mcs_set |=
+					IEEE80211_VHT_MCS_NOT_SUPPORTED << (i * 2);
+			}
+			if (rx_nss < 2)
+				arg->peer_vht_caps &= ~IEEE80211_VHT_CAP_TXSTBC;
+		}
 	}
 	ath10k_dbg(ar, ATH10K_DBG_MAC,
 		   "mac vht peer %pM max_mpdu %d flags 0x%x peer_rx_nss_override 0x%x\n",
@@ -6797,6 +6818,13 @@ static void ath10k_sta_rc_update_wk(struct work_struct *wk)
 	nss = max_t(u32, 1, nss);
 	nss = min(nss, max(ath10k_mac_max_ht_nss(ht_mcs_mask),
 			   ath10k_mac_max_vht_nss(vht_mcs_mask)));
+	if (ar->running_fw->fw_file.wmi_op_version ==
+	    ATH10K_FW_WMI_OP_VERSION_TLV &&
+	    (def.width == NL80211_CHAN_WIDTH_160 ||
+	     def.width == NL80211_CHAN_WIDTH_80P80) &&
+	    ar->hw_params.vht160_mcs_tx_highest)
+		nss = min(nss, get_160mhz_nss_from_maxrate(
+				       ar->hw_params.vht160_mcs_tx_highest));
 
 	if (changed & IEEE80211_RC_BW_CHANGED) {
 		enum wmi_phy_mode mode;

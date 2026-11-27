@@ -731,6 +731,11 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.hw_ops = &wcn3990_ops,
 		.decap_align_bytes = 1,
 		.num_peers = TARGET_HL_TLV_NUM_PEERS,
+		/* Can do only 1x1 VHT160 or 80+80. 780Mbps is 2x2 80Mhz or
+		 * 1x1 160Mhz, long-guard-interval.
+		 */
+		.vht160_mcs_rx_highest = 780,
+		.vht160_mcs_tx_highest = 780,
 		.n_cipher_suites = 11,
 		.ast_skid_limit = TARGET_HL_TLV_AST_SKID_LIMIT,
 		.num_wds_entries = TARGET_HL_TLV_NUM_WDS_ENTRIES,
