@@ -138,12 +138,18 @@ static int csiphy_set_clock_rates(struct csiphy_device *csiphy)
 {
 	struct device *dev = csiphy->camss->dev;
 	s64 link_freq;
+	int num_lanes;
 	int i, j;
 	int ret;
 
 	u8 bpp = csiphy_get_bpp(csiphy->res->formats->formats, csiphy->res->formats->nformats,
 				csiphy->fmt[MSM_CSIPHY_PAD_SINK].code);
-	u8 num_lanes = csiphy->cfg.csi2->lane_cfg.num_data;
+	num_lanes = camss_get_active_data_lanes(&csiphy->subdev.entity,
+						csiphy->cfg.csi2->lane_cfg.max_data);
+	if (num_lanes < 0)
+		return num_lanes;
+
+	csiphy->cfg.csi2->lane_cfg.num_data = num_lanes;
 
 	link_freq = camss_get_link_freq(&csiphy->subdev.entity, bpp, num_lanes);
 	if (link_freq < 0)
