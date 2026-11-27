@@ -584,7 +584,7 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 			}
 		}
 	}
-	buf->timestamp = timestamp_us;
+	buf->timestamp = timestamp_us * NSEC_PER_USEC;
 
 	switch (pic_type) {
 	case HFI_GEN1_PICTURE_IDR:

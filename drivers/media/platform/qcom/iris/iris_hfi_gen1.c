@@ -453,7 +453,16 @@ static const u32 sm8150_dec_ip_int_buf_tbl[] = {
 };
 
 static const u32 sm8150_enc_ip_int_buf_tbl[] = {
-	BUF_BIN, BUF_SCRATCH_1, BUF_SCRATCH_2, BUF_PERSIST, BUF_RECON,
+	BUF_BIN, BUF_SCRATCH_1, BUF_SCRATCH_2, BUF_PERSIST,
+};
+
+static const u32 sm8150_venc_input_config_params[] = {
+	HFI_PROPERTY_PARAM_FRAME_SIZE,
+	HFI_PROPERTY_PARAM_UNCOMPRESSED_FORMAT_SELECT,
+	HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_INFO,
+	HFI_PROPERTY_CONFIG_FRAME_RATE,
+	HFI_PROPERTY_PARAM_VENC_VUI_TIMING_INFO,
+	HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL,
 };
 
 static const u32 sm8150_vdec_output_config_params[] = {
@@ -474,8 +483,8 @@ const struct iris_firmware_data iris_hfi_sm8150_data = {
 	.dec_input_config_params_default_size = ARRAY_SIZE(sm8250_vdec_input_config_param_default),
 	.dec_output_config_params = sm8150_vdec_output_config_params,
 	.dec_output_config_params_size = ARRAY_SIZE(sm8150_vdec_output_config_params),
-	.enc_input_config_params = sm8250_venc_input_config_param,
-	.enc_input_config_params_size = ARRAY_SIZE(sm8250_venc_input_config_param),
+	.enc_input_config_params = sm8150_venc_input_config_params,
+	.enc_input_config_params_size = ARRAY_SIZE(sm8150_venc_input_config_params),
 	.dec_ip_int_buf_tbl = sm8150_dec_ip_int_buf_tbl,
 	.dec_ip_int_buf_tbl_size = ARRAY_SIZE(sm8150_dec_ip_int_buf_tbl),
 	.dec_op_int_buf_tbl = sm8250_dec_op_int_buf_tbl,

@@ -218,16 +218,15 @@ static int iris_venc_s_fmt_output(struct iris_inst *inst, struct v4l2_format *f)
 	codec_align = (f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_HEVC) ? 32 : 16;
 
 	fmt = inst->fmt_dst;
+	fmt->fmt.pix_mp.pixelformat = f->fmt.pix_mp.pixelformat;
+	inst->codec = f->fmt.pix_mp.pixelformat;
 	fmt->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-	/*
-	 * If output format size != input format size,
-	 * it is considered a scaling case,
-	 * and the scaled size needs to be saved.
-	 */
-	if (f->fmt.pix_mp.width != inst->fmt_src->fmt.pix_mp.width ||
-	    f->fmt.pix_mp.height != inst->fmt_src->fmt.pix_mp.height) {
-		inst->enc_scale_width = f->fmt.pix_mp.width;
-		inst->enc_scale_height = f->fmt.pix_mp.height;
+	inst->enc_scale_width = f->fmt.pix_mp.width;
+	inst->enc_scale_height = f->fmt.pix_mp.height;
+	if (inst->core->iris_firmware_data->hfi_4xx) {
+		fmt->fmt.pix_mp.width = f->fmt.pix_mp.width;
+		fmt->fmt.pix_mp.height = f->fmt.pix_mp.height;
+	} else {
 		fmt->fmt.pix_mp.width = ALIGN(f->fmt.pix_mp.width, codec_align);
 		fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, codec_align);
 	}
@@ -245,8 +244,6 @@ static int iris_venc_s_fmt_output(struct iris_inst *inst, struct v4l2_format *f)
 
 	inst->buffers[BUF_OUTPUT].min_count = iris_vpu_buf_count(inst, BUF_OUTPUT);
 	inst->buffers[BUF_OUTPUT].size = fmt->fmt.pix_mp.plane_fmt[0].sizeimage;
-	fmt->fmt.pix_mp.pixelformat = f->fmt.pix_mp.pixelformat;
-	inst->codec = f->fmt.pix_mp.pixelformat;
 	memcpy(f, fmt, sizeof(struct v4l2_format));
 
 	return 0;
@@ -276,8 +273,8 @@ static int iris_venc_s_fmt_input(struct iris_inst *inst, struct v4l2_format *f)
 	fmt->fmt.pix_mp.quantization = f->fmt.pix_mp.quantization;
 
 	output_fmt = inst->fmt_dst;
-	output_fmt->fmt.pix_mp.width = fmt->fmt.pix_mp.width;
-	output_fmt->fmt.pix_mp.height = fmt->fmt.pix_mp.height;
+	output_fmt->fmt.pix_mp.width = f->fmt.pix_mp.width;
+	output_fmt->fmt.pix_mp.height = f->fmt.pix_mp.height;
 	output_fmt->fmt.pix_mp.colorspace = fmt->fmt.pix_mp.colorspace;
 	output_fmt->fmt.pix_mp.xfer_func = fmt->fmt.pix_mp.xfer_func;
 	output_fmt->fmt.pix_mp.ycbcr_enc = fmt->fmt.pix_mp.ycbcr_enc;
@@ -295,8 +292,8 @@ static int iris_venc_s_fmt_input(struct iris_inst *inst, struct v4l2_format *f)
 	    f->fmt.pix_mp.height != inst->crop.height) {
 		inst->crop.top = 0;
 		inst->crop.left = 0;
-		inst->crop.width = fmt->fmt.pix_mp.width;
-		inst->crop.height = fmt->fmt.pix_mp.height;
+		inst->crop.width = f->fmt.pix_mp.width;
+		inst->crop.height = f->fmt.pix_mp.height;
 
 		iris_venc_s_fmt_output(inst, output_fmt);
 	}
@@ -414,10 +411,13 @@ int iris_venc_s_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
 		goto reset_rate;
 	}
 
-	if (is_frame_rate)
+	if (is_frame_rate) {
 		inst->frame_rate = fps;
-	else
+	} else {
 		inst->operating_rate = fps;
+		/* OUTPUT frame interval also defines the coded frame interval. */
+		inst->frame_rate = fps;
+	}
 
 	if ((s_parm->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE && vb2_is_streaming(src_q)) ||
 	    (s_parm->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE && vb2_is_streaming(dst_q))) {
@@ -433,9 +433,8 @@ int iris_venc_s_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
 
 reset_rate:
 	if (ret) {
-		if (is_frame_rate)
-			inst->frame_rate = default_rate;
-		else
+		inst->frame_rate = default_rate;
+		if (!is_frame_rate)
 			inst->operating_rate = default_rate;
 	}
 
@@ -461,7 +460,7 @@ int iris_venc_g_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
 	return 0;
 }
 
-int iris_venc_streamon_input(struct iris_inst *inst)
+static int iris_venc_prepare_input(struct iris_inst *inst)
 {
 	int ret;
 
@@ -493,12 +492,35 @@ int iris_venc_streamon_input(struct iris_inst *inst)
 	if (ret)
 		return ret;
 
+	return 0;
+}
+
+int iris_venc_streamon_input(struct iris_inst *inst)
+{
+	int ret;
+
+	if (!inst->core->iris_firmware_data->hfi_4xx ||
+	    inst->state == IRIS_INST_OUTPUT_STREAMING) {
+		ret = iris_venc_prepare_input(inst);
+		if (ret)
+			return ret;
+	}
+
 	return iris_process_streamon_input(inst);
 }
 
 int iris_venc_streamon_output(struct iris_inst *inst)
 {
 	int ret;
+
+	if (inst->core->iris_firmware_data->hfi_4xx) {
+		if (inst->state == IRIS_INST_INPUT_STREAMING) {
+			ret = iris_venc_prepare_input(inst);
+			if (ret)
+				return ret;
+		}
+		return iris_process_streamon_output(inst);
+	}
 
 	ret = iris_set_properties(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 	if (ret)
@@ -555,7 +577,7 @@ int iris_venc_qbuf(struct iris_inst *inst, struct vb2_v4l2_buffer *vbuf)
 		iris_set_ts_metadata(inst, vbuf);
 
 	q = v4l2_m2m_get_vq(inst->m2m_ctx, vb2->type);
-	if (!vb2_is_streaming(q)) {
+	if (!vb2_is_streaming(q) || inst->state != IRIS_INST_STREAMING) {
 		buf->attr |= BUF_ATTR_DEFERRED;
 		return 0;
 	}

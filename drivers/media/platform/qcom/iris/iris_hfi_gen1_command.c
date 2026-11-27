@@ -31,8 +31,6 @@ static u32 iris_hfi_gen1_buf_type_from_driver(enum iris_buffer_type buffer_type)
 		return HFI_BUFFER_INTERNAL_SCRATCH_2;
 	case BUF_ARP:
 		return HFI_BUFFER_INTERNAL_PERSIST;
-	case BUF_RECON:
-		return HFI_BUFFER_INTERNAL_RECON;
 	default:
 		return -EINVAL;
 	}
@@ -65,10 +63,10 @@ u32 iris_hfi_gen1_get_buffer_count(struct iris_inst *inst, enum iris_buffer_type
 		return 0;
 
 	req = &inst_hfi->buffer_requirements[hfi_type];
-	/* HFI 4XX uses the old hold-count word for the firmware minimum. */
-	count = max3(req->hold_count, req->count_min, req->count_actual);
+	/* HFI 4XX leaves the host-minimum word uninitialized for encoder scratch. */
+	count = req->count_actual;
 	if (type == BUF_DPB)
-		return max_t(u32, count, iris_vpu_buf_count(inst, type));
+		return max_t(u32, max(count, req->hold_count), iris_vpu_buf_count(inst, type));
 
 	return count;
 }
@@ -238,8 +236,13 @@ static int iris_hfi_gen1_session_start(struct iris_inst *inst, u32 plane)
 	struct hfi_session_pkt packet;
 	int ret;
 
-	if (!V4L2_TYPE_IS_OUTPUT(plane))
+	if (inst->domain == ENCODER && core->iris_firmware_data->hfi_4xx) {
+		if ((V4L2_TYPE_IS_OUTPUT(plane) && inst->state != IRIS_INST_OUTPUT_STREAMING) ||
+		    (V4L2_TYPE_IS_CAPTURE(plane) && inst->state != IRIS_INST_INPUT_STREAMING))
+			return 0;
+	} else if (!V4L2_TYPE_IS_OUTPUT(plane)) {
 		return 0;
+	}
 
 	if (inst->sub_state & IRIS_INST_SUB_LOAD_RESOURCES)
 		return 0;
@@ -255,6 +258,11 @@ static int iris_hfi_gen1_session_start(struct iris_inst *inst, u32 plane)
 	if (ret)
 		return ret;
 
+	/* Keep resource ownership visible if the following START command fails. */
+	ret = iris_inst_change_sub_state(inst, 0, IRIS_INST_SUB_LOAD_RESOURCES);
+	if (ret)
+		return ret;
+
 	reinit_completion(&inst->completion);
 	iris_hfi_gen1_packet_session_cmd(inst, &packet, HFI_CMD_SESSION_START);
 
@@ -262,11 +270,7 @@ static int iris_hfi_gen1_session_start(struct iris_inst *inst, u32 plane)
 	if (ret)
 		return ret;
 
-	ret = iris_wait_for_session_response(inst, false);
-	if (ret)
-		return ret;
-
-	return iris_inst_change_sub_state(inst, 0, IRIS_INST_SUB_LOAD_RESOURCES);
+	return iris_wait_for_session_response(inst, false);
 }
 
 static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
@@ -318,9 +322,7 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 						 VB2_BUF_STATE_ERROR);
 		}
 	} else {
-		if (inst->state == IRIS_INST_STREAMING ||
-		    inst->state == IRIS_INST_INPUT_STREAMING ||
-		    inst->state == IRIS_INST_ERROR) {
+		if (inst->sub_state & IRIS_INST_SUB_LOAD_RESOURCES) {
 			reinit_completion(&inst->completion);
 			iris_hfi_gen1_packet_session_cmd(inst, &pkt, HFI_CMD_SESSION_STOP);
 			ret = iris_hfi_queue_cmd_write(core, &pkt, pkt.shdr.hdr.size);
@@ -353,7 +355,8 @@ static int iris_hfi_gen1_session_continue(struct iris_inst *inst, u32 plane)
 
 	if (inst->core->iris_firmware_data->hfi_4xx) {
 		/* HFI 4xx resumes both output streams with one command. */
-		if (V4L2_TYPE_IS_CAPTURE(plane))
+		if (V4L2_TYPE_IS_CAPTURE(plane) &&
+		    (inst->sub_state & IRIS_INST_SUB_INPUT_PAUSE))
 			return 0;
 
 		if (inst->sub_state & IRIS_INST_SUB_DRC_LAST) {
@@ -370,15 +373,16 @@ static int iris_hfi_gen1_session_continue(struct iris_inst *inst, u32 plane)
 
 static int iris_hfi_gen1_queue_input_buffer(struct iris_inst *inst, struct iris_buffer *buf)
 {
-	struct hfi_session_empty_buffer_compressed_pkt com_ip_pkt;
-	struct hfi_session_empty_buffer_uncompressed_pkt uncom_ip_pkt;
+	struct hfi_session_empty_buffer_compressed_pkt com_ip_pkt = {0};
+	struct hfi_session_empty_buffer_uncompressed_pkt uncom_ip_pkt = {0};
+	u64 timestamp = div_u64(buf->timestamp, NSEC_PER_USEC);
 
 	if (inst->domain == DECODER) {
 		com_ip_pkt.shdr.hdr.size = sizeof(struct hfi_session_empty_buffer_compressed_pkt);
 		com_ip_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
 		com_ip_pkt.shdr.session_id = inst->session_id;
-		com_ip_pkt.time_stamp_hi = upper_32_bits(buf->timestamp);
-		com_ip_pkt.time_stamp_lo = lower_32_bits(buf->timestamp);
+		com_ip_pkt.time_stamp_hi = upper_32_bits(timestamp);
+		com_ip_pkt.time_stamp_lo = lower_32_bits(timestamp);
 		com_ip_pkt.flags = 0;
 		com_ip_pkt.mark_target = 0;
 		com_ip_pkt.mark_data = 0;
@@ -394,10 +398,10 @@ static int iris_hfi_gen1_queue_input_buffer(struct iris_inst *inst, struct iris_
 			sizeof(struct hfi_session_empty_buffer_uncompressed_pkt);
 		uncom_ip_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
 		uncom_ip_pkt.shdr.session_id = inst->session_id;
-		uncom_ip_pkt.time_stamp_hi = upper_32_bits(buf->timestamp);
-		uncom_ip_pkt.time_stamp_lo = lower_32_bits(buf->timestamp);
+		uncom_ip_pkt.time_stamp_hi = upper_32_bits(timestamp);
+		uncom_ip_pkt.time_stamp_lo = lower_32_bits(timestamp);
 		uncom_ip_pkt.view_id = 0;
-		uncom_ip_pkt.flags = buf->flags;
+		uncom_ip_pkt.flags = 0;
 		uncom_ip_pkt.mark_target = 0;
 		uncom_ip_pkt.mark_data = 0;
 		uncom_ip_pkt.offset = buf->data_offset;
@@ -482,7 +486,6 @@ static int iris_hfi_gen1_session_queue_buffer(struct iris_inst *inst, struct iri
 	case BUF_SCRATCH_1:
 	case BUF_SCRATCH_2:
 	case BUF_ARP:
-	case BUF_RECON:
 		return iris_hfi_gen1_queue_internal_buffer(inst, buf);
 	default:
 		return -EINVAL;
@@ -679,16 +682,41 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
 	}
 	case HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT: {
 		struct hfi_profile_level *in = pdata, *pl = prop_data;
+		static const u32 h264_profiles[] = {
+			[V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE] = HFI_H264_PROFILE_BASELINE,
+			[V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE] =
+				HFI_H264_PROFILE_CONSTRAINED_BASE,
+			[V4L2_MPEG_VIDEO_H264_PROFILE_MAIN] = HFI_H264_PROFILE_MAIN,
+			[V4L2_MPEG_VIDEO_H264_PROFILE_HIGH] = HFI_H264_PROFILE_HIGH,
+			[V4L2_MPEG_VIDEO_H264_PROFILE_STEREO_HIGH] = HFI_H264_PROFILE_STEREO_HIGH,
+			[V4L2_MPEG_VIDEO_H264_PROFILE_MULTIVIEW_HIGH] =
+				HFI_H264_PROFILE_MULTIVIEW_HIGH,
+		};
+		static const u32 hevc_profiles[] = {
+			[V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN] = HFI_HEVC_PROFILE_MAIN,
+			[V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE] =
+				HFI_HEVC_PROFILE_MAIN_STILL_PIC,
+			[V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10] = HFI_HEVC_PROFILE_MAIN10,
+		};
 
-		pl->level = in->level;
-		pl->profile = in->profile;
-		if (pl->profile <= 0)
-			/* Profile not supported, falling back to high */
-			pl->profile = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
-
-		if (!pl->level)
-			/* Level not supported, falling back to 1 */
-			pl->level = 1;
+		if (inst->codec == V4L2_PIX_FMT_H264) {
+			if (in->profile >= ARRAY_SIZE(h264_profiles) ||
+			    !h264_profiles[in->profile] ||
+			    in->level > V4L2_MPEG_VIDEO_H264_LEVEL_5_1)
+				return -EINVAL;
+			pl->profile = h264_profiles[in->profile];
+		} else {
+			if (in->profile >= ARRAY_SIZE(hevc_profiles) ||
+			    in->level > V4L2_MPEG_VIDEO_HEVC_LEVEL_6_2)
+				return -EINVAL;
+			pl->profile = hevc_profiles[in->profile];
+		}
+		/* HFI levels are bit masks; V4L2 levels are consecutive menu indices. */
+		if (inst->fw_caps[inst->codec == V4L2_PIX_FMT_H264 ? LEVEL_H264 :
+				  LEVEL_HEVC].flags & CAP_FLAG_CLIENT_SET)
+			pl->level = BIT(in->level);
+		else
+			pl->level = 0;
 
 		packet->shdr.hdr.size += sizeof(*pl);
 		break;
@@ -730,12 +758,18 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
 	}
 	case HFI_PROPERTY_PARAM_VENC_H264_ENTROPY_CONTROL: {
 		struct hfi_h264_entropy_control *entropy = prop_data;
-		u32 *in = pdata;
+		struct hfi_h264_entropy_control *in = pdata;
 
-		entropy->entropy_mode = *in;
-		if (entropy->entropy_mode == HFI_H264_ENTROPY_CABAC)
-			entropy->cabac_model = HFI_H264_CABAC_MODEL_0;
+		*entropy = *in;
 		packet->shdr.hdr.size += sizeof(*entropy);
+		break;
+	}
+	case HFI_PROPERTY_PARAM_VENC_VUI_TIMING_INFO: {
+		struct hfi_vui_timing_info *timing = prop_data;
+		struct hfi_vui_timing_info *in = pdata;
+
+		*timing = *in;
+		packet->shdr.hdr.size += sizeof(*timing);
 		break;
 	}
 	case HFI_PROPERTY_PARAM_VENC_SESSION_QP_RANGE_V2: {
@@ -894,6 +928,11 @@ static int iris_hfi_gen1_set_resolution(struct iris_inst *inst, u32 plane)
 		fs.buffer_type = HFI_BUFFER_INPUT;
 		fs.width = inst->fmt_src->fmt.pix_mp.width;
 		fs.height = inst->fmt_src->fmt.pix_mp.height;
+		if (inst->domain == ENCODER) {
+			/* Padding belongs to plane layout, not the visible input frame. */
+			fs.width = inst->crop.width;
+			fs.height = inst->crop.height;
+		}
 
 		ret = hfi_gen1_set_property(inst, ptype, &fs, sizeof(fs));
 		if (ret)
@@ -991,7 +1030,9 @@ static int iris_hfi_gen1_set_num_bufs(struct iris_inst *inst, u32 plane)
 
 	buf_count.type = HFI_BUFFER_INPUT;
 	buf_count.count_actual = VIDEO_MAX_FRAME;
-	buf_count.count_min_host = VIDEO_MAX_FRAME;
+	if (inst->domain == ENCODER && inst->core->iris_firmware_data->hfi_4xx)
+		buf_count.count_actual = vb2_get_num_buffers(v4l2_m2m_get_src_vq(inst->m2m_ctx));
+	buf_count.count_min_host = buf_count.count_actual;
 
 	ret = hfi_gen1_set_property(inst, ptype, &buf_count, sizeof(buf_count));
 	if (ret)
@@ -1034,7 +1075,10 @@ static int iris_hfi_gen1_set_num_bufs(struct iris_inst *inst, u32 plane)
 	} else {
 		buf_count.type = HFI_BUFFER_OUTPUT;
 		buf_count.count_actual = VIDEO_MAX_FRAME;
-		buf_count.count_min_host = VIDEO_MAX_FRAME;
+		if (inst->core->iris_firmware_data->hfi_4xx)
+			buf_count.count_actual =
+				vb2_get_num_buffers(v4l2_m2m_get_dst_vq(inst->m2m_ctx));
+		buf_count.count_min_host = buf_count.count_actual;
 
 		ret = hfi_gen1_set_property(inst, ptype, &buf_count, sizeof(buf_count));
 	}
@@ -1117,13 +1161,29 @@ static int iris_hfi_gen1_set_frame_rate(struct iris_inst *inst, u32 plane)
 	const u32 ptype = HFI_PROPERTY_CONFIG_FRAME_RATE;
 	struct hfi_framerate frate;
 
-	if (V4L2_TYPE_IS_OUTPUT(plane))
+	if (V4L2_TYPE_IS_OUTPUT(plane) && !inst->core->iris_firmware_data->hfi_4xx)
 		return 0;
 
 	frate.buffer_type = HFI_BUFFER_OUTPUT;
 	frate.framerate = inst->frame_rate << 16;
 
 	return hfi_gen1_set_property(inst, ptype, &frate, sizeof(frate));
+}
+
+static int iris_hfi_gen1_set_vui_timing(struct iris_inst *inst, u32 plane)
+{
+	struct hfi_vui_timing_info timing = {
+		.enable = 1,
+		.fixed_frame_rate = 1,
+		/* Two ticks per frame avoid rounding the period to nanoseconds. */
+		.time_scale = inst->frame_rate * 2,
+	};
+
+	if (inst->codec != V4L2_PIX_FMT_H264)
+		return 0;
+
+	return hfi_gen1_set_property(inst, HFI_PROPERTY_PARAM_VENC_VUI_TIMING_INFO,
+				     &timing, sizeof(timing));
 }
 
 static int iris_hfi_gen1_set_stride(struct iris_inst *inst, u32 plane)
@@ -1189,6 +1249,8 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
 	static const struct iris_hfi_prop_type_handle venc_prop_type_handle_inp_arr[] = {
 		{HFI_PROPERTY_CONFIG_FRAME_RATE,
 			iris_hfi_gen1_set_frame_rate},
+		{HFI_PROPERTY_PARAM_VENC_VUI_TIMING_INFO,
+			iris_hfi_gen1_set_vui_timing},
 		{HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_INFO,
 			iris_hfi_gen1_set_stride},
 		{HFI_PROPERTY_PARAM_FRAME_SIZE,
@@ -1242,6 +1304,7 @@ static const struct iris_hfi_session_ops iris_hfi_gen1_session_ops = {
 	.session_queue_buf = iris_hfi_gen1_session_queue_buffer,
 	.session_release_buf = iris_hfi_gen1_session_unset_buffers,
 	.session_resume_drc = iris_hfi_gen1_session_continue,
+	.session_resume_drain = iris_hfi_gen1_session_continue,
 	.session_stop = iris_hfi_gen1_session_stop,
 	.session_drain = iris_hfi_gen1_session_drain,
 	.session_close = iris_hfi_gen1_session_close,

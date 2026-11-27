@@ -9,6 +9,7 @@
 #include <media/videobuf2-v4l2.h>
 
 struct iris_inst;
+struct iris_secure_buffer;
 
 #define to_iris_buffer(ptr)	container_of(ptr, struct iris_buffer, vb2)
 
@@ -28,7 +29,6 @@ struct iris_inst;
  * @BUF_SCRATCH_2: buffer to store encoding context data for HW
  * @BUF_VPSS: buffer to store VPSS context data for HW
  * @BUF_PARTIAL: buffer for AV1 IBC data
- * @BUF_RECON: buffer for Gen1 encoder reconstruction frames
  * @BUF_TYPE_MAX: max buffer types
  */
 enum iris_buffer_type {
@@ -45,7 +45,6 @@ enum iris_buffer_type {
 	BUF_SCRATCH_2,
 	BUF_VPSS,
 	BUF_PARTIAL,
-	BUF_RECON,
 	BUF_TYPE_MAX,
 };
 
@@ -81,6 +80,7 @@ enum iris_buffer_attributes {
  * @device_addr: device address of the buffer
  * @kvaddr: kernel virtual address of the buffer
  * @dma_attrs: dma attributes
+ * @secure: protected allocation owned by the CP non-pixel VMID
  * @flags: buffer flags. It is represented as bit masks.
  * @timestamp: timestamp of the buffer in nano seconds (ns)
  * @attr: enum for iris buffer attributes
@@ -98,6 +98,7 @@ struct iris_buffer {
 	dma_addr_t			device_addr;
 	void				*kvaddr;
 	unsigned long			dma_attrs;
+	struct iris_secure_buffer	*secure;
 	u32				flags; /* V4L2_BUF_FLAG_* */
 	u64				timestamp;
 	enum iris_buffer_attributes	attr;
