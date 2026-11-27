@@ -495,6 +495,37 @@ error:
 	dev_err(inst->core->dev, "error in etb done\n");
 }
 
+static int iris_hfi_gen1_requeue_output_buffer(struct iris_inst *inst,
+					       struct iris_buffer *buf)
+{
+	struct iris_inst_hfi_gen1 *inst_hfi_gen1 = to_iris_inst_hfi_gen1(inst);
+	u64 timestamp = buf->timestamp;
+	int ret;
+
+	buf->data_size = 0;
+	buf->timestamp = 0;
+	buf->flags = 0;
+	buf->attr &= ~BUF_ATTR_DEQUEUED;
+	buf->attr |= BUF_ATTR_DEFERRED;
+
+	/* Leave flushed or stopping buffers for streamoff cleanup or next streamon. */
+	if (inst_hfi_gen1->output_stopping ||
+	    inst->flush_responses_pending ||
+	    (inst->state != IRIS_INST_STREAMING &&
+	     inst->state != IRIS_INST_OUTPUT_STREAMING))
+		return 0;
+
+	ret = iris_queue_buffer(inst, buf);
+	if (ret) {
+		buf->attr &= ~BUF_ATTR_DEFERRED;
+		buf->attr |= BUF_ATTR_DEQUEUED;
+		buf->flags = V4L2_BUF_FLAG_ERROR;
+		buf->timestamp = timestamp;
+	}
+
+	return ret;
+}
+
 static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 {
 	struct hfi_msg_session_fbd_uncompressed_plane0_pkt *uncom_pkt = packet;
@@ -607,6 +638,12 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 				inst->last_buffer_dequeued = true;
 			}
 		}
+		if (!(flags & V4L2_BUF_FLAG_LAST) &&
+		    (hfi_flags & HFI_BUFFERFLAG_DATACORRUPT) &&
+		    !(hfi_flags & HFI_BUFFERFLAG_TIMESTAMPINVALID)) {
+			timestamp_us = timestamp_hi;
+			timestamp_us = (timestamp_us << 32) | timestamp_lo;
+		}
 	}
 	buf->timestamp = timestamp_us * NSEC_PER_USEC;
 
@@ -630,14 +667,23 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 
 	buf->attr &= ~BUF_ATTR_QUEUED;
 	buf->attr |= BUF_ATTR_DEQUEUED;
-	buf->attr |= BUF_ATTR_BUFFER_DONE;
 
 	if (hfi_flags & HFI_BUFFERFLAG_DATACORRUPT)
 		flags |= V4L2_BUF_FLAG_ERROR;
 
-	if (hfi_flags & HFI_BUFFERFLAG_DROP_FRAME)
-		flags |= V4L2_BUF_FLAG_ERROR;
+	if (hfi_flags & HFI_BUFFERFLAG_DROP_FRAME) {
+		if (inst->domain == DECODER && buf->type == BUF_OUTPUT &&
+		    !(flags & (V4L2_BUF_FLAG_ERROR | V4L2_BUF_FLAG_LAST)) &&
+		    inst->state != IRIS_INST_ERROR) {
+			/* Non-display pictures (e.g. VP9 invisible alt-ref) are not errors. */
+			if (!iris_hfi_gen1_requeue_output_buffer(inst, buf))
+				return;
+		} else if (!(flags & V4L2_BUF_FLAG_LAST)) {
+			flags |= V4L2_BUF_FLAG_ERROR;
+		}
+	}
 
+	buf->attr |= BUF_ATTR_BUFFER_DONE;
 	buf->flags |= flags;
 
 	iris_vb2_buffer_done(inst, buf);

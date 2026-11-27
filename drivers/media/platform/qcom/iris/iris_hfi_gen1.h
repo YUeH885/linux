@@ -18,6 +18,7 @@ struct iris_inst_hfi_gen1 {
 	struct iris_inst inst;
 	struct hfi_buffer_requirements buffer_requirements[HFI_BUFFER_INTERNAL_RECON + 1];
 	struct completion initial_src_change;
+	bool output_stopping;
 };
 
 int iris_hfi_gen1_parse_caps(struct iris_core *core,

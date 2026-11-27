@@ -313,6 +313,7 @@ static int iris_hfi_gen1_session_start(struct iris_inst *inst, u32 plane)
 
 static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 {
+	struct iris_inst_hfi_gen1 *inst_hfi_gen1 = to_iris_inst_hfi_gen1(inst);
 	struct hfi_session_flush_pkt flush_pkt;
 	struct iris_core *core = inst->core;
 	struct hfi_session_pkt pkt;
@@ -336,7 +337,10 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 			ret = iris_hfi_queue_cmd_write(core, &flush_pkt, flush_pkt.shdr.hdr.size);
 			if (!ret) {
 				inst->flush_responses_pending++;
+				/* Wait drops inst->lock while capture buffers return. */
+				inst_hfi_gen1->output_stopping = true;
 				ret = iris_wait_for_session_response(inst, true);
+				inst_hfi_gen1->output_stopping = false;
 			}
 		} else if (inst->sub_state & IRIS_INST_SUB_LOAD_RESOURCES) {
 			reinit_completion(&inst->completion);
