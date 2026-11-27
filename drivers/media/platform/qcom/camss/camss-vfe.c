@@ -1186,8 +1186,6 @@ int vfe_get(struct vfe_device *vfe)
 
 		vfe_reset_output_maps(vfe);
 
-		vfe_init_outputs(vfe);
-
 		vfe->res->hw_ops->hw_version(vfe);
 	} else {
 		ret = vfe_check_clock_rates(vfe);
@@ -2014,6 +2012,7 @@ int msm_vfe_subdev_init(struct camss *camss, struct vfe_device *vfe,
 	vfe->camss = camss;
 	vfe->id = id;
 	vfe->reg_update = 0;
+	vfe_init_outputs(vfe);
 
 	for (i = VFE_LINE_RDI0; i < vfe->res->line_num; i++) {
 		struct vfe_line *l = &vfe->line[i];
