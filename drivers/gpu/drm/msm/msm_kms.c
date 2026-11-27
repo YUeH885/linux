@@ -204,7 +204,7 @@ struct drm_gpuvm *msm_kms_init_vm(struct drm_device *dev, struct device *mdss_de
 		return ERR_CAST(mmu);
 
 	vm = msm_gem_vm_create(dev, mmu, "mdp_kms",
-			       0x1000, 0x100000000 - 0x1000, true);
+			       0x1000, 0x100000000 - 0x1000, PAGE_SIZE, true);
 	if (IS_ERR(vm)) {
 		dev_err(mdp_dev, "vm create, error %pe\n", vm);
 		mmu->funcs->destroy(mmu);
