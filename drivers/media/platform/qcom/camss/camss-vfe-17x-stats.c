@@ -210,21 +210,24 @@ static void vfe_stats_bf_dmi(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
 	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+	unsigned int in_width = line->dual_ife ? line->dual_left_in_w : sink->width;
 	const unsigned int h_num = 5;
 	const unsigned int v_num = 5;
 	unsigned int left = VFE_STATS_BF_MARGIN_X;
 	unsigned int top = VFE_STATS_BF_MARGIN_Y;
-	unsigned int width = sink->width - 2 * VFE_STATS_BF_MARGIN_X;
+	unsigned int width = in_width - 2 * VFE_STATS_BF_MARGIN_X;
 	unsigned int height = sink->height - 2 * VFE_STATS_BF_MARGIN_Y;
 	unsigned int roi_width, roi_height;
 	unsigned int i;
 
 	if (!vfe_stats_bf_roi_is_default(&line->bf_roi) &&
 	    !vfe_stats_bf_roi_validate(line, &line->bf_roi)) {
-		left = line->bf_roi.left;
+		unsigned int max_right = in_width - VFE_STATS_BF_MARGIN_X;
+
 		top = line->bf_roi.top;
-		width = line->bf_roi.width;
 		height = line->bf_roi.height;
+		width = min_t(unsigned int, line->bf_roi.width, width);
+		left = min_t(unsigned int, line->bf_roi.left, max_right - width) & ~1U;
 	}
 	roi_width = (width / h_num) & ~1U;
 	roi_height = (height / v_num) & ~1U;
@@ -280,15 +283,16 @@ int vfe_17x_stats_start(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
 	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+	unsigned int in_width = line->dual_ife ? line->dual_left_in_w : sink->width;
 	unsigned int region_width =
-		(sink->width / V4L2_QCOM_CAMSS_AWB_BG_H_NUM) & ~1U;
+		(in_width / V4L2_QCOM_CAMSS_AWB_BG_H_NUM) & ~1U;
 	unsigned int region_height =
 		(sink->height / V4L2_QCOM_CAMSS_AWB_BG_V_NUM) & ~1U;
 	struct vfe_17x_stats *stats = line->stats;
 	unsigned long flags;
 	unsigned int i;
 
-	if (sink->width < 256 || sink->height < 128)
+	if (in_width < 256 || sink->height < 128)
 		return -EINVAL;
 
 	if (!stats) {
@@ -341,7 +345,7 @@ int vfe_17x_stats_start(struct vfe_line *line)
 
 	writel_relaxed(0, vfe->base + VFE_STATS_BHIST_RGN_OFFSET_CFG);
 	writel_relaxed((((sink->height / 2) - 1) << 16) |
-		       ((sink->width / 2) - 1),
+		       ((in_width / 2) - 1),
 		       vfe->base + VFE_STATS_BHIST_RGN_NUM_CFG);
 
 	/* Nonuniform bin edges are fixed by hardware and do not use this LUT. */
@@ -359,7 +363,7 @@ int vfe_17x_stats_start(struct vfe_line *line)
 	writel_relaxed(VFE_STATS_BF_MARGIN_Y << 16 | VFE_STATS_BF_MARGIN_X,
 		       vfe->base + VFE_STATS_BF_ACTIVE_WINDOW_CFG);
 	writel_relaxed((sink->height - VFE_STATS_BF_MARGIN_Y) << 16 |
-		       (sink->width - VFE_STATS_BF_MARGIN_X),
+		       (in_width - VFE_STATS_BF_MARGIN_X),
 		       vfe->base + VFE_STATS_BF_ACTIVE_WINDOW_CFG + 4);
 	writel_relaxed(0, vfe->base + VFE_STATS_BF_SHIFT_BITS_CFG);
 	vfe_stats_bf_filters(vfe);

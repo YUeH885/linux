@@ -880,6 +880,8 @@ static void vfe_disable_output(struct vfe_line *line)
 
 	/* An IRQ may still have a completion for a disabled master. */
 	synchronize_irq(vfe->irq);
+	if (line->dual_ife && line->slave_vfe)
+		synchronize_irq(line->slave_vfe->irq);
 	vfe_put_output(line);
 }
 
@@ -1014,13 +1016,14 @@ static bool vfe_check_clock_levels(struct camss_clock *clock)
  */
 static int vfe_set_clock_rates(struct vfe_device *vfe)
 {
+	struct vfe_device *src_vfe = vfe->dual_master_vfe ?: vfe;
 	struct device *dev = vfe->camss->dev;
 	u64 pixel_clock[VFE_LINE_NUM_MAX];
 	int i, j;
 	int ret;
 
-	for (i = VFE_LINE_RDI0; i < vfe->res->line_num; i++) {
-		struct vfe_line *line = &vfe->line[i];
+	for (i = VFE_LINE_RDI0; i < src_vfe->res->line_num; i++) {
+		struct vfe_line *line = &src_vfe->line[i];
 		u8 bpp = camss_format_get_bpp(line->sink_formats, line->nsink_formats,
 					      line->fmt[MSM_VFE_PAD_SINK].code);
 
@@ -1037,10 +1040,10 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 			u64 min_rate = 0;
 			long rate;
 
-			for (j = VFE_LINE_RDI0; j < vfe->res->line_num; j++) {
+			for (j = VFE_LINE_RDI0; j < src_vfe->res->line_num; j++) {
 				u32 tmp;
 				u8 bpp;
-				struct vfe_line *l = &vfe->line[j];
+				struct vfe_line *l = &src_vfe->line[j];
 
 				bpp = camss_format_get_bpp(l->sink_formats,
 							   l->nsink_formats,
@@ -1262,6 +1265,8 @@ int vfe_flush_buffers(struct camss_video *vid,
 	if (vid->vb2_q.uses_requests)
 		WRITE_ONCE(vid->requests_stopping, true);
 	synchronize_irq(vfe->irq);
+	if (line->dual_ife && line->slave_vfe)
+		synchronize_irq(line->slave_vfe->irq);
 	if (vid->vb2_q.uses_requests)
 		flush_workqueue(vid->request_wq);
 	spin_lock_irqsave(&vfe->output_lock, flags);
@@ -1464,7 +1469,8 @@ static void vfe_try_format(struct vfe_line *line,
 
 	fmt->colorspace = V4L2_COLORSPACE_SRGB;
 	if (vfe_has_raw_isp(line) && pad == MSM_VFE_PAD_SINK) {
-		fmt->width = clamp_t(u32, fmt->width, 16, 4096) & ~1;
+		/* Frames wider than 4096 pixels use Dual-IFE left/right striping. */
+		fmt->width = clamp_t(u32, fmt->width, 16, 8190) & ~1;
 		fmt->height = clamp_t(u32, fmt->height, 4, 4096) & ~1;
 	}
 }

@@ -20,6 +20,7 @@
 #include <uapi/linux/qcom_camss.h>
 
 #include "camss.h"
+#include "camss-csid.h"
 #include "camss-vfe.h"
 #include "camss-vfe-17x-stats.h"
 #include "camss-vfe-17x-tuning.h"
@@ -311,14 +312,22 @@ static int vfe_pix_pattern(u32 code)
 	}
 }
 
-static void vfe_pix_wm_geometry(struct vfe_line *line, u8 wm, u32 *width,
-				u32 *height, u32 *stride, u32 *frame_inc)
+static void vfe_pix_wm_geometry(struct vfe_line *line, struct vfe_device *vfe,
+				u8 wm, u32 *width, u32 *height, u32 *stride,
+				u32 *frame_inc)
 {
 	struct vfe_output *output = &line->output;
 	struct v4l2_pix_format_mplane *pix =
 		&line->video_out.active_fmt.fmt.pix_mp;
 
-	*width = pix->width;
+	if (line->dual_ife) {
+		u32 left_w = (pix->width / 2) & ~0xfU;
+
+		*width = (vfe == line->slave_vfe) ?
+			 (pix->width - left_w) : left_w;
+	} else {
+		*width = pix->width;
+	}
 	*height = pix->height;
 	if (wm == output->wm_idx[1])
 		*height /= 2;
@@ -354,6 +363,69 @@ static void vfe_pix_scale(struct vfe_device *vfe, u32 base,
 	writel_relaxed(in_height - 1, vfe->base + VFE_SCALE_V_PAD(base));
 }
 
+static void vfe_pix_scale_stripe(struct vfe_device *vfe, u32 base,
+				 u32 full_in_w, u32 full_in_h,
+				 u32 full_out_w, u32 full_out_h,
+				 u32 csid_start, u32 stripe_in_w,
+				 u32 out_start, u32 out_end)
+{
+	u8 h_res = vfe_calc_interp_reso(full_in_w, full_out_w);
+	u32 h_phase_step = (full_in_w << (14 + h_res)) / full_out_w;
+	u64 phase_unit = 1ULL << (14 + h_res);
+	u32 last_in = min_t(u32, full_in_w,
+			    ((out_end + 1) * full_in_w + full_out_w - 1) /
+			    full_out_w) - 1;
+	u32 first_in = (out_start * full_in_w) / full_out_w;
+	u32 mn_acc = 0, out_cnt = 0, in_idx = 0, extra = 0;
+	u64 phase_acc = 0;
+	u32 h_skip, pad_end;
+
+	if (out_start > 0) {
+		while (true) {
+			mn_acc += full_out_w;
+			phase_acc += phase_unit;
+			if (mn_acc >= full_in_w) {
+				out_cnt++;
+				mn_acc -= full_in_w;
+				phase_acc -= h_phase_step;
+				if (phase_acc >= phase_unit)
+					phase_acc = phase_unit - 1;
+			}
+			if (in_idx >= first_in) {
+				in_idx++;
+				break;
+			}
+			in_idx++;
+			if (out_cnt >= out_start)
+				break;
+		}
+		if (in_idx > first_in && phase_acc < 0x4000)
+			extra = 1;
+	}
+
+	h_skip = (first_in > csid_start ? first_in - csid_start : 0) + extra;
+	pad_end = clamp_t(u32, last_in > csid_start ? last_in - csid_start : 0,
+			  h_skip, stripe_in_w - 1);
+
+	writel_relaxed(SCALE_H_EN | SCALE_V_EN, vfe->base + base);
+	writel_relaxed(((full_out_w - 1) << 16) | (full_in_w - 1),
+		       vfe->base + VFE_SCALE_H_SIZE(base));
+	writel_relaxed(((u32)h_res << 28) | (h_phase_step & 0x3fffff),
+		       vfe->base + VFE_SCALE_H_PHASE(base));
+	writel_relaxed(mn_acc & 0x3fff, vfe->base + VFE_SCALE_H_STRIPE(base));
+	writel_relaxed((u32)phase_acc & 0x3fffff,
+		       vfe->base + VFE_SCALE_H_PHASE_INIT(base));
+	writel_relaxed(BIT(31) | ((h_skip & 0x3fff) << 16) | (pad_end & 0x3fff),
+		       vfe->base + VFE_SCALE_H_PAD(base));
+	writel_relaxed(((full_out_h - 1) << 16) | (full_in_h - 1),
+		       vfe->base + VFE_SCALE_V_SIZE(base));
+	writel_relaxed(vfe_scale_phase(full_in_h, full_out_h),
+		       vfe->base + VFE_SCALE_V_PHASE(base));
+	writel_relaxed(0, vfe->base + VFE_SCALE_V_STRIPE(base));
+	writel_relaxed(0, vfe->base + VFE_SCALE_V_PHASE_INIT(base));
+	writel_relaxed(full_in_h - 1, vfe->base + VFE_SCALE_V_PAD(base));
+}
+
 static struct v4l2_qcom_camss_ife_crop vfe_pix_default_crop(const struct vfe_line *line)
 {
 	return (struct v4l2_qcom_camss_ife_crop) {
@@ -373,6 +445,59 @@ static void vfe_pix_write_crop(struct vfe_line *line,
 	u32 last = first + line->crop.width - 1;
 	u32 top = crop->top;
 	u32 bottom = top + line->crop.height - 1;
+
+	if (line->dual_ife && line->slave_vfe) {
+		struct vfe_device *slave = line->slave_vfe;
+		u32 out_w0 = (line->crop.width / 2) & ~0xfU;
+		u32 out_w1 = line->crop.width - out_w0;
+		u32 out_x0 = crop->left;
+		u32 out_x1 = crop->left + out_w0;
+
+		vfe_pix_scale_stripe(vfe, VFE_FULL_SCALE_Y_CFG,
+				     sink->width, sink->height,
+				     crop->compose_width, crop->compose_height,
+				     0, line->dual_left_in_w,
+				     out_x0, out_x1 - 1);
+		vfe_pix_scale_stripe(vfe, VFE_FULL_SCALE_C_CFG,
+				     sink->width, sink->height,
+				     crop->compose_width / 2,
+				     crop->compose_height / 2,
+				     0, line->dual_left_in_w,
+				     out_x0 / 2, out_x1 / 2 - 1);
+		writel_relaxed(out_w0 - 1,
+			       vfe->base + VFE_FULL_OUT_Y_CROP_PIXEL_CFG);
+		writel_relaxed((top << 16) | bottom,
+			       vfe->base + VFE_FULL_OUT_Y_CROP_LINE_CFG);
+		writel_relaxed(out_w0 - 1,
+			       vfe->base + VFE_FULL_OUT_C_CROP_PIXEL_CFG);
+		writel_relaxed((top / 2 << 16) | (bottom / 2),
+			       vfe->base + VFE_FULL_OUT_C_CROP_LINE_CFG);
+
+		vfe_pix_scale_stripe(slave, VFE_FULL_SCALE_Y_CFG,
+				     sink->width, sink->height,
+				     crop->compose_width, crop->compose_height,
+				     line->dual_right_in_x,
+				     line->dual_right_in_w,
+				     out_x1, out_x1 + out_w1 - 1);
+		vfe_pix_scale_stripe(slave, VFE_FULL_SCALE_C_CFG,
+				     sink->width, sink->height,
+				     crop->compose_width / 2,
+				     crop->compose_height / 2,
+				     line->dual_right_in_x,
+				     line->dual_right_in_w,
+				     out_x1 / 2,
+				     (out_x1 + out_w1) / 2 - 1);
+		writel_relaxed(out_w1 - 1,
+			       slave->base + VFE_FULL_OUT_Y_CROP_PIXEL_CFG);
+		writel_relaxed((top << 16) | bottom,
+			       slave->base + VFE_FULL_OUT_Y_CROP_LINE_CFG);
+		writel_relaxed(out_w1 - 1,
+			       slave->base + VFE_FULL_OUT_C_CROP_PIXEL_CFG);
+		writel_relaxed((top / 2 << 16) | (bottom / 2),
+			       slave->base + VFE_FULL_OUT_C_CROP_LINE_CFG);
+		line->ife_active_crop = *crop;
+		return;
+	}
 
 	vfe_pix_scale(vfe, VFE_FULL_SCALE_Y_CFG, sink->width, sink->height,
 		      crop->compose_width, crop->compose_height);
@@ -411,11 +536,10 @@ static void vfe_ife_write_black_level(struct vfe_device *vfe,
 		       vfe->base + VFE_BLS_CFG_2);
 }
 
-static void vfe_ife_write_demux(struct vfe_line *line,
-				const struct v4l2_qcom_camss_demux *demux,
-				int pattern)
+static void vfe_ife_write_demux_dev(struct vfe_device *vfe,
+				    const struct v4l2_qcom_camss_demux *demux,
+				    int pattern)
 {
-	struct vfe_device *vfe = to_vfe(line);
 	u32 r = demux->gain_q10[0] & 0x7fff;
 	u32 gr = demux->gain_q10[1] & 0x7fff;
 	u32 gb = demux->gain_q10[2] & 0x7fff;
@@ -430,6 +554,15 @@ static void vfe_ife_write_demux(struct vfe_line *line,
 	writel_relaxed(rb_reg, vfe->base + VFE_DEMUX_CFG + 8);
 	writel_relaxed(g_reg, vfe->base + VFE_DEMUX_CFG + 12);
 	writel_relaxed(rb_reg, vfe->base + VFE_DEMUX_CFG + 16);
+}
+
+static void vfe_ife_write_demux(struct vfe_line *line,
+				const struct v4l2_qcom_camss_demux *demux,
+				int pattern)
+{
+	vfe_ife_write_demux_dev(to_vfe(line), demux, pattern);
+	if (line->dual_ife && line->slave_vfe)
+		vfe_ife_write_demux_dev(line->slave_vfe, demux, pattern);
 }
 
 static void vfe_ife_write_bpc_wb(struct vfe_device *vfe, const u16 wb_gain_q7[4])
@@ -448,11 +581,10 @@ static void vfe_ife_write_bpc_wb(struct vfe_device *vfe, const u16 wb_gain_q7[4]
 		       vfe->base + VFE_BPC_CFG_0 + 16);
 }
 
-static void vfe_ife_write_bpc(struct vfe_line *line,
-			      const struct v4l2_qcom_camss_bpc *bpc)
+static void vfe_ife_write_bpc_dev(struct vfe_device *vfe,
+				  const struct vfe_line *line,
+				  const struct v4l2_qcom_camss_bpc *bpc)
 {
-	struct vfe_device *vfe = to_vfe(line);
-
 	writel_relaxed((bpc->enable & 0x7) | ((u32)(bpc->sat_value & 0xfff) << 3),
 		       vfe->base + VFE_BPC_CFG_0);
 	vfe_ife_write_bpc_wb(vfe, line->ife_wb_gain_q7);
@@ -466,21 +598,31 @@ static void vfe_ife_write_bpc(struct vfe_line *line,
 	writel_relaxed(0, vfe->base + VFE_BPC_CFG_0 + 28);
 }
 
-static void vfe_ife_write_abf(struct vfe_line *line,
-			      const struct v4l2_qcom_camss_abf *abf,
-			      bool reset_bank)
+static void vfe_ife_write_bpc(struct vfe_line *line,
+			      const struct v4l2_qcom_camss_bpc *bpc)
 {
-	struct vfe_device *vfe = to_vfe(line);
+	vfe_ife_write_bpc_dev(to_vfe(line), line, bpc);
+	if (line->dual_ife && line->slave_vfe)
+		vfe_ife_write_bpc_dev(line->slave_vfe, line, bpc);
+}
+
+static void vfe_ife_write_abf_dev(struct vfe_device *vfe,
+				  const struct vfe_line *line,
+				  const struct v4l2_qcom_camss_abf *abf,
+				  u8 bank, u32 stripe_x)
+{
 	const struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
-	s32 dx = clamp_t(s32, -(s32)(sink->width / 2), -3120, 3110);
+	s32 full_dx = clamp_t(s32, -(s32)(sink->width / 2), -3120, 3110);
+	s32 dx = clamp_t(s32, (s32)stripe_x - (s32)(sink->width / 2), -3120, 3110);
 	s32 dy = clamp_t(s32, -(s32)(sink->height / 2), -8192, -5);
+	u32 full_dist_sq = min_t(u32, (u32)(full_dx * full_dx + dy * dy),
+				 0x04948900U);
 	u32 dist_sq = min_t(u32, (u32)(dx * dx + dy * dy), 0x04948900U);
 	u32 r_sq_shift = 0;
-	u8 bank = reset_bank ? 0 : line->ife_abf_bank ^ 1;
 	u32 cgc_override, cfg0;
 	unsigned int i;
 
-	while ((dist_sq >> r_sq_shift) >= 0x2000 && r_sq_shift < 14)
+	while ((full_dist_sq >> r_sq_shift) >= 0x2000 && r_sq_shift < 14)
 		r_sq_shift++;
 
 	/* ABF LUT RAM needs its clock even before the lens module is enabled. */
@@ -546,12 +688,24 @@ static void vfe_ife_write_abf(struct vfe_line *line,
 
 	wmb();
 	writel(cgc_override, vfe->base + VFE_MODULE_LENS_CGC_OVERRIDE);
+}
+
+static void vfe_ife_write_abf(struct vfe_line *line,
+			      const struct v4l2_qcom_camss_abf *abf,
+			      bool reset_bank)
+{
+	u8 bank = reset_bank ? 0 : line->ife_abf_bank ^ 1;
+
+	vfe_ife_write_abf_dev(to_vfe(line), line, abf, bank, 0);
+	if (line->dual_ife && line->slave_vfe)
+		vfe_ife_write_abf_dev(line->slave_vfe, line, abf, bank,
+				      line->dual_right_in_x);
 	line->ife_abf_bank = bank;
 }
 
-static void vfe_ife_write_gtm(struct vfe_line *line,
-			      const struct v4l2_qcom_camss_gtm *gtm,
-			      bool reset_bank)
+static void vfe_ife_write_gtm_dev(struct vfe_device *vfe,
+				  const struct v4l2_qcom_camss_gtm *gtm,
+				  u8 bank)
 {
 	static const u16 x_knots[V4L2_QCOM_CAMSS_GTM_ENTRIES] = {
 		0, 2, 4, 7, 13, 21, 31, 45,
@@ -564,8 +718,6 @@ static void vfe_ife_write_gtm(struct vfe_line *line,
 		6911, 7812, 8787, 9840, 10975, 12193, 13499, 14894,
 		16383
 	};
-	struct vfe_device *vfe = to_vfe(line);
-	u8 bank = reset_bank ? 0 : line->ife_gtm_bank ^ 1;
 	u32 cgc_override;
 	unsigned int i;
 
@@ -596,14 +748,25 @@ static void vfe_ife_write_gtm(struct vfe_line *line,
 	writel_relaxed(bank, vfe->base + VFE_GTM_CFG);
 	wmb();
 	writel(cgc_override, vfe->base + VFE_MODULE_COLOR_CGC_OVERRIDE);
+}
+
+static void vfe_ife_write_gtm(struct vfe_line *line,
+			      const struct v4l2_qcom_camss_gtm *gtm,
+			      bool reset_bank)
+{
+	u8 bank = reset_bank ? 0 : line->ife_gtm_bank ^ 1;
+
+	vfe_ife_write_gtm_dev(to_vfe(line), gtm, bank);
+	if (line->dual_ife && line->slave_vfe)
+		vfe_ife_write_gtm_dev(line->slave_vfe, gtm, bank);
 	line->ife_gtm_bank = bank;
 }
 
-static int vfe_ife_write_lsc(struct vfe_line *line,
-			     const struct v4l2_qcom_camss_lsc *lsc,
-			     bool reset_bank)
+static int vfe_ife_write_lsc_dev(struct vfe_device *vfe,
+				 const struct vfe_line *line,
+				 const struct v4l2_qcom_camss_lsc *lsc,
+				 u8 bank, u32 stripe_x)
 {
-	struct vfe_device *vfe = to_vfe(line);
 	const struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
 	const u32 mesh_h = V4L2_QCOM_CAMSS_LSC_H_NUM - 1;
 	const u32 mesh_v = V4L2_QCOM_CAMSS_LSC_V_NUM - 1;
@@ -659,7 +822,7 @@ static int vfe_ife_write_lsc(struct vfe_line *line,
 		u32 block_h_m1 = clamp_t(u32, blk_h - 1, 8, 1023);
 		u32 x_delta = clamp_t(u32, (1U << 20) / (subgrid_w_m1 + 1), 0x200, 0x1c71c);
 		u32 y_delta = clamp_t(u32, (1U << 20) / (subgrid_h_m1 + 1), 0x400, 0x1c71c);
-		u32 lx = (pad_w + 1) >> 1;
+		u32 lx = ((pad_w + 1) >> 1) + (stripe_x >> 1);
 		u32 ly = (pad_h + 1) >> 1;
 		u32 x_sub_idx = lx / (subgrid_w_m1 + 1);
 		u32 y_sub_idx = ly / (subgrid_h_m1 + 1);
@@ -676,7 +839,6 @@ static int vfe_ife_write_lsc(struct vfe_line *line,
 			   (y_blk_idx << 6) | x_blk_idx;
 		u32 cfg8 = (y_sub_off << 28) | (x_sub_off << 24) |
 			   ((y_pix & 0xfffU) << 12) | (x_pix & 0xfffU);
-		u8 bank = reset_bank ? 0 : line->ife_lsc_bank ^ 1;
 		u8 t0 = bank ? DMI_LSC_BANK_1_T0 : DMI_LSC_BANK_0_T0;
 		u8 t1 = bank ? DMI_LSC_BANK_1_T1 : DMI_LSC_BANK_0_T1;
 		u32 cgc_override;
@@ -720,16 +882,35 @@ static int vfe_ife_write_lsc(struct vfe_line *line,
 		/* Ensure bank selection and table writes complete before restoring CGC. */
 		wmb();
 		writel(cgc_override, vfe->base + VFE_MODULE_LENS_CGC_OVERRIDE);
-		line->ife_lsc_bank = bank;
 	}
 
 	return 0;
 }
 
-static void vfe_ife_write_white_balance(struct vfe_line *line,
-					const struct v4l2_qcom_camss_ife_config *config)
+static int vfe_ife_write_lsc(struct vfe_line *line,
+			     const struct v4l2_qcom_camss_lsc *lsc,
+			     bool reset_bank)
 {
-	struct vfe_device *vfe = to_vfe(line);
+	u8 bank = reset_bank ? 0 : line->ife_lsc_bank ^ 1;
+	int ret;
+
+	ret = vfe_ife_write_lsc_dev(to_vfe(line), line, lsc, bank, 0);
+	if (ret)
+		return ret;
+	if (line->dual_ife && line->slave_vfe) {
+		ret = vfe_ife_write_lsc_dev(line->slave_vfe, line, lsc, bank,
+					    line->dual_right_in_x);
+		if (ret)
+			return ret;
+	}
+	line->ife_lsc_bank = bank;
+	return 0;
+}
+
+static void vfe_ife_write_wb_dev(struct vfe_device *vfe,
+				 const struct vfe_line *line,
+				 const struct v4l2_qcom_camss_ife_config *config)
+{
 	u16 r_gain = config->wb_gain_q7[0] & 0xfff;
 	u16 g_gain = config->wb_gain_q7[1] & 0xfff;
 	u16 b_gain = config->wb_gain_q7[3] & 0xfff;
@@ -745,15 +926,23 @@ static void vfe_ife_write_white_balance(struct vfe_line *line,
 		       vfe->base + VFE_DEMO_WB_OFFSET_CFG_0);
 	writel_relaxed(r_offset,
 		       vfe->base + VFE_DEMO_WB_OFFSET_CFG_1);
-	memcpy(line->ife_wb_gain_q7, config->wb_gain_q7,
-	       sizeof(line->ife_wb_gain_q7));
 	if (line->ife_bpc.enable)
 		vfe_ife_write_bpc_wb(vfe, line->ife_wb_gain_q7);
 }
 
-static void vfe_pix_write_cst(struct vfe_line *line)
+static void vfe_ife_write_white_balance(struct vfe_line *line,
+					const struct v4l2_qcom_camss_ife_config *config)
 {
-	struct vfe_device *vfe = to_vfe(line);
+	memcpy(line->ife_wb_gain_q7, config->wb_gain_q7,
+	       sizeof(line->ife_wb_gain_q7));
+	vfe_ife_write_wb_dev(to_vfe(line), line, config);
+	if (line->dual_ife && line->slave_vfe)
+		vfe_ife_write_wb_dev(line->slave_vfe, line, config);
+}
+
+static void vfe_pix_write_cst_dev(struct vfe_device *vfe,
+				  const struct vfe_line *line)
+{
 	const struct v4l2_pix_format_mplane *pix =
 		&line->video_out.active_fmt.fmt.pix_mp;
 	bool bt709 = pix->ycbcr_enc == V4L2_YCBCR_ENC_709;
@@ -820,6 +1009,13 @@ static void vfe_pix_write_cst(struct vfe_line *line)
 	}
 }
 
+static void vfe_pix_write_cst(struct vfe_line *line)
+{
+	vfe_pix_write_cst_dev(to_vfe(line), line);
+	if (line->dual_ife && line->slave_vfe)
+		vfe_pix_write_cst_dev(line->slave_vfe, line);
+}
+
 static void vfe_ife_write_ccm(struct vfe_device *vfe,
 			      const struct v4l2_qcom_camss_ife_config *config)
 {
@@ -841,11 +1037,10 @@ static void vfe_ife_write_ccm(struct vfe_device *vfe,
 	writel_relaxed(0, vfe->base + VFE_COLOR_CORRECT_COEFF_Q);
 }
 
-static void vfe_ife_write_gamma(struct vfe_line *line,
-				const struct v4l2_qcom_camss_ife_config *config,
-				bool reset_bank)
+static void vfe_ife_write_gamma_dev(struct vfe_device *vfe,
+				    const struct v4l2_qcom_camss_ife_config *config,
+				    u8 bank)
 {
-	struct vfe_device *vfe = to_vfe(line);
 	static const struct {
 		u8 dmi_bank;
 		u8 payload_channel;
@@ -854,7 +1049,6 @@ static void vfe_ife_write_gamma(struct vfe_line *line,
 		{ DMI_GAMMA_B_BANK_0, 2 },
 		{ DMI_GAMMA_R_BANK_0, 0 },
 	};
-	u8 bank = reset_bank ? 0 : line->ife_gamma_bank ^ 1;
 	u32 cgc_override;
 	unsigned int channel, entry;
 
@@ -887,6 +1081,17 @@ static void vfe_ife_write_gamma(struct vfe_line *line,
 	/* Ensure LUT bank selection is visible before restoring clock gating. */
 	wmb();
 	writel(cgc_override, vfe->base + VFE_MODULE_COLOR_CGC_OVERRIDE);
+}
+
+static void vfe_ife_write_gamma(struct vfe_line *line,
+				const struct v4l2_qcom_camss_ife_config *config,
+				bool reset_bank)
+{
+	u8 bank = reset_bank ? 0 : line->ife_gamma_bank ^ 1;
+
+	vfe_ife_write_gamma_dev(to_vfe(line), config, bank);
+	if (line->dual_ife && line->slave_vfe)
+		vfe_ife_write_gamma_dev(line->slave_vfe, config, bank);
 	line->ife_gamma_bank = bank;
 }
 
@@ -895,13 +1100,20 @@ static void vfe_ife_write_config(struct vfe_line *line,
 				 u32 flags, bool reset_gamma_bank)
 {
 	struct vfe_device *vfe = to_vfe(line);
+	struct vfe_device *slave = line->dual_ife ? line->slave_vfe : NULL;
 
-	if (flags & V4L2_QCOM_CAMSS_IFE_CONFIG_BLACK_LEVEL)
+	if (flags & V4L2_QCOM_CAMSS_IFE_CONFIG_BLACK_LEVEL) {
 		vfe_ife_write_black_level(vfe, config);
+		if (slave)
+			vfe_ife_write_black_level(slave, config);
+	}
 	if (flags & V4L2_QCOM_CAMSS_IFE_CONFIG_WHITE_BALANCE)
 		vfe_ife_write_white_balance(line, config);
-	if (flags & V4L2_QCOM_CAMSS_IFE_CONFIG_CCM)
+	if (flags & V4L2_QCOM_CAMSS_IFE_CONFIG_CCM) {
 		vfe_ife_write_ccm(vfe, config);
+		if (slave)
+			vfe_ife_write_ccm(slave, config);
+	}
 	if (flags & V4L2_QCOM_CAMSS_IFE_CONFIG_GAMMA)
 		vfe_ife_write_gamma(line, config, reset_gamma_bank);
 }
@@ -1589,12 +1801,20 @@ static int vfe_lsc_s_ctrl(struct v4l2_ctrl *ctrl)
 				line->ife_lens_en |= LENS_ROLLOFF_EN;
 				writel_relaxed(line->ife_lens_en,
 					       vfe->base + VFE_MODULE_LENS_EN);
+				if (line->dual_ife && line->slave_vfe)
+					writel_relaxed(line->ife_lens_en,
+						       line->slave_vfe->base +
+						       VFE_MODULE_LENS_EN);
 				vfe->res->hw_ops->reg_update(vfe, VFE_LINE_PIX);
 			}
 		} else {
 			line->ife_lens_en &= ~LENS_ROLLOFF_EN;
 			writel_relaxed(line->ife_lens_en,
 				       vfe->base + VFE_MODULE_LENS_EN);
+			if (line->dual_ife && line->slave_vfe)
+				writel_relaxed(line->ife_lens_en,
+					       line->slave_vfe->base +
+					       VFE_MODULE_LENS_EN);
 			vfe->res->hw_ops->reg_update(vfe, VFE_LINE_PIX);
 		}
 	}
@@ -1690,6 +1910,9 @@ static int vfe_bpc_s_ctrl(struct v4l2_ctrl *ctrl)
 			line->ife_lens_en &= ~LENS_BPC_EN;
 		}
 		writel_relaxed(line->ife_lens_en, vfe->base + VFE_MODULE_LENS_EN);
+		if (line->dual_ife && line->slave_vfe)
+			writel_relaxed(line->ife_lens_en,
+				       line->slave_vfe->base + VFE_MODULE_LENS_EN);
 		vfe->res->hw_ops->reg_update(vfe, VFE_LINE_PIX);
 	}
 	spin_unlock_irqrestore(&vfe->output_lock, irq_flags);
@@ -1751,6 +1974,9 @@ static int vfe_abf_s_ctrl(struct v4l2_ctrl *ctrl)
 			line->ife_lens_en &= ~LENS_ABF_EN;
 		}
 		writel_relaxed(line->ife_lens_en, vfe->base + VFE_MODULE_LENS_EN);
+		if (line->dual_ife && line->slave_vfe)
+			writel_relaxed(line->ife_lens_en,
+				       line->slave_vfe->base + VFE_MODULE_LENS_EN);
 		vfe->res->hw_ops->reg_update(vfe, VFE_LINE_PIX);
 	}
 	spin_unlock_irqrestore(&vfe->output_lock, irq_flags);
@@ -1799,6 +2025,9 @@ static int vfe_gtm_s_ctrl(struct v4l2_ctrl *ctrl)
 			line->ife_color_en &= ~COLOR_GTM_EN;
 		}
 		writel_relaxed(line->ife_color_en, vfe->base + VFE_MODULE_COLOR_EN);
+		if (line->dual_ife && line->slave_vfe)
+			writel_relaxed(line->ife_color_en,
+				       line->slave_vfe->base + VFE_MODULE_COLOR_EN);
 		vfe->res->hw_ops->reg_update(vfe, VFE_LINE_PIX);
 	}
 	spin_unlock_irqrestore(&vfe->output_lock, irq_flags);
@@ -1986,6 +2215,48 @@ void vfe_ife_ctrl_cleanup(struct vfe_line *line)
 	line->ife_ctrls_initialized = false;
 }
 
+static void vfe_pix_program_common(struct vfe_device *vfe,
+				   const struct vfe_line *line,
+				   int pattern, u32 even_pat, u32 odd_pat,
+				   u32 in_width, u32 in_height)
+{
+	u32 val;
+
+	writel_relaxed(pattern, vfe->base + VFE_CORE_CFG);
+	writel_relaxed(in_width - 1, vfe->base + VFE_CAMIF_RAW_CROP_WIDTH_CFG);
+	writel_relaxed(in_height - 1, vfe->base + VFE_CAMIF_RAW_CROP_HEIGHT_CFG);
+	writel_relaxed(CMD_CLEAR_CAMIF_STATUS, vfe->base + VFE_CAMIF_CMD);
+
+	writel_relaxed(1, vfe->base + VFE_DEMUX_CFG);
+	writel_relaxed(even_pat, vfe->base + VFE_DEMUX_CFG + 20);
+	writel_relaxed(odd_pat, vfe->base + VFE_DEMUX_CFG + 24);
+
+	writel_relaxed(0x100, vfe->base + VFE_DEMO_CFG);
+	writel_relaxed(0x00008000, vfe->base + VFE_DEMO_INTERP_COEFF_CFG);
+	writel_relaxed(0x08000066, vfe->base + VFE_DEMO_INTERP_CLASSIFIER_0);
+
+	writel_relaxed(FULL_OUT_ROUND_SHIFT(2) | 6,
+		       vfe->base + VFE_FULL_OUT_Y_ROUND_CFG);
+	writel_relaxed(FULL_OUT_ROUND_SHIFT(2) | 7,
+		       vfe->base + VFE_FULL_OUT_C_ROUND_CFG);
+	val = FULL_OUT_CROP_EN | FULL_OUT_ROUND_EN | FULL_OUT_CLAMP_EN;
+	writel_relaxed(val, vfe->base + VFE_FULL_OUT_Y_CROP_RND_CLAMP_CFG);
+	writel_relaxed(val, vfe->base + VFE_FULL_OUT_C_CROP_RND_CLAMP_CFG);
+
+	writel_relaxed(line->ife_lens_en, vfe->base + VFE_MODULE_LENS_EN);
+	writel_relaxed(line->ife_color_en, vfe->base + VFE_MODULE_COLOR_EN);
+	val = ZOOM_CST_EN | ZOOM_SCALE_VID_EN | ZOOM_CROP_VID_EN;
+	writel_relaxed(val, vfe->base + VFE_MODULE_ZOOM_EN);
+
+	writel_relaxed(CFG_VFE_OUTPUT_EN | CFG_BUS_OUTPUT_EN | CFG_RAW_CROP_EN,
+		       vfe->base + VFE_CAMIF_CFG);
+	writel_relaxed(0xffff, vfe->base + VFE_CAMIF_LINE_SKIP_PATTERN);
+	writel_relaxed(0xffff, vfe->base + VFE_CAMIF_PIXEL_SKIP_PATTERN);
+	writel_relaxed(0, vfe->base + VFE_CAMIF_SKIP_PERIOD);
+	writel_relaxed(~0U, vfe->base + VFE_CAMIF_IRQ_SUBSAMPLE_PATTERN);
+	writel_relaxed(BIT(3) | BIT(4), vfe->base + VFE_BUS_COMP_GRP_0);
+}
+
 static int vfe_pix_program(struct vfe_line *line)
 {
 	static const struct {
@@ -2000,7 +2271,6 @@ static int vfe_pix_program(struct vfe_line *line)
 	struct vfe_device *vfe = to_vfe(line);
 	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
 	struct v4l2_qcom_camss_ife_crop crop = vfe_pix_default_crop(line);
-	u32 first, last, top, bottom;
 	u32 val;
 	int pattern;
 
@@ -2011,26 +2281,9 @@ static int vfe_pix_program(struct vfe_line *line)
 		return -EINVAL;
 	}
 
-	writel_relaxed(pattern, vfe->base + VFE_CORE_CFG);
-
-	first = 0;
-	last = sink->width - 1;
-	top = 0;
-	bottom = sink->height - 1;
-
-	writel_relaxed((first << 16) | last,
-		       vfe->base + VFE_CAMIF_RAW_CROP_WIDTH_CFG);
-	writel_relaxed((top << 16) | bottom,
-		       vfe->base + VFE_CAMIF_RAW_CROP_HEIGHT_CFG);
-
-	writel_relaxed(CMD_CLEAR_CAMIF_STATUS, vfe->base + VFE_CAMIF_CMD);
-
 	/* Demux 13 uses Q10 gains and Bayer even/odd line patterns. */
 	mutex_lock(&line->ife_config_lock);
-	writel_relaxed(1, vfe->base + VFE_DEMUX_CFG);
 	vfe_ife_write_demux(line, &line->ife_demux, pattern);
-	writel_relaxed(demux_patterns[pattern].even, vfe->base + VFE_DEMUX_CFG + 20);
-	writel_relaxed(demux_patterns[pattern].odd, vfe->base + VFE_DEMUX_CFG + 24);
 
 	/* Program factory tuning before enabling the IFE color modules. */
 	vfe_ife_write_config(line, &line->ife_config,
@@ -2062,33 +2315,21 @@ static int vfe_pix_program(struct vfe_line *line)
 		line->ife_color_en |= COLOR_GTM_EN;
 	}
 
-	writel_relaxed(0x100, vfe->base + VFE_DEMO_CFG);
-	writel_relaxed(0x00008000, vfe->base + VFE_DEMO_INTERP_COEFF_CFG);
-	writel_relaxed(0x08000066, vfe->base + VFE_DEMO_INTERP_CLASSIFIER_0);
-
 	vfe_pix_write_cst(line);
-
 	vfe_pix_write_crop(line, &crop);
-	writel_relaxed(FULL_OUT_ROUND_SHIFT(2) | 6,
-		       vfe->base + VFE_FULL_OUT_Y_ROUND_CFG);
-	writel_relaxed(FULL_OUT_ROUND_SHIFT(2) | 7,
-		       vfe->base + VFE_FULL_OUT_C_ROUND_CFG);
-	val = FULL_OUT_CROP_EN | FULL_OUT_ROUND_EN | FULL_OUT_CLAMP_EN;
-	writel_relaxed(val, vfe->base + VFE_FULL_OUT_Y_CROP_RND_CLAMP_CFG);
-	writel_relaxed(val, vfe->base + VFE_FULL_OUT_C_CROP_RND_CLAMP_CFG);
 
-	writel_relaxed(line->ife_lens_en, vfe->base + VFE_MODULE_LENS_EN);
-	writel_relaxed(line->ife_color_en, vfe->base + VFE_MODULE_COLOR_EN);
-	val = ZOOM_CST_EN | ZOOM_SCALE_VID_EN | ZOOM_CROP_VID_EN;
-	writel_relaxed(val, vfe->base + VFE_MODULE_ZOOM_EN);
-
-	writel_relaxed(CFG_VFE_OUTPUT_EN | CFG_BUS_OUTPUT_EN | CFG_RAW_CROP_EN,
-		       vfe->base + VFE_CAMIF_CFG);
-	writel_relaxed(0xffff, vfe->base + VFE_CAMIF_LINE_SKIP_PATTERN);
-	writel_relaxed(0xffff, vfe->base + VFE_CAMIF_PIXEL_SKIP_PATTERN);
-	writel_relaxed(0, vfe->base + VFE_CAMIF_SKIP_PERIOD);
-	writel_relaxed(~0U, vfe->base + VFE_CAMIF_IRQ_SUBSAMPLE_PATTERN);
-	writel_relaxed(BIT(3) | BIT(4), vfe->base + VFE_BUS_COMP_GRP_0);
+	vfe_pix_program_common(vfe, line, pattern,
+			       demux_patterns[pattern].even,
+			       demux_patterns[pattern].odd,
+			       line->dual_ife ? line->dual_left_in_w :
+						sink->width,
+			       sink->height);
+	if (line->dual_ife && line->slave_vfe)
+		vfe_pix_program_common(line->slave_vfe, line, pattern,
+				       demux_patterns[pattern].even,
+				       demux_patterns[pattern].odd,
+				       line->dual_right_in_w,
+				       sink->height);
 	mutex_unlock(&line->ife_config_lock);
 
 	return vfe_17x_stats_start(line);
@@ -2119,6 +2360,7 @@ static void vfe_global_reset(struct vfe_device *vfe)
 
 static void vfe_wm_done_irq(struct vfe_device *vfe, u8 wm, bool enable)
 {
+	struct vfe_device *lock_vfe = vfe->dual_master_vfe ?: vfe;
 	bool composite = !vfe->res->is_lite && wm >= 3;
 	unsigned int bank = composite ? 0 : 1;
 	u32 bit = composite ? STATUS0_COMP0_BUF_DONE : STATUS1_WM_CLIENT_BUF_DONE(wm);
@@ -2128,7 +2370,7 @@ static void vfe_wm_done_irq(struct vfe_device *vfe, u8 wm, bool enable)
 	if (composite && wm != 3)
 		return;
 
-	lockdep_assert_held(&vfe->output_lock);
+	lockdep_assert_held(&lock_vfe->output_lock);
 	mask = readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK(bank));
 	if (enable) {
 		writel_relaxed(bit, vfe->base + VFE_BUS_IRQ_CLEAR(bank));
@@ -2144,8 +2386,10 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 {
 	u32 val;
 
-	if (!vfe->res->is_lite && wm == 3)
+	if (!vfe->res->is_lite && wm == 3 && vfe != line->slave_vfe) {
 		line->pix_done_pending = false;
+		line->slave_pix_done_pending = false;
+	}
 	vfe_wm_done_irq(vfe, wm, true);
 
 	writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
@@ -2153,7 +2397,7 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 	if (line->id == VFE_LINE_PIX && !vfe->res->is_lite) {
 		u32 width, height, stride, frame_inc;
 
-		vfe_pix_wm_geometry(line, wm, &width, &height, &stride,
+		vfe_pix_wm_geometry(line, vfe, wm, &width, &height, &stride,
 				    &frame_inc);
 
 		writel_relaxed(width,
@@ -2166,6 +2410,8 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 
 		val = 1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE;
 		writel_relaxed(val, vfe->base + VFE_BUS_WM_CFG(wm));
+		if (line->dual_ife && line->slave_vfe && vfe != line->slave_vfe)
+			vfe_wm_start(line->slave_vfe, wm, line);
 		return;
 	}
 
@@ -2193,6 +2439,11 @@ static void vfe_wm_stop(struct vfe_device *vfe, u8 wm)
 	vfe_wm_done_irq(vfe, wm, false);
 	writel(0, vfe->base + VFE_BUS_WM_CFG(wm));
 	readl(vfe->base + VFE_BUS_WM_CFG(wm));
+	if (!vfe->res->is_lite && wm >= 3 &&
+	    vfe->line[VFE_LINE_PIX].dual_ife &&
+	    vfe->line[VFE_LINE_PIX].slave_vfe &&
+	    vfe != vfe->line[VFE_LINE_PIX].slave_vfe)
+		vfe_wm_stop(vfe->line[VFE_LINE_PIX].slave_vfe, wm);
 }
 
 static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
@@ -2204,8 +2455,8 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 	u32 width, height, plane_stride, frame_inc;
 
 	if (line->id == VFE_LINE_PIX && !vfe->res->is_lite) {
-		vfe_pix_wm_geometry(line, wm, &width, &height, &plane_stride,
-				    &frame_inc);
+		vfe_pix_wm_geometry(line, vfe, wm, &width, &height,
+				    &plane_stride, &frame_inc);
 		writel_relaxed(width,
 			       vfe->base + VFE_BUS_WM_BUFFER_WIDTH_CFG(wm));
 		writel_relaxed(height,
@@ -2218,6 +2469,8 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 		writel_relaxed(frame_inc, vfe->base + VFE_BUS_WM_FRAME_INC(wm));
 		writel_relaxed(1 << WM_CFG_EN | MODE_QCOM_PLAIN << WM_CFG_MODE,
 			       vfe->base + VFE_BUS_WM_CFG(wm));
+		if (line->dual_ife && line->slave_vfe && vfe != line->slave_vfe)
+			vfe_wm_update(line->slave_vfe, wm, addr + width, line);
 	} else {
 		writel_relaxed(stride * pix->height,
 			       vfe->base + VFE_BUS_WM_FRAME_INC(wm));
@@ -2243,12 +2496,26 @@ static void vfe_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 
 	/* Enforce ordering between reg update and subsequent reg writes */
 	wmb();
+
+	if (line_id == VFE_LINE_PIX && !vfe->res->is_lite &&
+	    vfe->line[VFE_LINE_PIX].dual_ife &&
+	    vfe->line[VFE_LINE_PIX].slave_vfe &&
+	    vfe != vfe->line[VFE_LINE_PIX].slave_vfe)
+		vfe_reg_update(vfe->line[VFE_LINE_PIX].slave_vfe, line_id);
 }
 
 static inline void vfe_reg_update_clear(struct vfe_device *vfe,
 					enum vfe_line_id line_id)
 {
 	vfe->reg_update &= ~vfe_reg_update_line(vfe, line_id);
+	if (line_id == VFE_LINE_PIX && !vfe->res->is_lite &&
+	    vfe->line[VFE_LINE_PIX].dual_ife &&
+	    vfe->line[VFE_LINE_PIX].slave_vfe &&
+	    vfe != vfe->line[VFE_LINE_PIX].slave_vfe &&
+	    vfe->line[VFE_LINE_PIX].output.state != VFE_OUTPUT_ON)
+		vfe->line[VFE_LINE_PIX].slave_vfe->reg_update &=
+			~vfe_reg_update_line(vfe->line[VFE_LINE_PIX].slave_vfe,
+					     line_id);
 }
 
 static void vfe_init_bus(struct vfe_device *vfe)
@@ -2328,18 +2595,32 @@ static void vfe_pix_complete(struct vfe_device *vfe, bool completed)
 	spin_lock(&vfe->output_lock);
 	line->pix_done_pending |= completed;
 	buffer = output->buf[0];
-	ready = line->pix_done_pending && output->state == VFE_OUTPUT_ON;
+	ready = line->pix_done_pending &&
+		(!line->dual_ife || line->slave_pix_done_pending) &&
+		output->state == VFE_OUTPUT_ON;
 
 	/* Request timing needs the SOF following the captured frame. */
 	if (ready && line->video_out.vb2_q.uses_requests && buffer &&
 	    (s32)(output->sof_sequence - (buffer->input_sequence + 2)) < 0)
 		ready = false;
-	if (ready)
+	if (ready) {
 		line->pix_done_pending = false;
+		line->slave_pix_done_pending = false;
+	}
 	spin_unlock(&vfe->output_lock);
 
 	if (ready)
 		vfe->isr_ops.wm_done(vfe, 3);
+}
+
+static void vfe_dual_slave_comp_done(struct vfe_device *master)
+{
+	struct vfe_line *line = &master->line[VFE_LINE_PIX];
+
+	spin_lock(&master->output_lock);
+	line->slave_pix_done_pending = true;
+	spin_unlock(&master->output_lock);
+	vfe_pix_complete(master, false);
 }
 
 static void vfe_schedule_recovery(struct vfe_device *vfe)
@@ -2412,6 +2693,22 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	if (status0 & STATUS_0_RESET_ACK)
 		vfe->isr_ops.reset_ack(vfe);
+	if (vfe->dual_master_vfe) {
+		struct vfe_device *master = vfe->dual_master_vfe;
+
+		if (status0 & STATUS_0_PIX_REG_UPDATE)
+			vfe->isr_ops.reg_update(vfe, VFE_LINE_PIX);
+		if ((status1 & STATUS_1_VIOLATION) ||
+		    (vfe_bus_status[0] & VFE_BUS_ERROR_MASK)) {
+			spin_lock(&master->output_lock);
+			vfe_schedule_recovery(master);
+			spin_unlock(&master->output_lock);
+			return IRQ_HANDLED;
+		}
+		if (vfe_bus_status[0] & STATUS0_COMP0_BUF_DONE)
+			vfe_dual_slave_comp_done(master);
+		return IRQ_HANDLED;
+	}
 	if (fault_pending)
 		return IRQ_HANDLED;
 
@@ -2498,6 +2795,114 @@ unlock:
 	return ret;
 }
 
+static int vfe_dual_acquire(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	struct camss *camss = vfe->camss;
+	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+	u8 slave_id = vfe->id ^ 1;
+	struct vfe_device *slave_vfe;
+	struct csid_device *master_csid, *slave_csid;
+	u16 left_w, right_x, right_w;
+	int ret;
+
+	if (vfe->id > 1 || slave_id >= camss->res->vfe_num ||
+	    slave_id >= camss->res->csid_num)
+		return -ENODEV;
+
+	slave_vfe = &camss->vfe[slave_id];
+	master_csid = &camss->csid[vfe->id];
+	slave_csid = &camss->csid[slave_id];
+	if (slave_vfe->res->is_lite)
+		return -ENODEV;
+
+	mutex_lock(&slave_vfe->power_lock);
+	if (slave_vfe->power_count > 0 || slave_vfe->stream_count > 0 ||
+	    slave_vfe->dual_master_vfe) {
+		mutex_unlock(&slave_vfe->power_lock);
+		return -EBUSY;
+	}
+	slave_vfe->dual_master_vfe = vfe;
+	mutex_unlock(&slave_vfe->power_lock);
+
+	/*
+	 * Each VFE line buffer supports up to 4096 pixels; a 3584-pixel
+	 * stripe width (56 * 64) gives a 2512-pixel central overlap on
+	 * 4656-wide frames while keeping AWB_BG regions 64-aligned.
+	 */
+	left_w = min_t(u32, 3584, sink->width);
+	right_x = (sink->width - left_w) & ~3U;
+	right_w = sink->width - right_x;
+
+	ret = msm_csid_dual_setup(master_csid, slave_csid,
+				  left_w - 1, right_x, sink->width - 1);
+	if (ret) {
+		slave_vfe->dual_master_vfe = NULL;
+		return ret;
+	}
+
+	mutex_lock(&slave_vfe->stream_lock);
+	vfe_init_bus(slave_vfe);
+	vfe_enable_irq_common(slave_vfe);
+	slave_vfe->stream_count = 1;
+	slave_vfe->wm_output_map[3] = VFE_LINE_PIX;
+	slave_vfe->wm_output_map[4] = VFE_LINE_PIX;
+	mutex_unlock(&slave_vfe->stream_lock);
+
+	line->dual_left_in_w = left_w;
+	line->dual_right_in_x = right_x;
+	line->dual_right_in_w = right_w;
+	line->slave_vfe = slave_vfe;
+	line->master_csid = master_csid;
+	line->slave_pix_done_pending = false;
+	line->dual_ife = true;
+
+	return 0;
+}
+
+static void vfe_dual_release(struct vfe_line *line)
+{
+	struct vfe_device *slave_vfe = line->slave_vfe;
+	struct csid_device *master_csid = line->master_csid;
+	unsigned long flags;
+
+	if (!line->dual_ife)
+		return;
+
+	line->dual_ife = false;
+	line->slave_pix_done_pending = false;
+	line->slave_vfe = NULL;
+	line->master_csid = NULL;
+
+	if (slave_vfe) {
+		mutex_lock(&slave_vfe->stream_lock);
+		vfe_release_wm(slave_vfe, 3);
+		vfe_release_wm(slave_vfe, 4);
+		slave_vfe->stream_count = 0;
+		vfe_reset(slave_vfe);
+		spin_lock_irqsave(&slave_vfe->output_lock, flags);
+		slave_vfe->reg_update = 0;
+		slave_vfe->fault_pending = false;
+		slave_vfe->recovery_attempted = false;
+		spin_unlock_irqrestore(&slave_vfe->output_lock, flags);
+		mutex_unlock(&slave_vfe->stream_lock);
+	}
+
+	msm_csid_dual_cleanup(master_csid);
+	if (slave_vfe)
+		slave_vfe->dual_master_vfe = NULL;
+}
+
+static int vfe_disable_17x(struct vfe_line *line)
+{
+	int ret = vfe_disable(line);
+
+	if (line->id == VFE_LINE_PIX && line->dual_ife)
+		vfe_dual_release(line);
+
+	return ret;
+}
+
 /*
  * vfe_enable - Enable streaming on VFE line
  * @line: VFE line
@@ -2533,6 +2938,11 @@ static int vfe_enable(struct vfe_line *line)
 		goto error_get_output;
 
 	if (line->id == VFE_LINE_PIX && !vfe->res->is_lite) {
+		if (line->fmt[MSM_VFE_PAD_SINK].width > 4096) {
+			ret = vfe_dual_acquire(line);
+			if (ret < 0)
+				goto error_enable_output;
+		}
 		ret = vfe_pix_program(line);
 		if (ret < 0)
 			goto error_enable_output;
@@ -2562,6 +2972,8 @@ error_enable_output:
 		vfe_17x_stats_stop(line);
 		spin_unlock_irqrestore(&vfe->output_lock, flags);
 	}
+	if (line->id == VFE_LINE_PIX && line->dual_ife)
+		vfe_dual_release(line);
 	vfe_put_output(line);
 
 error_get_output:
@@ -2811,7 +3223,7 @@ const struct vfe_hw_ops vfe_ops_170 = {
 	.reg_update_clear = vfe_reg_update_clear,
 	.reg_update = vfe_reg_update,
 	.subdev_init = vfe_subdev_init,
-	.vfe_disable = vfe_disable,
+	.vfe_disable = vfe_disable_17x,
 	.vfe_enable = vfe_enable,
 	.vfe_halt = vfe_halt,
 	.violation_read = vfe_violation_read,

@@ -167,8 +167,15 @@ struct csid_device {
 	struct completion reset_complete;
 	struct csid_testgen_config testgen;
 	bool tpg_linked;
+	bool dual_slave;
+	struct csid_device *dual_master_csid;
+	struct csid_device *dual_slave_csid;
 	struct csid_phy_config phy;
+	struct csid_phy_config saved_phy;
 	struct v4l2_mbus_framefmt fmt[MSM_CSID_PADS_NUM];
+	struct v4l2_mbus_framefmt saved_pix_fmt;
+	u16 pxl_hcrop_start;
+	u16 pxl_hcrop_end;
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *testgen_mode;
 	const struct csid_subdev_resources *res;
@@ -177,6 +184,9 @@ struct csid_device {
 struct camss_subdev_resources;
 
 int msm_csid_set_port(struct media_pad *pad, bool enable, bool other_ports_active);
+int msm_csid_dual_setup(struct csid_device *master, struct csid_device *slave,
+			u16 left_end, u16 right_start, u16 right_end);
+void msm_csid_dual_cleanup(struct csid_device *master);
 
 /*
  * csid_find_code - Find a format code in an array using array index or format code

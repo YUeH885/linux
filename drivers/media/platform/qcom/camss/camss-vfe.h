@@ -127,6 +127,13 @@ struct vfe_line {
 	u32 ife_lens_en;
 	u32 ife_color_en;
 	bool pix_done_pending;
+	bool dual_ife;
+	bool slave_pix_done_pending;
+	struct vfe_device *slave_vfe;
+	struct csid_device *master_csid;
+	u16 dual_left_in_w;
+	u16 dual_right_in_x;
+	u16 dual_right_in_w;
 	struct vfe_17x_stats *stats;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
 	struct v4l2_mbus_framefmt fmt[MSM_VFE_PADS_NUM];
@@ -220,6 +227,7 @@ struct vfe_device {
 	struct camss_video_ops video_ops;
 	struct device *genpd;
 	struct device_link *genpd_link;
+	struct vfe_device *dual_master_vfe;
 };
 
 struct camss_subdev_resources;

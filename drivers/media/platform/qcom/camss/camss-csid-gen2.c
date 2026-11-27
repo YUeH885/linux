@@ -367,6 +367,9 @@ static void __csid_configure_pix_stream(struct csid_device *csid, u8 enable,
 		csid_get_fmt_entry(csid->res->formats->formats,
 				   csid->res->formats->nformats,
 				   input_format->code);
+	u16 hcrop_start = csid->pxl_hcrop_end ? csid->pxl_hcrop_start : 0;
+	u16 hcrop_end = csid->pxl_hcrop_end ? csid->pxl_hcrop_end :
+			input_format->width - 1;
 	u32 val;
 
 	if (!enable) {
@@ -382,7 +385,8 @@ static void __csid_configure_pix_stream(struct csid_device *csid, u8 enable,
 	val |= CSID_PXL_CFG0_INPUT_EN | CSID_PXL_CFG0_SOF_RETIMING_EN |
 	       CSID_PXL_CFG0_CROP_H_EN | CSID_PXL_CFG0_CROP_V_EN |
 	       CSID_PXL_CFG0_EARLY_EOF_EN;
-	writel_relaxed((input_format->width - 1) << 16, csid->base + CSID_PXL_HCROP);
+	writel_relaxed(((u32)hcrop_end << 16) | hcrop_start,
+		       csid->base + CSID_PXL_HCROP);
 	writel_relaxed((input_format->height - 1) << 16, csid->base + CSID_PXL_VCROP);
 	val |= CSID_PXL_CFG0_STORE_EN;
 	val |= CSID_PXL_CFG0_PATH_EN;

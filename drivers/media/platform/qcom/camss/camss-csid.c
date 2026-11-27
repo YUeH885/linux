@@ -538,15 +538,17 @@ const struct csid_format_info *csid_get_fmt_entry(const struct csid_format_info 
  */
 static int csid_set_clock_rates(struct csid_device *csid)
 {
+	struct csid_device *src_csid = csid->dual_master_csid ?: csid;
 	struct device *dev = csid->camss->dev;
 	const struct csid_format_info *fmt;
 	s64 link_freq;
 	int i, j;
 	int ret;
 
-	fmt = csid_get_fmt_entry(csid->res->formats->formats, csid->res->formats->nformats,
-				 csid->fmt[MSM_CSIPHY_PAD_SINK].code);
-	link_freq = camss_get_link_freq(&csid->subdev.entity, fmt->bpp,
+	fmt = csid_get_fmt_entry(src_csid->res->formats->formats,
+				 src_csid->res->formats->nformats,
+				 src_csid->fmt[MSM_CSIPHY_PAD_SINK].code);
+	link_freq = camss_get_link_freq(&src_csid->subdev.entity, fmt->bpp,
 					csid->phy.lane_cnt);
 	if (link_freq < 0)
 		link_freq = 0;
@@ -619,7 +621,7 @@ static int csid_update_phy_config(struct csid_device *csid)
 	struct csiphy_lanes_cfg *lane_cfg;
 	int num_lanes;
 
-	if (csid->tpg_linked)
+	if (csid->tpg_linked || csid->dual_slave)
 		return 0;
 
 	remote = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_SINK]);
@@ -818,6 +820,7 @@ int msm_csid_set_port(struct media_pad *pad, bool enable, bool other_ports_activ
 {
 	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(pad->entity);
 	struct csid_device *csid = v4l2_get_subdevdata(sd);
+	unsigned int port = pad->index - MSM_CSID_PAD_FIRST_SRC;
 	int ret;
 
 	if (WARN_ON(!csid->res->hw_ops->set_port ||
@@ -830,9 +833,86 @@ int msm_csid_set_port(struct media_pad *pad, bool enable, bool other_ports_activ
 			return ret;
 	}
 
-	return csid->res->hw_ops->set_port(csid,
-					   pad->index - MSM_CSID_PAD_FIRST_SRC,
-					   enable, other_ports_active);
+	ret = csid->res->hw_ops->set_port(csid, port, enable,
+					  other_ports_active);
+	if (ret && enable)
+		return ret;
+
+	if (port == MSM_CSID_MAX_SRC_STREAMS - 1 && csid->dual_slave_csid) {
+		int slave_ret =
+			csid->dual_slave_csid->res->hw_ops->set_port(
+				csid->dual_slave_csid, port, enable, false);
+		if (slave_ret) {
+			if (enable)
+				csid->res->hw_ops->set_port(csid, port, false,
+							    other_ports_active);
+			if (!ret)
+				ret = slave_ret;
+		}
+	}
+
+	return ret;
+}
+
+int msm_csid_dual_setup(struct csid_device *master, struct csid_device *slave,
+			u16 left_end, u16 right_start, u16 right_end)
+{
+	const unsigned int pix_pad =
+		MSM_CSID_PAD_FIRST_SRC + MSM_CSID_MAX_SRC_STREAMS - 1;
+	int ret;
+
+	if (slave->dual_slave || slave->dual_slave_csid)
+		return -EBUSY;
+
+	slave->saved_phy = slave->phy;
+	slave->saved_pix_fmt = slave->fmt[pix_pad];
+	slave->dual_slave = true;
+	slave->dual_master_csid = master;
+	slave->phy = master->phy;
+	slave->phy.en_vc = BIT(MSM_CSID_MAX_SRC_STREAMS - 1);
+	slave->fmt[pix_pad] = master->fmt[pix_pad];
+
+	ret = csid_set_power(&slave->subdev, 1);
+	if (ret) {
+		slave->fmt[pix_pad] = slave->saved_pix_fmt;
+		slave->phy = slave->saved_phy;
+		slave->dual_master_csid = NULL;
+		slave->dual_slave = false;
+		return ret;
+	}
+
+	master->pxl_hcrop_start = 0;
+	master->pxl_hcrop_end = left_end;
+	slave->pxl_hcrop_start = right_start;
+	slave->pxl_hcrop_end = right_end;
+	master->dual_slave_csid = slave;
+
+	return 0;
+}
+
+void msm_csid_dual_cleanup(struct csid_device *master)
+{
+	const unsigned int pix_pad =
+		MSM_CSID_PAD_FIRST_SRC + MSM_CSID_MAX_SRC_STREAMS - 1;
+	struct csid_device *slave;
+
+	if (!master)
+		return;
+
+	slave = master->dual_slave_csid;
+	master->dual_slave_csid = NULL;
+	master->pxl_hcrop_start = 0;
+	master->pxl_hcrop_end = 0;
+	if (!slave)
+		return;
+
+	slave->pxl_hcrop_start = 0;
+	slave->pxl_hcrop_end = 0;
+	csid_set_power(&slave->subdev, 0);
+	slave->fmt[pix_pad] = slave->saved_pix_fmt;
+	slave->phy = slave->saved_phy;
+	slave->dual_master_csid = NULL;
+	slave->dual_slave = false;
 }
 
 static int csid_set_stream(struct v4l2_subdev *sd, int enable)
