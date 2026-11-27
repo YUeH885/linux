@@ -1747,8 +1747,13 @@ void ath10k_wmi_put_wmi_channel(struct ath10k *ar, struct wmi_channel *ch,
 		ch->band_center_freq2 = __cpu_to_le32(arg->band_center_freq1);
 	}
 
-	if (chan && chan->flags & IEEE80211_CHAN_RADAR)
-		flags |= WMI_CHAN_FLAG_DFS_CFREQ2;
+	if (chan && chan->flags & IEEE80211_CHAN_RADAR) {
+		if (ar->running_fw->fw_file.wmi_op_version ==
+		    ATH10K_FW_WMI_OP_VERSION_TLV)
+			flags |= WMI_TLV_CHAN_FLAG_DFS_CFREQ2;
+		else
+			flags |= WMI_CHAN_FLAG_DFS_CFREQ2;
+	}
 
 	ch->min_power = arg->min_power;
 	ch->max_power = arg->max_power;

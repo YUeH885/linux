@@ -2110,8 +2110,11 @@ enum wmi_channel_change_cause {
 
 /* Indicate reason for channel switch */
 #define WMI_CHANNEL_CHANGE_CAUSE_CSA (1 << 13)
-/* DFS required on channel for 2nd segment of VHT160 and VHT80+80*/
-#define WMI_CHAN_FLAG_DFS_CFREQ2  (1 << 15)
+/* DFS required on channel for 2nd segment of VHT160 and VHT80+80.
+ * WMI-TLV uses bit 15 for quarter-rate channels and places DFS_CFREQ2 at bit 16.
+ */
+#define WMI_CHAN_FLAG_DFS_CFREQ2     (1 << 15)
+#define WMI_TLV_CHAN_FLAG_DFS_CFREQ2 (1 << 16)
 #define WMI_MAX_SPATIAL_STREAM        3 /* default max ss */
 
 /* HT Capabilities*/
