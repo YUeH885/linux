@@ -101,11 +101,13 @@ struct vfe_line {
 	/* Serializes IFE tuning updates and hardware programming. */
 	struct mutex ife_config_lock;
 	struct v4l2_qcom_camss_ife_config ife_config;
+	struct v4l2_qcom_camss_ife_crop ife_active_crop;
 	bool ife_ctrls_initialized;
 	struct camss_buffer dummy_buffer[2];
 	struct list_head sensor_pending;
 	struct camss_buffer *sensor_inflight;
 	u32 sensor_next;
+	s32 sensor_vblank;
 	struct vfe_sensor_state sensor_history[64];
 	u32 sensor_count;
 	void *dummy_memory;
@@ -148,6 +150,7 @@ struct vfe_hw_ops {
 	void (*vfe_buf_done)(struct vfe_device *vfe, int port_id);
 	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
 			      struct vfe_line *line);
+	void (*stats_stop)(struct vfe_line *line);
 };
 
 struct vfe_isr_ops {

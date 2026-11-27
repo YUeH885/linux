@@ -333,6 +333,43 @@ static void vfe_pix_scale(struct vfe_device *vfe, u32 base,
 	writel_relaxed(in_height - 1, vfe->base + VFE_SCALE_V_PAD(base));
 }
 
+static struct v4l2_qcom_camss_ife_crop vfe_pix_default_crop(const struct vfe_line *line)
+{
+	return (struct v4l2_qcom_camss_ife_crop) {
+		.compose_width = line->compose.width,
+		.compose_height = line->compose.height,
+		.left = line->crop.left,
+		.top = line->crop.top,
+	};
+}
+
+static void vfe_pix_write_crop(struct vfe_line *line,
+			      const struct v4l2_qcom_camss_ife_crop *crop)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	const struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+	u32 first = crop->left;
+	u32 last = first + line->crop.width - 1;
+	u32 top = crop->top;
+	u32 bottom = top + line->crop.height - 1;
+
+	vfe_pix_scale(vfe, VFE_FULL_SCALE_Y_CFG, sink->width, sink->height,
+		      crop->compose_width, crop->compose_height);
+	vfe_pix_scale(vfe, VFE_FULL_SCALE_C_CFG, sink->width, sink->height,
+		      crop->compose_width / 2, crop->compose_height / 2);
+
+	writel_relaxed((first << 16) | last,
+		       vfe->base + VFE_FULL_OUT_Y_CROP_PIXEL_CFG);
+	writel_relaxed((top << 16) | bottom,
+		       vfe->base + VFE_FULL_OUT_Y_CROP_LINE_CFG);
+	/* Chroma crop counts interleaved components horizontally. */
+	writel_relaxed((first << 16) | last,
+		       vfe->base + VFE_FULL_OUT_C_CROP_PIXEL_CFG);
+	writel_relaxed((top / 2 << 16) | (bottom / 2),
+		       vfe->base + VFE_FULL_OUT_C_CROP_LINE_CFG);
+	line->ife_active_crop = *crop;
+}
+
 static void vfe_ife_write_black_level(struct vfe_device *vfe,
 				      const struct v4l2_qcom_camss_ife_config *config)
 {
@@ -467,7 +504,7 @@ static int vfe_ife_config_validate(const struct v4l2_qcom_camss_ife_config *conf
 	    !config->flags ||
 	    config->flags & ~V4L2_QCOM_CAMSS_IFE_CONFIG_ALL ||
 	    (config->sensor_delay && config->sensor_delay != 2) || config->reserved1 ||
-	    config->reserved2 || config->sensor_timestamp)
+	    config->frame_duration_us || config->sensor_timestamp)
 		return -EINVAL;
 
 	if (config->flags & V4L2_QCOM_CAMSS_IFE_CONFIG_BLACK_LEVEL) {
@@ -598,11 +635,10 @@ static void vfe_sensor_record(struct vfe_line *line, u32 sequence,
 bool vfe_sensor_state(struct vfe_line *line, u32 sequence, struct vfe_sensor_state *state)
 {
 	struct vfe_device *vfe = to_vfe(line);
-	unsigned long flags;
 	u32 i, count;
 	bool found = false;
 
-	spin_lock_irqsave(&vfe->output_lock, flags);
+	lockdep_assert_held(&vfe->output_lock);
 	count = min_t(u32, line->sensor_count, ARRAY_SIZE(line->sensor_history));
 	for (i = 0; i < count; i++) {
 		*state = line->sensor_history[(line->sensor_count - i - 1) %
@@ -612,7 +648,6 @@ bool vfe_sensor_state(struct vfe_line *line, u32 sequence, struct vfe_sensor_sta
 			break;
 		}
 	}
-	spin_unlock_irqrestore(&vfe->output_lock, flags);
 	return found;
 }
 
@@ -637,6 +672,8 @@ static void vfe_apply_sensor(struct camss_video *video, struct camss_buffer *buf
 		vfe_sensor_record(line, start + buf->ife.sensor_delay, buf, false);
 	vfe_sensor_record(line, buf->input_sequence, buf, !ret);
 	line->sensor_next = sequence + 1;
+	if (!ret)
+		line->sensor_vblank = buf->sensor_vblank;
 	line->sensor_inflight = NULL;
 	if (!ret)
 		vfe_buf_add_pending(&line->output, buf);
@@ -657,6 +694,13 @@ static void vfe_sensor_schedule(struct vfe_line *line)
 	    list_empty(&line->sensor_pending) || READ_ONCE(video->requests_stopping))
 		return;
 	buf = list_first_entry(&line->sensor_pending, struct camss_buffer, queue);
+	/*
+	 * Keep the next frame-length change out of the last request's
+	 * exposure window. VTS may latch a frame before exposure and gain.
+	 */
+	if (buf->sensor_vblank != line->sensor_vblank &&
+	    line->output.sof_sequence - 1 == line->sensor_next)
+		return;
 	list_del(&buf->queue);
 	line->sensor_inflight = buf;
 	queue_work(video->request_wq, &buf->sensor_work);
@@ -665,6 +709,9 @@ static void vfe_sensor_schedule(struct vfe_line *line)
 static int vfe_prepare_request(struct camss_video *video, struct camss_buffer *buf)
 {
 	struct media_pad *pad = camss_find_sensor_pad(&video->vdev.entity);
+	struct vfe_line *line = container_of(video, struct vfe_line, video_out);
+	const struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+	const struct v4l2_qcom_camss_ife_crop *crop = &buf->ife_crop;
 	struct v4l2_ctrl_handler *handler;
 	struct v4l2_ctrl_ref *ref;
 	unsigned int controls = 0;
@@ -679,6 +726,14 @@ static int vfe_prepare_request(struct camss_video *video, struct camss_buffer *b
 	ret = vfe_ife_config_validate(&buf->ife);
 	if (ret)
 		return ret;
+	if (buf->ife_crop_valid &&
+	    (((crop->compose_width | crop->compose_height | crop->left | crop->top) & 1) ||
+	     crop->compose_width < line->compose.width ||
+	     crop->compose_height < line->compose.height ||
+	     crop->compose_width > sink->width || crop->compose_height > sink->height ||
+	     crop->left + line->crop.width > crop->compose_width ||
+	     crop->top + line->crop.height > crop->compose_height))
+		return -ERANGE;
 	if (!pad)
 		return -ENOLINK;
 	buf->sensor_controls = media_entity_to_v4l2_subdev(pad->entity)->ctrl_handler;
@@ -694,13 +749,15 @@ static int vfe_prepare_request(struct camss_video *video, struct camss_buffer *b
 			buf->sensor_exposure = *ref->p_req.p_s32;
 		else if (ref->ctrl->id == V4L2_CID_ANALOGUE_GAIN)
 			buf->sensor_gain = *ref->p_req.p_s32;
+		else if (ref->ctrl->id == V4L2_CID_VBLANK)
+			buf->sensor_vblank = *ref->p_req.p_s32;
 		else
 			ret = -EINVAL;
 		controls++;
 	}
 	mutex_unlock(handler->lock);
 	v4l2_ctrl_request_hdl_put(handler);
-	return controls == 2 ? ret : -EINVAL;
+	return controls == 3 ? ret : -EINVAL;
 }
 
 static int vfe_start_requests(struct camss_video *video)
@@ -739,6 +796,7 @@ static int vfe_start_requests(struct camss_video *video)
 	buf->sensor_applied = true;
 	vfe_sensor_record(line, 0, buf, true);
 	line->sensor_next = 0;
+	line->sensor_vblank = buf->sensor_vblank;
 	line->dummy_buffer[0].input_sequence = 1;
 	vfe_buf_add_pending(&line->output, &line->dummy_buffer[0]);
 	return 0;
@@ -760,9 +818,13 @@ static void vfe_stop_requests(struct camss_video *video)
 static void vfe_ife_apply_request(struct vfe_line *line, struct camss_buffer *buf)
 {
 	struct vfe_device *vfe = to_vfe(line);
+	struct v4l2_qcom_camss_ife_crop crop = buf->ife_crop_valid ?
+		buf->ife_crop : vfe_pix_default_crop(line);
 
 	buf->ife.frame_sequence = buf->input_sequence;
 	vfe_ife_write_config(line, &buf->ife, buf->ife.flags, false);
+	if (memcmp(&crop, &line->ife_active_crop, sizeof(crop)))
+		vfe_pix_write_crop(line, &crop);
 	vfe->res->hw_ops->reg_update(vfe, line->id);
 	buf->ife_applied = true;
 }
@@ -780,10 +842,12 @@ static void vfe_ife_schedule_request(struct vfe_line *line)
 			return;
 		}
 	}
-	if (!list_empty(&output->pending_bufs)) {
-		buf = list_first_entry(&output->pending_bufs, struct camss_buffer, queue);
+	list_for_each_entry(buf, &output->pending_bufs, queue) {
+		if ((s32)(buf->input_sequence - output->sof_sequence) < 0)
+			continue;
 		if (buf->ife_valid && buf->input_sequence == output->sof_sequence)
 			vfe_ife_apply_request(line, buf);
+		break;
 	}
 }
 
@@ -815,10 +879,14 @@ static struct camss_buffer *vfe_next_request_buffer(struct vfe_line *line, u32 s
 	struct camss_buffer *buf;
 	unsigned int i;
 
-	if (!list_empty(&output->pending_bufs)) {
+	while (!list_empty(&output->pending_bufs)) {
 		buf = list_first_entry(&output->pending_bufs, struct camss_buffer, queue);
+		if ((s32)(buf->input_sequence - sequence) > 0)
+			break;
+		buf = vfe_buf_get_pending(output);
 		if (buf->input_sequence == sequence)
-			return vfe_buf_get_pending(output);
+			return buf;
+		camss_buffer_done(buf, VB2_BUF_STATE_ERROR);
 	}
 	/* Two active addresses keep the DMA input phase defined through queue gaps. */
 	for (i = 0; i < ARRAY_SIZE(line->dummy_buffer); i++) {
@@ -836,6 +904,27 @@ static const struct v4l2_ctrl_ops vfe_ife_ctrl_ops = {
 	.s_ctrl = vfe_ife_config_s_ctrl,
 };
 
+static int vfe_ife_crop_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	const struct v4l2_qcom_camss_ife_crop *crop = ctrl->p_new.p;
+
+	if (!crop->compose_width || !crop->compose_height ||
+	    ((crop->compose_width | crop->compose_height | crop->left | crop->top) & 1))
+		return -ERANGE;
+
+	return 0;
+}
+
+static int vfe_ife_crop_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	return -EINVAL;
+}
+
+static const struct v4l2_ctrl_ops vfe_ife_crop_ctrl_ops = {
+	.try_ctrl = vfe_ife_crop_try_ctrl,
+	.s_ctrl = vfe_ife_crop_s_ctrl,
+};
+
 int vfe_ife_ctrl_init(struct vfe_line *line)
 {
 	static const struct v4l2_ctrl_config config_ctrl = {
@@ -847,6 +936,19 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 		.max = U8_MAX,
 		.step = 1,
 		.dims = { sizeof(struct v4l2_qcom_camss_ife_config) },
+		.elem_size = sizeof(u8),
+		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
+			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
+	};
+	static const struct v4l2_ctrl_config crop_ctrl = {
+		.ops = &vfe_ife_crop_ctrl_ops,
+		.id = V4L2_CID_QCOM_CAMSS_IFE_CROP,
+		.name = "IFE request crop",
+		.type = V4L2_CTRL_TYPE_U8,
+		.min = 0,
+		.max = U8_MAX,
+		.step = 1,
+		.dims = { sizeof(struct v4l2_qcom_camss_ife_crop) },
 		.elem_size = sizeof(u8),
 		.flags = V4L2_CTRL_FLAG_HAS_PAYLOAD |
 			 V4L2_CTRL_FLAG_EXECUTE_ON_WRITE,
@@ -870,10 +972,11 @@ int vfe_ife_ctrl_init(struct vfe_line *line)
 	       sizeof(tuning->ccm_q7));
 	memcpy(tuning->gamma, vfe_ife_default_gamma, sizeof(tuning->gamma));
 
-	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 1);
+	ret = v4l2_ctrl_handler_init(&line->ife_ctrls, 2);
 	if (ret)
 		return ret;
 	control = v4l2_ctrl_new_custom(&line->ife_ctrls, &config_ctrl, line);
+	v4l2_ctrl_new_custom(&line->ife_ctrls, &crop_ctrl, line);
 	ret = line->ife_ctrls.error;
 	if (!ret)
 		ret = v4l2_ctrl_s_ctrl_compound(control, V4L2_CTRL_TYPE_U8, tuning);
@@ -911,6 +1014,7 @@ static int vfe_pix_program(struct vfe_line *line)
 	};
 	struct vfe_device *vfe = to_vfe(line);
 	struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+	struct v4l2_qcom_camss_ife_crop crop = vfe_pix_default_crop(line);
 	u32 first, last, top, bottom;
 	u32 val;
 	int pattern;
@@ -968,25 +1072,7 @@ static int vfe_pix_program(struct vfe_line *line)
 	writel_relaxed(0x02000000, vfe->base + VFE_COLOR_XFORM_CH0_COEFF_CFG_0 + 40);
 	writel_relaxed(0x03ff0000, vfe->base + VFE_COLOR_XFORM_CH0_COEFF_CFG_0 + 44);
 
-	vfe_pix_scale(vfe, VFE_FULL_SCALE_Y_CFG, sink->width, sink->height,
-		      line->compose.width, line->compose.height);
-	vfe_pix_scale(vfe, VFE_FULL_SCALE_C_CFG, sink->width, sink->height,
-		      line->compose.width / 2, line->compose.height / 2);
-
-	first = line->crop.left;
-	last = first + line->crop.width - 1;
-	top = line->crop.top;
-	bottom = top + line->crop.height - 1;
-
-	writel_relaxed((first << 16) | last,
-		       vfe->base + VFE_FULL_OUT_Y_CROP_PIXEL_CFG);
-	writel_relaxed((top << 16) | bottom,
-		       vfe->base + VFE_FULL_OUT_Y_CROP_LINE_CFG);
-	/* Chroma crop counts interleaved components horizontally. */
-	writel_relaxed((first << 16) | last,
-		       vfe->base + VFE_FULL_OUT_C_CROP_PIXEL_CFG);
-	writel_relaxed((top / 2 << 16) | (bottom / 2),
-		       vfe->base + VFE_FULL_OUT_C_CROP_LINE_CFG);
+	vfe_pix_write_crop(line, &crop);
 	writel_relaxed(FULL_OUT_CLAMP_MAX(255),
 		       vfe->base + VFE_FULL_OUT_Y_CH0_CLAMP_CFG);
 	writel_relaxed(FULL_OUT_CLAMP_MAX(255),
@@ -1383,6 +1469,13 @@ static int vfe_enable(struct vfe_line *line)
 	return 0;
 
 error_enable_output:
+	if (line->id == VFE_LINE_PIX && !vfe->res->is_lite && line->stats) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		vfe_17x_stats_stop(line);
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+	}
 	vfe_put_output(line);
 
 error_get_output:
@@ -1406,7 +1499,7 @@ static void vfe_isr_sof(struct vfe_device *vfe, enum vfe_line_id line_id)
 	struct vfe_output *output = &line->output;
 	struct v4l2_event event = { .type = V4L2_EVENT_FRAME_SYNC };
 	unsigned long flags;
-	u64 timestamp = ktime_get_boottime_ns();
+	u64 timestamp = ktime_get_ns();
 	unsigned int i;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
@@ -1416,9 +1509,16 @@ static void vfe_isr_sof(struct vfe_device *vfe, enum vfe_line_id line_id)
 			for (i = 0; i < ARRAY_SIZE(output->buf); i++) {
 				struct camss_buffer *buf = output->buf[i];
 
-				if (buf && !buf->dummy &&
-				    buf->input_sequence == event.u.frame_sync.frame_sequence)
+				if (!buf || buf->dummy)
+					continue;
+
+				if (buf->input_sequence == event.u.frame_sync.frame_sequence)
 					buf->ife.sensor_timestamp = timestamp;
+				else if (buf->input_sequence + 1 == event.u.frame_sync.frame_sequence &&
+					 buf->ife.sensor_timestamp)
+					buf->ife.frame_duration_us = div_u64(timestamp -
+									buf->ife.sensor_timestamp,
+									NSEC_PER_USEC);
 			}
 			vfe_ife_schedule_request(line);
 			vfe_sensor_schedule(line);
@@ -1476,6 +1576,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	}
 	line = &vfe->line[vfe->wm_output_map[wm]];
 	output = &line->output;
+	if (output->state != VFE_OUTPUT_ON)
+		goto out_unlock;
 
 	ready_buf = output->buf[0];
 	if (!ready_buf) {
@@ -1573,11 +1675,20 @@ static long vfe_get_request_sequence(struct camss_video *video, u32 *sequence)
 	} else if (!video->vb2_q.uses_requests) {
 		ret = -EOPNOTSUPP;
 	} else {
+		s32 prev_vblank = line->sensor_inflight ?
+				  line->sensor_inflight->sensor_vblank :
+				  line->sensor_vblank;
+
 		*sequence = max(line->output.sof_sequence + 1, line->sensor_next + 2);
 		if (line->sensor_inflight)
 			(*sequence)++;
-		list_for_each_entry(buf, &line->sensor_pending, queue)
+		list_for_each_entry(buf, &line->sensor_pending, queue) {
+			if (buf->sensor_vblank != prev_vblank) {
+				(*sequence)++;
+				prev_vblank = buf->sensor_vblank;
+			}
 			(*sequence)++;
+		}
 	}
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 	return ret;
@@ -1618,4 +1729,5 @@ const struct vfe_hw_ops vfe_ops_170 = {
 	.vfe_wm_start = vfe_wm_start,
 	.vfe_wm_stop = vfe_wm_stop,
 	.vfe_wm_update = vfe_wm_update,
+	.stats_stop = vfe_17x_stats_stop,
 };

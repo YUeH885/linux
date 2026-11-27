@@ -508,6 +508,8 @@ void vfe_buf_done(struct vfe_device *vfe, int wm)
 		goto out_unlock;
 	}
 	output = &vfe->line[vfe->wm_output_map[wm]].output;
+	if (output->state != VFE_OUTPUT_ON)
+		goto out_unlock;
 
 	ready_buf = output->buf[0];
 	if (!ready_buf) {
@@ -867,9 +869,14 @@ static void vfe_disable_output(struct vfe_line *line)
 	unsigned int i;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
-	for (i = 0; i < output->wm_num; i++)
+	for (i = 0; i < output->wm_num; i++) {
 		vfe->res->hw_ops->vfe_wm_stop(vfe, output->wm_idx[i]);
+		vfe_release_wm(vfe, output->wm_idx[i]);
+	}
+	if (vfe->res->hw_ops->stats_stop)
+		vfe->res->hw_ops->stats_stop(line);
 	output->gen2.active_num = 0;
+	output->state = VFE_OUTPUT_OFF;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 }
 
@@ -884,13 +891,11 @@ int vfe_disable(struct vfe_line *line)
 	struct vfe_device *vfe = to_vfe(line);
 	int ret = 0;
 
-	vfe_disable_output(line);
-
-	vfe_put_output(line);
-
 	mutex_lock(&vfe->stream_lock);
 
-	if (--vfe->stream_count == 0)
+	vfe_disable_output(line);
+
+	if (!--vfe->stream_count)
 		ret = vfe_reset(vfe);
 
 	mutex_unlock(&vfe->stream_lock);
@@ -1246,11 +1251,11 @@ int vfe_flush_buffers(struct camss_video *vid,
 
 	output = &line->output;
 
-	if (vid->vb2_q.uses_requests) {
+	if (vid->vb2_q.uses_requests)
 		WRITE_ONCE(vid->requests_stopping, true);
-		synchronize_irq(vfe->irq);
+	synchronize_irq(vfe->irq);
+	if (vid->vb2_q.uses_requests)
 		flush_workqueue(vid->request_wq);
-	}
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
 	vfe_buf_flush_pending(&output->pending_bufs, state);
@@ -1663,6 +1668,10 @@ static int vfe_set_format(struct v4l2_subdev *sd,
 	struct vfe_line *line = v4l2_get_subdevdata(sd);
 	struct v4l2_mbus_framefmt *format;
 
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
+	    vb2_is_busy(&line->video_out.vb2_q))
+		return -EBUSY;
+
 	format = __vfe_get_format(line, sd_state, fmt->pad, fmt->which);
 	if (format == NULL)
 		return -EINVAL;
@@ -1787,6 +1796,10 @@ static int vfe_set_selection(struct v4l2_subdev *sd,
 
 	if (!vfe_is_pix_line(line))
 		return -EINVAL;
+
+	if (sel->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
+	    vb2_is_busy(&line->video_out.vb2_q))
+		return -EBUSY;
 
 	if (sel->target == V4L2_SEL_TGT_COMPOSE &&
 		sel->pad == MSM_VFE_PAD_SINK) {

@@ -454,12 +454,22 @@ static irqreturn_t csid_isr(int irq, void *dev)
 	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
 	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
 
-	/* Read and clear IRQ status for each enabled RDI channel */
-	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
-		if (csid->phy.en_vc & BIT(i)) {
-			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
-			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
+		u32 status, clear;
+
+		if (!(csid->phy.en_vc & BIT(i)))
+			continue;
+
+		if (!csid_is_lite(csid) && i == MSM_CSID_MAX_SRC_STREAMS - 1) {
+			status = CSID_PXL_IRQ_STATUS;
+			clear = CSID_PXL_IRQ_CLEAR;
+		} else {
+			status = CSID_CSI2_RDIN_IRQ_STATUS(i);
+			clear = CSID_CSI2_RDIN_IRQ_CLEAR(i);
 		}
+		val = readl_relaxed(csid->base + status);
+		writel_relaxed(val, csid->base + clear);
+	}
 
 	val = 1 << IRQ_CMD_CLEAR;
 	writel_relaxed(val, csid->base + CSID_IRQ_CMD);
